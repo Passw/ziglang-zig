@@ -298,6 +298,28 @@ test "File.stat on a File that is a symlink returns Kind.sym_link" {
     }.impl);
 }
 
+test "Dir.statFile on a symlink" {
+    const io = testing.io;
+
+    try testWithAllSupportedPathTypes(struct {
+        fn impl(ctx: *TestContext) !void {
+            const dir_target_path = try ctx.transformPath("test_file");
+            try ctx.dir.writeFile(io, .{
+                .sub_path = dir_target_path,
+                .data = "Some test content",
+            });
+
+            try setupSymlink(io, ctx.dir, dir_target_path, "symlink", .{});
+
+            const file_stat = try ctx.dir.statFile(io, "test_file", .{ .follow_symlinks = false });
+            try testing.expectEqual(File.Kind.file, file_stat.kind);
+
+            const link_stat = try ctx.dir.statFile(io, "symlink", .{ .follow_symlinks = false });
+            try testing.expectEqual(File.Kind.sym_link, link_stat.kind);
+        }
+    }.impl);
+}
+
 test "openDir" {
     const io = testing.io;
 
