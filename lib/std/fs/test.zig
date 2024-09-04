@@ -1843,6 +1843,33 @@ test "read from locked file" {
     }.impl);
 }
 
+test "use Lock.none to unlock files" {
+    if (native_os == .wasi) return error.SkipZigTest;
+
+    const io = testing.io;
+
+    var tmp = tmpDir(.{});
+    defer tmp.cleanup();
+
+    // Create a locked file.
+    const test_file = try tmp.dir.createFile(io, "test_file", .{ .lock = .exclusive, .lock_nonblocking = true });
+    defer test_file.close(io);
+
+    // Attempt to unlock the file via fs.lock with Lock.none.
+    try test_file.lock(io, .none);
+
+    // Attempt to open the file now that it should be unlocked.
+    const test_file2 = try tmp.dir.openFile(io, "test_file", .{ .lock = .exclusive, .lock_nonblocking = true });
+    defer test_file2.close(io);
+
+    // Make sure Lock.none works with tryLock as well.
+    try testing.expect(try test_file2.tryLock(io, .none));
+
+    // Attempt to open the file since it should be unlocked again.
+    const test_file3 = try tmp.dir.openFile(io, "test_file", .{ .lock = .exclusive, .lock_nonblocking = true });
+    test_file3.close(io);
+}
+
 test "walker" {
     const io = testing.io;
 
