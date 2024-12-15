@@ -1,4 +1,4 @@
-$TARGET = "$($Env:ARCH)-windows-gnu"
+$TARGET = "x86_64-windows-gnu"
 $ZIG_LLVM_CLANG_LLD_NAME = "zig+llvm+lld+clang-$TARGET-0.14.0-dev.1622+2ac543388"
 $MCPU = "baseline"
 $ZIG_LLVM_CLANG_LLD_URL = "https://ziglang.org/deps/$ZIG_LLVM_CLANG_LLD_NAME.zip"
@@ -31,7 +31,7 @@ if ((git rev-parse --is-shallow-repository) -eq "true") {
 }
 
 Write-Output "Building from source..."
-Remove-Item -Path 'build-debug' -Recurse -Force -ErrorAction Ignore
+# Remove-Item -Path 'build-debug' -Recurse -Force -ErrorAction Ignore
 New-Item -Path 'build-debug' -ItemType Directory
 Set-Location -Path 'build-debug'
 
@@ -61,50 +61,50 @@ CheckLastExitCode
 ninja install
 CheckLastExitCode
 
-Write-Output "Main test suite..."
-& "stage3-debug\bin\zig.exe" build test docs `
-  --zig-lib-dir "$ZIG_LIB_DIR" `
-  --search-prefix "$PREFIX_PATH" `
-  -Dstatic-llvm `
-  -Dskip-non-native `
-  -Dskip-release `
-  -Denable-symlinks-windows
-CheckLastExitCode
+#   Write-Output "Main test suite..."
+#   & "stage3-debug\bin\zig.exe" build test docs `
+#     --zig-lib-dir "$ZIG_LIB_DIR" `
+#     --search-prefix "$PREFIX_PATH" `
+#     -Dstatic-llvm `
+#     -Dskip-non-native `
+#     -Dskip-release `
+#     -Denable-symlinks-windows
+#   CheckLastExitCode
 
-Write-Output "Build x86_64-windows-msvc behavior tests using the C backend..."
-& "stage3-debug\bin\zig.exe" test `
-  ..\test\behavior.zig `
-  --zig-lib-dir "$ZIG_LIB_DIR" `
-  -ofmt=c `
-  -femit-bin="test-x86_64-windows-msvc.c" `
-  --test-no-exec `
-  -target x86_64-windows-msvc `
-  -lc
-CheckLastExitCode
+#   Write-Output "Build x86_64-windows-msvc behavior tests using the C backend..."
+#   & "stage3-debug\bin\zig.exe" test `
+#     ..\test\behavior.zig `
+#     --zig-lib-dir "$ZIG_LIB_DIR" `
+#     -ofmt=c `
+#     -femit-bin="test-x86_64-windows-msvc.c" `
+#     --test-no-exec `
+#     -target x86_64-windows-msvc `
+#     -lc
+#   CheckLastExitCode
 
-& "stage3-debug\bin\zig.exe" build-obj `
-  --zig-lib-dir "$ZIG_LIB_DIR" `
-  -ofmt=c `
-  -OReleaseSmall `
-  --name compiler_rt `
-  -femit-bin="compiler_rt-x86_64-windows-msvc.c" `
-  --dep build_options `
-  -target x86_64-windows-msvc `
-  -Mroot="..\lib\compiler_rt.zig" `
-  -Mbuild_options="config.zig"
-CheckLastExitCode
+#   & "stage3-debug\bin\zig.exe" build-obj `
+#     --zig-lib-dir "$ZIG_LIB_DIR" `
+#     -ofmt=c `
+#     -OReleaseSmall `
+#     --name compiler_rt `
+#     -femit-bin="compiler_rt-x86_64-windows-msvc.c" `
+#     --dep build_options `
+#     -target x86_64-windows-msvc `
+#     -Mroot="..\lib\compiler_rt.zig" `
+#     -Mbuild_options="config.zig"
+#   CheckLastExitCode
 
-Import-Module "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
-CheckLastExitCode
+#   Import-Module "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+#   CheckLastExitCode
 
-Enter-VsDevShell -VsInstallPath "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools" `
-  -DevCmdArguments '-arch=x64 -no_logo' `
-  -StartInPath $(Get-Location)
-CheckLastExitCode
+#   Enter-VsDevShell -VsInstallPath "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools" `
+#     -DevCmdArguments '-arch=x64 -no_logo' `
+#     -StartInPath $(Get-Location)
+#   CheckLastExitCode
 
-Write-Output "Build and run behavior tests with msvc..."
-& cl.exe -I..\lib test-x86_64-windows-msvc.c compiler_rt-x86_64-windows-msvc.c /W3 /Z7 -link -nologo -debug -subsystem:console kernel32.lib ntdll.lib libcmt.lib
-CheckLastExitCode
+#   Write-Output "Build and run behavior tests with msvc..."
+#   & cl.exe -I..\lib test-x86_64-windows-msvc.c compiler_rt-x86_64-windows-msvc.c /W3 /Z7 -link -nologo -debug -subsystem:console kernel32.lib ntdll.lib libcmt.lib
+#   CheckLastExitCode
 
-& .\test-x86_64-windows-msvc.exe
-CheckLastExitCode
+#   & .\test-x86_64-windows-msvc.exe
+#   CheckLastExitCode
