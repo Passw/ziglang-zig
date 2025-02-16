@@ -8,7 +8,7 @@ on:
     - cron:  '0 23 * * *'
 
 env:
-  GITHUB_TOKEN: ${{ secrets.github_token }}
+  GITHUB_TOKEN: ${{ secrets.YOUR_SECRET_NAME }}
 
 jobs:
   build:
