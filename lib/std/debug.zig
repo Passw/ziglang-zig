@@ -75,7 +75,7 @@ pub fn TargetInfo(os: std.Target.Os.Tag, arch: std.Target.Cpu.Arch) type {
             else => @import("debug/SelfInfo/Elf.zig"),
         },
         .macho => @import("debug/SelfInfo/MachO.zig"),
-        .plan9, .spirv, .wasm => void,
+        .plan9, .spirv, .wasm, .spork8 => void,
         .c, .hex, .raw => unreachable,
     };
 }

@@ -1319,6 +1319,9 @@ pub const CompilerBackend = enum(u64) {
     /// The reference implementation self-hosted compiler of Zig, using the
     /// loongarch backend.
     stage2_loongarch = 13,
+    /// The Zig Software Foundation self-hosted implementation of Zig. Backend
+    /// originally contributed by Ben Anderman in 2026.
+    zsf_spork8 = 14,
 
     _,
 };

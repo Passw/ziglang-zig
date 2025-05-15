@@ -4720,6 +4720,7 @@ pub fn initializeLLVMTarget(io: Io, arch: std.Target.Cpu.Arch) void {
         .propeller,
         .sh,
         .sheb,
+        .spork8,
         .x86_16,
         .xtensaeb,
         => unreachable,

@@ -4042,6 +4042,7 @@ pub fn atomicPtrAlignment(
     const target = zcu.getTarget();
     const max_atomic_bits: u16 = switch (target.cpu.arch) {
         .ez80,
+        .spork8,
         => 8,
 
         .aarch64,
@@ -4695,6 +4696,10 @@ pub fn callconvSupported(zcu: *Zcu, cc: std.lang.CallingConvention) union(enum) 
         },
         .stage2_loongarch => switch (cc) {
             .loongarch64_lp64, .loongarch32_ilp32, .naked => true,
+            else => false,
+        },
+        .zsf_spork8 => switch (cc) {
+            .naked => true,
             else => false,
         },
     };

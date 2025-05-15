@@ -60,6 +60,10 @@ pub const Env = enum {
     /// - `zig build-* -fincremental -fno-llvm -fno-lld -target loongarch(32/64)-linux --listen=-`
     @"loongarch-linux",
 
+    /// - sema
+    /// - `zig build-* -fno-llvm -fno-lld -target spork8-* --listen=-`
+    spork8,
+
     pub inline fn supports(comptime dev_env: Env, comptime feature: Feature) bool {
         return switch (dev_env) {
             .full => true,
@@ -102,6 +106,7 @@ pub const Env = enum {
                 .sparc64_backend,
                 .spirv_backend,
                 .loongarch_backend,
+                .spork8_backend,
                 .lld_linker,
                 .coff_linker,
                 .coff2_linker,
@@ -112,6 +117,7 @@ pub const Env = enum {
                 .wasm_linker,
                 .spirv_linker,
                 .plan9_linker,
+                .spork8_linker,
                 .jit_command,
                 => true,
                 .cc_command,
@@ -239,6 +245,14 @@ pub const Env = enum {
                 => true,
                 else => Env.sema.supports(feature),
             },
+            .spork8 => switch (feature) {
+                .stdio_listen,
+                .incremental,
+                .spork8_backend,
+                .spork8_linker,
+                => true,
+                else => Env.sema.supports(feature),
+            },
         };
     }
 
@@ -303,6 +317,7 @@ pub const Feature = enum {
     sparc64_backend,
     spirv_backend,
     loongarch_backend,
+    spork8_backend,
 
     lld_linker,
     coff_linker,
@@ -314,6 +329,7 @@ pub const Feature = enum {
     wasm_linker,
     spirv_linker,
     plan9_linker,
+    spork8_linker,
 };
 
 /// Makes the code following the call to this function unreachable if `feature` is disabled.
