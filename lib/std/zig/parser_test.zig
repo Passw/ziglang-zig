@@ -6822,6 +6822,22 @@ test "zig fmt: canonicalize stray backslashes in identifiers" {
     );
 }
 
+test "zig fmt: error set with extra newline before comma" {
+    try testTransform(
+        \\const E = error{
+        \\    A
+        \\
+        \\    ,
+        \\};
+        \\
+    ,
+        \\const E = error{
+        \\    A,
+        \\};
+        \\
+    );
+}
+
 test "recovery: top level" {
     try testError(
         \\test "" {inline}
