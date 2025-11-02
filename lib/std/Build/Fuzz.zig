@@ -136,6 +136,14 @@ pub fn start(fuzz: *Fuzz) void {
     }
 
     for (fuzz.run_steps) |run| {
+        if (run.fuzz_tests.items.len > 1) {
+            // Multiple fuzzWorkerRuns currently cause race-conditions
+            // since they use the same Run step. See #30969
+            fatal("--fuzz not yet implemented for multiple tests", .{});
+        }
+    }
+
+    for (fuzz.run_steps) |run| {
         for (run.fuzz_tests.items) |unit_test_index| {
             assert(run.rebuilt_executable != null);
             fuzz.group.async(io, fuzzWorkerRun, .{ fuzz, run, unit_test_index });
