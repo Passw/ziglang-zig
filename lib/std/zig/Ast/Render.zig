@@ -3448,22 +3448,6 @@ fn tokenSliceForRender(tree: Ast, token_index: Ast.TokenIndex) []const u8 {
     return ret;
 }
 
-fn writeStringLiteralAsIdentifier(r: *Render, token_index: Ast.TokenIndex) !usize {
-    const tree = r.tree;
-    const ais = r.ais;
-    assert(tree.tokenTag(token_index) == .string_literal);
-    const lexeme = tokenSliceForRender(tree, token_index);
-    const unquoted = lexeme[1..][0 .. lexeme.len - 2];
-    if (std.zig.isValidId(unquoted)) {
-        try ais.writeAll(unquoted);
-        return unquoted.len;
-    } else {
-        try ais.writeByte('@');
-        try ais.writeAll(lexeme);
-        return lexeme.len + 1;
-    }
-}
-
 fn hasTrailingComment(tree: Ast, t: Ast.TokenIndex) bool {
     const start = tree.tokenStart(t) + tree.tokenSlice(t).len;
     const between = tree.source[start..tree.tokenStart(t + 1)];
