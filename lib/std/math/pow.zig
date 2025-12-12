@@ -124,7 +124,9 @@ pub fn pow(comptime T: type, x: T, y: T) T {
         return math.nan(T);
     }
     if (yi >= 1 << (@typeInfo(T).float.bits - 1)) {
-        return @exp(y * @log(x));
+        // yi is a large even int, so the result is always positive
+        // and the sign of x doesn't matter
+        return @exp(y * @log(@abs(x)));
     }
 
     // a = a1 * 2^ae
@@ -208,6 +210,7 @@ test pow {
     try expect(math.approxEqAbs(f32, pow(f32, 1.5, 3.3), 3.811546, epsilon));
     try expect(math.approxEqAbs(f32, pow(f32, 37.45, 3.3), 155736.703125, epsilon));
     try expect(math.approxEqAbs(f32, pow(f32, 89.123, 3.3), 2722489.5, epsilon));
+    try expect(math.approxEqAbs(f32, pow(f32, -1.0, 1e10), 1.0, epsilon));
 
     try expect(math.approxEqAbs(f64, pow(f64, 0.0, 3.3), 0.0, epsilon));
     try expect(math.approxEqAbs(f64, pow(f64, 0.8923, 3.3), 0.686572, epsilon));
@@ -215,6 +218,7 @@ test pow {
     try expect(math.approxEqAbs(f64, pow(f64, 1.5, 3.3), 3.811546, epsilon));
     try expect(math.approxEqAbs(f64, pow(f64, 37.45, 3.3), 155736.7160616, epsilon));
     try expect(math.approxEqAbs(f64, pow(f64, 89.123, 3.3), 2722490.231436, epsilon));
+    try expect(math.approxEqAbs(f64, pow(f64, -1.0, 1e20), 1.0, epsilon));
 }
 
 test "special" {
@@ -265,4 +269,6 @@ test "overflow" {
     try expect(math.isNegativeInf(pow(f64, -2, (1 << 32) + 1)));
     try expect(pow(f64, 0.5, 1 << 45) == 0);
     try expect(math.isPositiveInf(pow(f64, 0.5, -(1 << 45))));
+    try expect(math.isPositiveInf(pow(f64, -2, 1 << 64)));
+    try expect(pow(f64, 0.5, 1 << 64) == 0);
 }
