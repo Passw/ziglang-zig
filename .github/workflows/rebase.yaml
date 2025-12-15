@@ -1,0 +1,51 @@
+name: Rebase against original repo
+
+#on: [push]
+on:
+  schedule:
+    # https://pubs.opengroup.org/onlinepubs/9699919799/utilities/crontab.html#tag_20_25_07
+    # * is a special character in YAML so you have to quote this string
+    - cron:  '0 23 * * *'
+
+env:
+  GITHUB_TOKEN: ${{ secrets.YOUR_SECRET_NAME }}
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        fetch-depth: 0
+    - name: Git configuration
+      run: |
+        git config user.name "Passw"
+        git config user.email "Passw_Passw@163.com"
+        git remote set-url origin https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git
+        git remote -vv
+        git branch -vv
+        git log --oneline | wc -l
+    - name: RUN `git pull master -r`
+      run: |
+        pwd
+        git remote add up https://codeberg.org/ziglang/zig.git
+        pwd
+        git log --oneline | wc -l
+        git log --oneline origin/master..master | wc -l
+        git status
+        git remote -vv
+        git log --oneline | wc -l
+        git fetch up master
+        #git log master..origin/master
+        #git log origin/master..master
+        #git log master..up/master
+        #git log up/master..master
+        git pull up master -r
+        git log --oneline | wc -l
+        pwd
+        git status
+        git push origin HEAD:master --force
+        pwd
+        git status
