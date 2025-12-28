@@ -5224,7 +5224,7 @@ fn loadObject(
                     .first_symbol_reloc = .none,
                     .first_got_reloc = .none,
                 };
-                elf.synth_prog_node.increaseEstimatedTotalItems(1);
+                elf.input_prog_node.increaseEstimatedTotalItems(1);
             }
             var symmap: std.ArrayList(Symbol.Id) = .empty;
             defer symmap.deinit(gpa);
@@ -7105,8 +7105,10 @@ pub fn flush(
 ) link.Error!void {
     const comp = elf.base.comp;
     const diags = &comp.link_diags;
-    _ = prog_node;
     _ = arena;
+
+    const sub_prog_node = prog_node.start("ELF Flush", 0);
+    defer sub_prog_node.end();
 
     if (comp.config.output_mode == .Exe) {
         var any_undef = false;
