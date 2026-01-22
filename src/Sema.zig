@@ -32729,16 +32729,10 @@ fn resolvePeerTypesInner(
         .fixed_float => {
             var opt_cur_ty: ?Type = null;
 
-            for (peer_tys, peer_vals, 0..) |opt_ty, opt_val, i| {
+            for (peer_tys, 0..) |opt_ty, i| {
                 const ty = opt_ty orelse continue;
                 switch (ty.zigTypeTag(zcu)) {
-                    .comptime_float, .comptime_int => {},
-                    .int => {
-                        if (opt_val == null) return .{ .conflict = .{
-                            .peer_idx_a = strat_reason,
-                            .peer_idx_b = i,
-                        } };
-                    },
+                    .comptime_float, .comptime_int, .int => {},
                     .float => {
                         if (opt_cur_ty) |cur_ty| {
                             if (cur_ty.eql(ty, zcu)) continue;
@@ -32765,7 +32759,28 @@ fn resolvePeerTypesInner(
 
             // Note that fixed_float is only chosen if there is at least one fixed-width float peer,
             // so opt_cur_ty must be non-null.
-            return .{ .success = opt_cur_ty.? };
+            const cur_ty = opt_cur_ty.?;
+
+            // Ensure that any integer peers can coerce safely to the resulting float.
+            for (peer_tys, peer_vals, 0..) |opt_ty, opt_val, i| {
+                const ty = opt_ty orelse continue;
+                switch (ty.zigTypeTag(zcu)) {
+                    .comptime_float, .comptime_int, .float => {},
+                    .int => {
+                        if (opt_val != null) continue;
+                        const int_info = ty.intInfo(zcu);
+                        const int_precision = int_info.bits - @intFromBool(int_info.signedness == .signed);
+                        if (int_precision > cur_ty.floatSignificandBits(target))
+                            return .{ .conflict = .{
+                                .peer_idx_a = strat_reason,
+                                .peer_idx_b = i,
+                            } };
+                    },
+                    else => unreachable, // Previous pass returned on this branch.
+                }
+            }
+
+            return .{ .success = cur_ty };
         },
 
         .tuple => {
