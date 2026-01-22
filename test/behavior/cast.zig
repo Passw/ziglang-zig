@@ -175,6 +175,7 @@ test "type coercion from int to float" {
             var int: Int = std.math.minInt(Int);
             while (int < std.math.maxInt(Int)) : (int += 1)
                 try value(Float, int);
+            try value(Float, int); // max
         }
 
         // Check that the min and max values of the integer type can safely be
@@ -201,6 +202,8 @@ test "type coercion from int to float" {
 
     try check.edgeValues(f128, u113);
     try check.edgeValues(f128, i114);
+
+    try check.value(c_longdouble, @as(u1, 0)); // Smoke test - size varies by target.
 
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest;

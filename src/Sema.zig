@@ -27774,15 +27774,7 @@ fn coerceExtra(
                     }
                     const int_info = inst_ty.intInfo(zcu);
                     const int_precision = int_info.bits - @intFromBool(int_info.signedness == .signed);
-                    const float_precision: u8 = switch (dest_ty.toIntern()) {
-                        .f16_type => 11,
-                        .f32_type => 24,
-                        .f64_type => 53,
-                        .f80_type => 64,
-                        .f128_type => 113,
-                        else => unreachable,
-                    };
-                    if (int_precision <= float_precision) {
+                    if (int_precision <= dest_ty.floatSignificandBits(target)) {
                         try sema.requireRuntimeBlock(block, inst_src, null);
                         return block.addTyOp(.float_from_int, dest_ty, inst);
                     }
