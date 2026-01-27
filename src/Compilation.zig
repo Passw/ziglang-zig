@@ -5870,7 +5870,11 @@ fn updateCObject(comp: *Compilation, c_object: *CObject, c_obj_prog_node: std.Pr
                         log.err("clang failed with stderr: {s}", .{stderr});
                         return comp.failCObj(c_object, "clang terminated with signal {t}", .{sig});
                     },
-                    else => {
+                    .stopped => |sig| {
+                        log.err("clang failed with stderr: {s}", .{stderr});
+                        return comp.failCObj(c_object, "clang stopped with signal {d}", .{sig});
+                    },
+                    .unknown => {
                         log.err("clang terminated with stderr: {s}", .{stderr});
                         return comp.failCObj(c_object, "clang terminated unexpectedly", .{});
                     },
@@ -6297,7 +6301,11 @@ fn spawnZigRc(
             log.err("zig rc signaled {t} with stderr:\n{s}", .{ sig, stderr });
             return comp.failWin32Resource(win32_resource, "zig rc terminated unexpectedly", .{});
         },
-        else => {
+        .stopped => |sig| {
+            log.err("zig rc stopped {d} with stderr:\n{s}", .{ sig, stderr });
+            return comp.failWin32Resource(win32_resource, "zig rc terminated unexpectedly", .{});
+        },
+        .unknown => {
             log.err("zig rc terminated with stderr:\n{s}", .{stderr});
             return comp.failWin32Resource(win32_resource, "zig rc terminated unexpectedly", .{});
         },
