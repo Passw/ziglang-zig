@@ -1109,25 +1109,7 @@ pub const Socket = struct {
         if (n != messages.len) return err.?;
     }
 
-    pub const ReceiveError = error{
-        /// Insufficient memory or other resource internal to the operating system.
-        SystemResources,
-        /// Per-process limit on the number of open file descriptors has been reached.
-        ProcessFdQuotaExceeded,
-        /// System-wide limit on the total number of open files has been reached.
-        SystemFdQuotaExceeded,
-        /// Local end has been shut down on a connection-oriented socket, or
-        /// the socket was never connected.
-        SocketUnconnected,
-        /// The socket type requires that message be sent atomically, and the
-        /// size of the message to be sent made this impossible. The message
-        /// was not transmitted, or was partially transmitted.
-        MessageOversize,
-        /// Network connection was unexpectedly closed by sender.
-        ConnectionResetByPeer,
-        /// The local network interface used to reach the destination is offline.
-        NetworkDown,
-    } || Io.UnexpectedError || Io.Cancelable;
+    pub const ReceiveError = Io.Operation.NetReceive.Error || Io.Cancelable;
 
     /// Waits for data. Connectionless.
     ///
@@ -1145,7 +1127,7 @@ pub const Socket = struct {
         return message;
     }
 
-    pub const ReceiveTimeoutError = ReceiveError || Io.Timeout.Error;
+    pub const ReceiveTimeoutError = ReceiveError || Io.Timeout.Error || Io.ConcurrentError;
 
     /// Waits for data. Connectionless.
     ///
@@ -1161,7 +1143,12 @@ pub const Socket = struct {
         timeout: Io.Timeout,
     ) ReceiveTimeoutError!IncomingMessage {
         var message: IncomingMessage = .init;
-        const maybe_err, const count = io.vtable.netReceive(io.userdata, s.handle, (&message)[0..1], buffer, .{}, timeout);
+        const maybe_err, const count = (try io.operateTimeout(.{ .net_receive = .{
+            .socket = s.handle,
+            .message_buffer = (&message)[0..1],
+            .data_buffer = buffer,
+            .flags = .{},
+        } }, timeout)).net_receive;
         if (maybe_err) |err| return err;
         assert(1 == count);
         return message;
@@ -1186,7 +1173,13 @@ pub const Socket = struct {
         flags: ReceiveFlags,
         timeout: Io.Timeout,
     ) struct { ?ReceiveTimeoutError, usize } {
-        return io.vtable.netReceive(io.userdata, s.handle, message_buffer, data_buffer, flags, timeout);
+        const result = io.operateTimeout(.{ .net_receive = .{
+            .socket_handle = s.handle,
+            .message_buffer = message_buffer,
+            .data_buffer = data_buffer,
+            .flags = flags,
+        } }, timeout) catch |err| return .{ err, 0 };
+        return result.net_receive;
     }
 
     pub const CreatePairError = error{
