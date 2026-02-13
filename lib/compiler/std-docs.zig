@@ -425,7 +425,7 @@ fn buildWasmBinary(
         },
         .stopped => |sig| {
             std.log.err(
-                "the following command stopped unexpectedly with signal {d}:\n{s}",
+                "the following command stopped unexpectedly with signal {t}:\n{s}",
                 .{ sig, try std.Build.Step.allocPrintCmd(arena, .inherit, null, argv.items) },
             );
             return error.WasmCompilationFailed;

@@ -2017,7 +2017,7 @@ fn processOneTarget(io: Io, job: Job) void {
                 std.process.exit(1);
             },
             .stopped => |sig| {
-                std.debug.print("llvm-tblgen stopped with signal {d}\n", .{sig});
+                std.debug.print("llvm-tblgen stopped with signal {t}\n", .{sig});
                 std.process.exit(1);
             },
             .unknown => {

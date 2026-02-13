@@ -1142,7 +1142,7 @@ fn run(
             return error.ChildCrashed;
         },
         .stopped => |sig| {
-            std.debug.print("{s}\nThe following command stopped with signal {d}:\n", .{ result.stderr, sig });
+            std.debug.print("{s}\nThe following command stopped with signal {t}:\n", .{ result.stderr, sig });
             dumpArgs(args);
             return error.ChildCrashed;
         },

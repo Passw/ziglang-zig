@@ -1195,7 +1195,7 @@ fn detectAndroidApiLevel(io: Io) !u32 {
             return error.ApiLevelQueryFailed;
         },
         .stopped => |sig| {
-            std.log.err("getprop stopped abnormally with signal: {d}", .{sig});
+            std.log.err("getprop stopped abnormally with signal: {t}", .{sig});
             return error.ApiLevelQueryFailed;
         },
         .unknown => {

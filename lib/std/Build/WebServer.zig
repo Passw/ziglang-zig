@@ -683,7 +683,7 @@ fn buildClientWasm(ws: *WebServer, arena: Allocator, optimize: std.builtin.Optim
         },
         .stopped => |sig| {
             log.err(
-                "the following command stopped unexpectedly with signal {d}:\n{s}",
+                "the following command stopped unexpectedly with signal {t}:\n{s}",
                 .{ sig, try Build.Step.allocPrintCmd(arena, .inherit, null, argv.items) },
             );
             return error.WasmCompilationFailed;

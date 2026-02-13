@@ -4582,7 +4582,7 @@ fn runOrTest(
                 },
                 .stopped => |sig| {
                     const cmd = try std.mem.join(arena, " ", argv.items);
-                    fatal("the following command stopped with signal {d}:\n{s}", .{ sig, cmd });
+                    fatal("the following command stopped with signal {t}:\n{s}", .{ sig, cmd });
                 },
                 .unknown => {
                     process.exit(1);
@@ -5637,7 +5637,7 @@ fn cmdBuild(gpa: Allocator, arena: Allocator, io: Io, args: []const []const u8, 
             },
             .stopped => |sig| {
                 const cmd = try std.mem.join(arena, " ", child_argv.items);
-                fatal("the following build command stopped with signal {d}:\n{s}", .{ sig, cmd });
+                fatal("the following build command stopped with signal {t}:\n{s}", .{ sig, cmd });
             },
             .unknown => {
                 const cmd = try std.mem.join(arena, " ", child_argv.items);
@@ -5943,7 +5943,7 @@ fn jitCmdInner(
         },
         .stopped => |sig| {
             const cmd = try std.mem.join(arena, " ", child_argv.items);
-            fatal("the following build command stopped with signal {d}:\n{s}", .{ sig, cmd });
+            fatal("the following build command stopped with signal {t}:\n{s}", .{ sig, cmd });
         },
         .unknown => {
             const cmd = try std.mem.join(arena, " ", child_argv.items);

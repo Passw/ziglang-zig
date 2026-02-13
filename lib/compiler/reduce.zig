@@ -292,7 +292,7 @@ fn termToInteresting(term: std.process.Child.Term) Interestingness {
             return .boring;
         },
         .stopped => |sig| {
-            std.debug.print("interestingness check stopped with signal {d}\n", .{sig});
+            std.debug.print("interestingness check stopped with signal {t}\n", .{sig});
             return .boring;
         },
         .unknown => {

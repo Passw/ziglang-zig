@@ -728,7 +728,7 @@ pub fn handleChildProcessTerm(s: *Step, term: std.process.Child.Term) error{ Mak
     return switch (term) {
         .exited => |code| if (code != 0) s.fail("process exited with error code {d}", .{code}),
         .signal => |sig| s.fail("process terminated with signal {t}", .{sig}),
-        .stopped => |sig| s.fail("process stopped with signal {d}", .{sig}),
+        .stopped => |sig| s.fail("process stopped with signal {t}", .{sig}),
         .unknown => s.fail("process terminated unexpectedly", .{}),
     };
 }

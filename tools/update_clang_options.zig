@@ -699,7 +699,6 @@ pub fn main(init: std.process.Init) !void {
         .unknown => {
             fatal("llvm-tblgen crashed\n", .{});
         },
-        else => fatal("llvm-tblgen crashed", .{}),
     };
 
     const parsed = try json.parseFromSlice(json.Value, arena, json_text, .{});
