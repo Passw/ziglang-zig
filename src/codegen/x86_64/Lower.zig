@@ -565,7 +565,7 @@ fn generic(lower: *Lower, inst: Mir.Inst) Error!void {
         .rmi => &.{
             .{ .reg = inst.data.rix.r1 },
             .{ .mem = lower.mem(1, inst.data.rix.payload) },
-            .{ .imm = if (std.math.cast(u8, inst.data.rix.i)) |u| .u(u) else .s(inst.data.rix.i) },
+            .{ .imm = .s(inst.data.rix.i) },
         },
         .rmi_s, .rmi_u => &.{
             .{ .reg = inst.data.rx.r1 },
