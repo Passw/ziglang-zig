@@ -1073,6 +1073,35 @@ test "@mulWithOverflow bitsize > 32" {
     try testMulWithOverflow(i63, minInt(i63), minInt(i63), 0, 1);
 }
 
+fn captureMultiply(comptime T: type) type {
+    return struct {
+        opA: T,
+
+        fn returnA(self: @This()) anyerror!T {
+            return self.opA;
+        }
+
+        fn testMutiplyWithOverflow(self: @This(), comptime b: T, expected: T) !void {
+            const a = try self.returnA();
+
+            const c = a * b;
+            try expectEqual(expected, c);
+        }
+    };
+}
+
+test "Multiply unwrap error * immediate" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_riscv64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest;
+
+    try (captureMultiply(i8){ .opA = 3 }).testMutiplyWithOverflow(-1, -3);
+    try (captureMultiply(i16){ .opA = 3 }).testMutiplyWithOverflow(-1, -3);
+    try (captureMultiply(i32){ .opA = 3 }).testMutiplyWithOverflow(-1, -3);
+    try (captureMultiply(i64){ .opA = 3 }).testMutiplyWithOverflow(-1, -3);
+}
+
 test "@mulWithOverflow bitsize 128 bits" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_c) return error.SkipZigTest;
