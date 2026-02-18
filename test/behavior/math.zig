@@ -1073,21 +1073,11 @@ test "@mulWithOverflow bitsize > 32" {
     try testMulWithOverflow(i63, minInt(i63), minInt(i63), 0, 1);
 }
 
-fn captureMultiply(comptime T: type) type {
-    return struct {
-        opA: T,
+fn testMutiplyUnwrap(comptime T: type, wrapped_a: anyerror!T, comptime b: T, expected: T) !void {
+    const a = try wrapped_a;
 
-        fn returnA(self: @This()) anyerror!T {
-            return self.opA;
-        }
-
-        fn testMutiplyWithOverflow(self: @This(), comptime b: T, expected: T) !void {
-            const a = try self.returnA();
-
-            const c = a * b;
-            try expectEqual(expected, c);
-        }
-    };
+    const c = a * b;
+    try expect(expected == c);
 }
 
 test "Multiply unwrap error * immediate" {
@@ -1096,10 +1086,10 @@ test "Multiply unwrap error * immediate" {
     if (builtin.zig_backend == .stage2_riscv64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest;
 
-    try (captureMultiply(i8){ .opA = 3 }).testMutiplyWithOverflow(-1, -3);
-    try (captureMultiply(i16){ .opA = 3 }).testMutiplyWithOverflow(-1, -3);
-    try (captureMultiply(i32){ .opA = 3 }).testMutiplyWithOverflow(-1, -3);
-    try (captureMultiply(i64){ .opA = 3 }).testMutiplyWithOverflow(-1, -3);
+    try testMutiplyUnwrap(i8, 3, -1, -3);
+    try testMutiplyUnwrap(i16, 3, -1, -3);
+    try testMutiplyUnwrap(i32, 3, -1, -3);
+    try testMutiplyUnwrap(i64, 3, -1, -3);
 }
 
 test "@mulWithOverflow bitsize 128 bits" {
