@@ -225,7 +225,10 @@ pub fn realloc(uncasted_memory: []u8, alignment: Alignment, new_len: usize, may_
     if (new_size_aligned == page_aligned_len)
         return memory.ptr;
 
-    if (posix.MREMAP != void) {
+    // When the stack grows down, only use `mremap` if the allocation may move.
+    // Otherwise, we might grow the allocation and intrude on virtual address
+    // space which we want to keep available to the stack.
+    if (posix.MREMAP != void and (stack_direction == .up or may_move)) {
         // TODO: if the next_mmap_addr_hint is within the remapped range, update it
         const new_memory = posix.mremap(memory.ptr, page_aligned_len, new_size_aligned, .{ .MAYMOVE = may_move }, null) catch return null;
         return new_memory.ptr;
