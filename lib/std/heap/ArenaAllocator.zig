@@ -213,28 +213,18 @@ pub fn reset(arena: *ArenaAllocator, mode: ResetMode) bool {
 const Node = struct {
     /// Only meant to be accessed indirectly via the methods supplied by this type,
     /// except if the node is owned by the thread accessing it.
-    /// Must always be an even number to accomodate `resize_bit`.
-    size: usize,
-    /// Concurrent accesses to `end_index` can be monotonic since it is only ever
-    /// incremented in `alloc` and `resize` after being compared to `size`.
+    /// Must always be an even number to accomodate `resize` bit.
+    size: Size,
+    /// Concurrent accesses to `end_index` can be monotonic as long as its value
+    /// is compared to a version of `size` before using it to access memory.
     /// Since `size` can only grow and never shrink, memory access depending on
-    /// `end_index` can never be OOB.
+    /// any `end_index` <= any `size` can never be OOB.
     end_index: usize,
     /// This field should only be accessed if the node is owned by the thread
     /// accessing it.
     next: ?*Node,
 
     const resize_bit: usize = 1;
-
-    fn loadEndIndex(node: *Node) usize {
-        return @atomicLoad(usize, &node.end_index, .monotonic);
-    }
-
-    /// Returns `null` on success and previous value on failure.
-    fn trySetEndIndex(node: *Node, from: usize, to: usize) ?usize {
-        assert(from != to); // check this before attempting to set `end_index`!
-        return @cmpxchgWeak(usize, &node.end_index, from, to, .monotonic, .monotonic);
-    }
 
     fn loadBuf(node: *Node) []u8 {
         // monotonic is fine since `size` can only ever grow, so the buffer returned
@@ -326,19 +316,22 @@ fn alloc(ctx: *anyopaque, n: usize, alignment: Alignment, ret_addr: usize) ?[*]u
     retry: while (true) {
         const first_node: ?*Node, const prev_size: usize = first_node: {
             const node = cur_first_node orelse break :first_node .{ null, 0 };
-            var end_index = node.loadEndIndex();
-            while (true) {
-                const buf = node.loadBuf();
-                const aligned_index = alignedIndex(buf.ptr, end_index, alignment);
+            const buf = node.loadBuf();
 
-                if (aligned_index + n > buf.len) {
-                    break :first_node .{ node, buf.len };
-                }
+            // To avoid using a CAS loop in the hot path we atomically increase
+            // `end_index` by a large enough amount to be able to always provide
+            // the required alignment within the reserved memory. To recover the
+            // space this potentially wastes we try to subtract the 'overshoot'
+            // with a single cmpxchg afterwards, which may fail.
 
-                end_index = node.trySetEndIndex(end_index, aligned_index + n) orelse {
-                    return buf[aligned_index..][0..n].ptr;
-                };
-            }
+            const alignable = n + alignment.toByteUnits() - 1;
+            const end_index = @atomicRmw(usize, &node.end_index, .Add, alignable, .monotonic);
+            const aligned_index = alignedIndex(buf.ptr, end_index, alignment);
+            assert(end_index + alignable >= aligned_index + n);
+            _ = @cmpxchgStrong(usize, &node.end_index, end_index + alignable, aligned_index + n, .monotonic, .monotonic);
+
+            if (aligned_index + n > buf.len) break :first_node .{ node, buf.len };
+            return buf[aligned_index..][0..n].ptr;
         };
 
         resize: {
@@ -352,7 +345,7 @@ fn alloc(ctx: *anyopaque, n: usize, alignment: Alignment, ret_addr: usize) ?[*]u
             defer node.endResize(size);
 
             const buf = allocated_slice[@sizeOf(Node)..];
-            const end_index = node.loadEndIndex();
+            const end_index = @atomicLoad(usize, &node.end_index, .monotonic);
             const aligned_index = alignedIndex(buf.ptr, end_index, alignment);
             const new_size = mem.alignForward(usize, @sizeOf(Node) + aligned_index + n, 2);
 
@@ -403,55 +396,59 @@ fn alloc(ctx: *anyopaque, n: usize, alignment: Alignment, ret_addr: usize) ?[*]u
                 }
             }
 
-            var best_fit_prev: ?*Node = null;
-            var best_fit: ?*Node = null;
-            var best_fit_diff: usize = std.math.maxInt(usize);
+            const candidate: ?*Node, const prev: ?*Node = candidate: {
+                var best_fit_prev: ?*Node = null;
+                var best_fit: ?*Node = null;
+                var best_fit_diff: usize = std.math.maxInt(usize);
 
-            var it_prev: ?*Node = null;
-            var it = free_list;
-            const candidate: ?*Node, const prev: ?*Node = find: while (it) |node| : ({
-                it_prev = it;
-                it = node.next;
-            }) {
-                last_free = node;
-                assert(node.size & Node.resize_bit == 0);
-                const buf = node.allocatedSliceUnsafe()[@sizeOf(Node)..];
-                const aligned_index = alignedIndex(buf.ptr, 0, alignment);
-                if (buf.len < aligned_index + n) {
+                var it_prev: ?*Node = null;
+                var it = free_list;
+                while (it) |node| : ({
+                    it_prev = it;
+                    it = node.next;
+                }) {
+                    last_free = node;
+                    assert(node.size & Node.resize_bit == 0);
+                    const buf = node.allocatedSliceUnsafe()[@sizeOf(Node)..];
+                    const aligned_index = alignedIndex(buf.ptr, 0, alignment);
+
+                    if (aligned_index + n <= buf.len) {
+                        break :candidate .{ node, it_prev };
+                    }
+
                     const diff = aligned_index + n - buf.len;
                     if (diff <= best_fit_diff) {
                         best_fit_prev = it_prev;
                         best_fit = node;
                         best_fit_diff = diff;
                     }
-                    continue :find;
-                }
-                break :find .{ node, it_prev };
-            } else {
-                // Ideally we want to use all nodes in `free_list` eventually,
-                // so even if none fit we'll try to resize the one that was the
-                // closest to being large enough.
-                if (best_fit) |node| {
-                    const allocated_slice = node.allocatedSliceUnsafe();
-                    const buf = allocated_slice[@sizeOf(Node)..];
-                    const aligned_index = alignedIndex(buf.ptr, 0, alignment);
-                    const new_size = mem.alignForward(usize, @sizeOf(Node) + aligned_index + n, 2);
+                } else {
+                    // Ideally we want to use all nodes in `free_list` eventually,
+                    // so even if none fit we'll try to resize the one that was the
+                    // closest to being large enough.
+                    if (best_fit) |node| {
+                        const allocated_slice = node.allocatedSliceUnsafe();
+                        const buf = allocated_slice[@sizeOf(Node)..];
+                        const aligned_index = alignedIndex(buf.ptr, 0, alignment);
+                        const new_size = mem.alignForward(usize, @sizeOf(Node) + aligned_index + n, 2);
 
-                    if (arena.child_allocator.rawResize(allocated_slice, .of(Node), new_size, @returnAddress())) {
-                        node.size = new_size;
-                        break :find .{ node, best_fit_prev };
+                        if (arena.child_allocator.rawResize(allocated_slice, .of(Node), new_size, @returnAddress())) {
+                            node.size = new_size;
+                            break :candidate .{ node, best_fit_prev };
+                        }
                     }
+                    break :from_free_list;
                 }
-                break :from_free_list;
             };
 
-            it = last_free;
-            while (it) |node| : (it = node.next) {
-                last_free = node;
+            {
+                var it = last_free;
+                while (it) |node| : (it = node.next) {
+                    last_free = node;
+                }
             }
 
             const node = candidate orelse break :from_free_list;
-
             const old_next = node.next;
 
             const buf = node.allocatedSliceUnsafe()[@sizeOf(Node)..];
@@ -533,7 +530,7 @@ fn resize(ctx: *anyopaque, buf: []u8, alignment: Alignment, new_len: usize, ret_
     const node = arena.loadFirstNode().?;
     const cur_buf_ptr = @as([*]u8, @ptrCast(node)) + @sizeOf(Node);
 
-    var cur_end_index = node.loadEndIndex();
+    var cur_end_index = @atomicLoad(usize, &node.end_index, .monotonic);
     while (true) {
         if (cur_buf_ptr + cur_end_index != buf.ptr + buf.len) {
             // It's not the most recent allocation, so it cannot be expanded,
@@ -554,7 +551,14 @@ fn resize(ctx: *anyopaque, buf: []u8, alignment: Alignment, new_len: usize, ret_
             return false;
         };
 
-        cur_end_index = node.trySetEndIndex(cur_end_index, new_end_index) orelse {
+        cur_end_index = @cmpxchgWeak(
+            usize,
+            &node.end_index,
+            cur_end_index,
+            new_end_index,
+            .monotonic,
+            .monotonic,
+        ) orelse {
             return true;
         };
     }
@@ -580,14 +584,22 @@ fn free(ctx: *anyopaque, buf: []u8, alignment: Alignment, ret_addr: usize) void 
     const node = arena.loadFirstNode().?;
     const cur_buf_ptr: [*]u8 = @as([*]u8, @ptrCast(node)) + @sizeOf(Node);
 
-    var cur_end_index = node.loadEndIndex();
+    var cur_end_index = @atomicLoad(usize, &node.end_index, .monotonic);
     while (true) {
         if (cur_buf_ptr + cur_end_index != buf.ptr + buf.len) {
             // Not the most recent allocation; we cannot free it.
             return;
         }
         const new_end_index = cur_end_index - buf.len;
-        cur_end_index = node.trySetEndIndex(cur_end_index, new_end_index) orelse {
+
+        cur_end_index = @cmpxchgWeak(
+            usize,
+            &node.end_index,
+            cur_end_index,
+            new_end_index,
+            .monotonic,
+            .monotonic,
+        ) orelse {
             return;
         };
     }
