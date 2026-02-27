@@ -4072,3 +4072,20 @@ test "ctz" {
     try testing.expectEqual(0, limb_max_squared.ctz(@bitSizeOf(Limb) * 2));
     try testing.expectEqual(0, limb_max_squared.ctz(@bitSizeOf(Limb) * 2 + 1));
 }
+
+test "log2" {
+    var a = try Managed.init(testing.allocator);
+    defer a.deinit();
+
+    try a.setString(2, "1");
+    try testing.expectEqual(0, a.toConst().log2());
+
+    try a.setString(2, "1111011");
+    try testing.expectEqual(6, a.toConst().log2());
+
+    try a.setString(2, "10100111011101010");
+    try testing.expectEqual(16, a.toConst().log2());
+
+    try a.setString(16, "a22d71c87a9ce406da4f5895f9f3cc3d603192baf6c8a2b5c32649d0465bf188fe799b3618085e49d71bdaec01");
+    try testing.expectEqual(359, a.toConst().log2());
+}

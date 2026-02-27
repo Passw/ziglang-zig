@@ -2670,6 +2670,11 @@ pub const Const = struct {
         }
         return @min(result, bits);
     }
+
+    /// Calculate the base 2 logarithm, rounded down.
+    pub fn log2(a: Const) Limb {
+        return a.limbs.len * @bitSizeOf(Limb) - 1 - @clz(a.limbs[a.limbs.len - 1]);
+    }
 };
 
 /// An arbitrary-precision big integer along with an allocator which manages the memory.
