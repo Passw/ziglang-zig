@@ -15,7 +15,6 @@ const math = std.math;
 const maxInt = std.math.maxInt;
 const UnexpectedError = std.posix.UnexpectedError;
 
-pub const advapi32 = @import("windows/advapi32.zig");
 pub const kernel32 = @import("windows/kernel32.zig");
 pub const ntdll = @import("windows/ntdll.zig");
 pub const ws2_32 = @import("windows/ws2_32.zig");
