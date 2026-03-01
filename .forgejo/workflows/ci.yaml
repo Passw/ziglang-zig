@@ -17,26 +17,26 @@ permissions:
   contents: read
 
 jobs:
-  aarch64-freebsd-debug:
-    runs-on: [self-hosted, aarch64-freebsd]
-    steps:
-      - name: Checkout
-        uses: https://codeberg.org/ziglang/checkout@19af6bac491e2534a4687a50ee84fa7f13258d28
-        with:
-          fetch-depth: 0
-      - name: Build and Test
-        run: sh ci/aarch64-freebsd-debug.sh
-        timeout-minutes: 240
-  aarch64-freebsd-release:
-    runs-on: [self-hosted, aarch64-freebsd]
-    steps:
-      - name: Checkout
-        uses: https://codeberg.org/ziglang/checkout@19af6bac491e2534a4687a50ee84fa7f13258d28
-        with:
-          fetch-depth: 0
-      - name: Build and Test
-        run: sh ci/aarch64-freebsd-release.sh
-        timeout-minutes: 180
+  #aarch64-freebsd-debug:
+  #  runs-on: [self-hosted, aarch64-freebsd]
+  #  steps:
+  #    - name: Checkout
+  #      uses: https://codeberg.org/ziglang/checkout@19af6bac491e2534a4687a50ee84fa7f13258d28
+  #      with:
+  #        fetch-depth: 0
+  #    - name: Build and Test
+  #      run: sh ci/aarch64-freebsd-debug.sh
+  #      timeout-minutes: 240
+  #aarch64-freebsd-release:
+  #  runs-on: [self-hosted, aarch64-freebsd]
+  #  steps:
+  #    - name: Checkout
+  #      uses: https://codeberg.org/ziglang/checkout@19af6bac491e2534a4687a50ee84fa7f13258d28
+  #      with:
+  #        fetch-depth: 0
+  #    - name: Build and Test
+  #      run: sh ci/aarch64-freebsd-release.sh
+  #      timeout-minutes: 180
 
   aarch64-linux-debug:
     runs-on: [self-hosted, aarch64-linux]
