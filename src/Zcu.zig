@@ -3686,6 +3686,11 @@ pub const ImportResult = struct {
 pub fn resetUnit(zcu: *Zcu, unit: AnalUnit) void {
     const gpa = zcu.comp.gpa;
 
+    if (!dev.env.supports(.incremental)) {
+        // This is the first time `unit` is being analyzed, so there is no stale data to clear.
+        return;
+    }
+
     // Compile errors
     if (zcu.failed_analysis.fetchSwapRemove(unit)) |kv| {
         kv.value.destroy(gpa);
@@ -4309,7 +4314,7 @@ fn resolveReferencesInner(zcu: *Zcu) Allocator.Error!std.AutoArrayHashMapUnmanag
                 });
                 const gop = try units.getOrPut(gpa, other);
                 if (gop.found_existing) break :queue_paired;
-                gop.value_ptr.* = units.values()[unit_idx]; // same reference location
+                gop.value_ptr.* = units.values()[unit_idx - 1]; // same reference location
             }
 
             refs_log.debug("handle unit '{f}'", .{zcu.fmtAnalUnit(unit)});

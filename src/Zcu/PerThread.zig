@@ -1075,7 +1075,6 @@ pub fn ensureMemoizedStateUpToDate(
     const prev_failed = zcu.failed_analysis.contains(unit) or zcu.transitive_failed_analysis.contains(unit);
 
     if (was_outdated) {
-        dev.check(.incremental);
         zcu.resetUnit(unit);
     } else {
         if (prev_failed) return error.AnalysisFail;
@@ -1193,10 +1192,7 @@ pub fn ensureComptimeUnitUpToDate(pt: Zcu.PerThread, cu_id: InternPool.ComptimeU
     const was_outdated = zcu.clearOutdatedState(anal_unit);
 
     if (was_outdated) {
-        // `was_outdated` can be true in the initial update for comptime units, so this isn't a `dev.check`.
-        if (dev.env.supports(.incremental)) {
-            zcu.resetUnit(anal_unit);
-        }
+        zcu.resetUnit(anal_unit);
     } else {
         // We can trust the current information about this unit.
         if (zcu.failed_analysis.contains(anal_unit)) return error.AnalysisFail;
@@ -1366,10 +1362,7 @@ pub fn ensureTypeLayoutUpToDate(
     };
 
     if (was_outdated) {
-        // `was_outdated` is true in the initial update, so this isn't a `dev.check`.
-        if (dev.env.supports(.incremental)) {
-            zcu.resetUnit(anal_unit);
-        }
+        zcu.resetUnit(anal_unit);
         // For types, we already know that we have to invalidate all dependees.
         // TODO: we actually *could* detect whether everything was the same. should we bother?
         try zcu.markDependeeOutdated(.marked_po, .{ .type_layout = ty.toIntern() });
@@ -1492,10 +1485,7 @@ pub fn ensureStructDefaultsUpToDate(
     };
 
     if (was_outdated) {
-        // `was_outdated` is true in the initial update, so this isn't a `dev.check`.
-        if (dev.env.supports(.incremental)) {
-            zcu.resetUnit(anal_unit);
-        }
+        zcu.resetUnit(anal_unit);
         // For types, we already know that we have to invalidate all dependees.
         // TODO: we actually *could* detect whether everything was the same. should we bother?
         try zcu.markDependeeOutdated(.marked_po, .{ .struct_defaults = ty.toIntern() });
@@ -1609,7 +1599,6 @@ pub fn ensureNavValUpToDate(
         zcu.transitive_failed_analysis.contains(anal_unit);
 
     if (was_outdated) {
-        dev.check(.incremental);
         zcu.resetUnit(anal_unit);
     } else {
         // We can trust the current information about this unit.
@@ -1893,6 +1882,30 @@ fn analyzeNavVal(
         }
     }
 
+    // We're about to resolve the value of the Nav. This causes the information about what the value
+    // was last update to be lost; therefore, if the `nav_ty` is currently out of date, it would
+    // incorrectly think it was unchanged when eventually analyzed. To avoid this, we need to detect
+    // that case and invalidate the dependee right now.
+    if (zcu.clearOutdatedState(.wrap(.{ .nav_ty = nav_id }))) {
+        assert(zir_decl.type_body == null); // otherwise we already resolved it with `Sema.ensureNavResolved`
+        zcu.resetUnit(.wrap(.{ .nav_ty = nav_id }));
+        try pt.addDependency(.wrap(.{ .nav_ty = nav_id }), .{ .nav_val = nav_id }); // inferred type depends on the value (that's us!)
+        if (comp.debugIncremental()) {
+            const info = try zcu.incremental_debug_state.getUnitInfo(gpa, .wrap(.{ .nav_ty = nav_id }));
+            info.last_update_gen = zcu.generation;
+            info.deps.clearRetainingCapacity();
+        }
+        const type_changed: bool = switch (old_nav.status) {
+            .unresolved => true,
+            .type_resolved => |old| old.type != nav_ty.toIntern(),
+            .fully_resolved => |old| ip.typeOf(old.val) != nav_ty.toIntern(),
+        };
+        if (type_changed) {
+            try zcu.markDependeeOutdated(.marked_po, .{ .nav_ty = nav_id });
+        } else {
+            try zcu.markPoDependeeUpToDate(.{ .nav_ty = nav_id });
+        }
+    }
     ip.resolveNavValue(io, nav_id, .{
         .val = nav_val.toIntern(),
         .is_const = is_const,
@@ -1930,10 +1943,10 @@ fn analyzeNavVal(
         try zcu.ensureFuncBodyAnalysisQueued(nav_val.toIntern());
     }
 
-    switch (old_nav.status) {
-        .unresolved, .type_resolved => return .{ .val_changed = true },
-        .fully_resolved => |old| return .{ .val_changed = old.val != nav_val.toIntern() },
-    }
+    return switch (old_nav.status) {
+        .unresolved, .type_resolved => .{ .val_changed = true },
+        .fully_resolved => |old| .{ .val_changed = old.val != nav_val.toIntern() },
+    };
 }
 
 pub fn ensureNavTypeUpToDate(
@@ -1973,7 +1986,6 @@ pub fn ensureNavTypeUpToDate(
         zcu.transitive_failed_analysis.contains(anal_unit);
 
     if (was_outdated) {
-        dev.check(.incremental);
         zcu.resetUnit(anal_unit);
     } else {
         // We can trust the current information about this unit.
@@ -2107,12 +2119,29 @@ fn analyzeNavType(
 
     const type_body = zir_decl.type_body orelse {
         // There is no type annotation, so we just need to use the declaration's value.
+        // If the value had already been re-analyzed, it would have resolved the `nav_ty` unit as
+        // either outdated or up-to-date. So we know that `old_nav` does contain information from
+        // the previous update. As such, after this call, we will be able to determine whether the
+        // type changed.
         try sema.ensureNavResolved(&block, init_src, nav_id, .fully);
-        // We don't actually know what the type of this Nav was before it was resolved, so we just
-        // have to assume we were outdated. This isn't too bad, because assuming there was also no
-        // type annotation last update, we should only be re-analyzed if the value changes (it's our
-        // only dependency), or if there was a dependency loop.
-        return .{ .type_changed = true };
+        const new = ip.getNav(nav_id).status.fully_resolved;
+        const new_is_extern_decl = ip.indexToKey(new.val) == .@"extern";
+        const changed = switch (old_nav.status) {
+            .unresolved => true,
+            .type_resolved => |r| r.type != ip.typeOf(new.val) or
+                r.alignment != new.alignment or
+                r.@"linksection" != new.@"linksection" or
+                r.@"addrspace" != new.@"addrspace" or
+                r.is_const != new.is_const or
+                r.is_extern_decl != new_is_extern_decl,
+            .fully_resolved => |r| ip.typeOf(r.val) != ip.typeOf(new.val) or
+                r.alignment != new.alignment or
+                r.@"linksection" != new.@"linksection" or
+                r.@"addrspace" != new.@"addrspace" or
+                r.is_const != new.is_const or
+                (old_nav.getExtern(ip) != null) != new_is_extern_decl,
+        };
+        return .{ .type_changed = changed };
     };
 
     block.comptime_reason = .{ .reason = .{
@@ -2210,7 +2239,6 @@ pub fn ensureFuncBodyUpToDate(
     const prev_failed = zcu.failed_analysis.contains(anal_unit) or zcu.transitive_failed_analysis.contains(anal_unit);
 
     if (was_outdated) {
-        dev.check(.incremental);
         zcu.resetUnit(anal_unit);
     } else {
         // We can trust the current information about this function.
@@ -2292,7 +2320,7 @@ fn analyzeFuncBody(
 
     var air = try pt.analyzeFuncBodyInner(func_index, reason);
     var air_owned = true;
-    errdefer if (air_owned) air.deinit(gpa);
+    defer if (air_owned) air.deinit(gpa);
 
     const ies_outdated = !func.analysisUnordered(ip).inferred_error_set or
         func.resolvedErrorSetUnordered(ip) != old_resolved_ies;
