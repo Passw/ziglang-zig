@@ -315,8 +315,10 @@ fn pushFreeList(arena: *ArenaAllocator, first: *Node, last: *Node) void {
 }
 
 fn alignedIndex(buf_ptr: [*]u8, end_index: usize, alignment: Alignment) usize {
-    return end_index +
-        mem.alignPointerOffset(buf_ptr + end_index, alignment.toByteUnits()).?;
+    // Wrapping arithmetic to avoid overflows since `end_index` isn't bounded by
+    // `size`. This is always ok since the max alignment in byte units is also
+    // the max value of `usize` so wrapped values are correctly aligned anyway.
+    return alignment.forward(@intFromPtr(buf_ptr) +% end_index) -% @intFromPtr(buf_ptr);
 }
 
 fn alloc(ctx: *anyopaque, n: usize, alignment: Alignment, ret_addr: usize) ?[*]u8 {
