@@ -56,6 +56,7 @@ stage3-debug/bin/zig build test docs \
   -Dlldb=$HOME/deps/lldb-zig/Debug-e0a42bb34/bin/lldb \
   -Dlibc-test-path=$HOME/deps/libc-test-f2bac77 \
   -fqemu \
+  --libc-runtimes $HOME/deps/glibc-2.43-musl-1.2.5 \
   -fwasmtime \
   -Dstatic-llvm \
   -Dskip-freebsd \
