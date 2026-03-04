@@ -539,91 +539,79 @@ fn alloc(ctx: *anyopaque, n: usize, alignment: Alignment, ret_addr: usize) ?[*]u
     }
 }
 
-fn resize(ctx: *anyopaque, buf: []u8, alignment: Alignment, new_len: usize, ret_addr: usize) bool {
+fn resize(ctx: *anyopaque, memory: []u8, alignment: Alignment, new_len: usize, ret_addr: usize) bool {
     const arena: *ArenaAllocator = @ptrCast(@alignCast(ctx));
     _ = alignment;
     _ = ret_addr;
 
-    assert(buf.len > 0);
+    assert(memory.len > 0);
     assert(new_len > 0);
-    if (buf.len == new_len) return true;
 
     const node = arena.loadFirstNode().?;
-    const cur_buf_ptr = @as([*]u8, @ptrCast(node)) + @sizeOf(Node);
+    const buf_ptr = @as([*]u8, @ptrCast(node)) + @sizeOf(Node);
 
-    var cur_end_index = @atomicLoad(usize, &node.end_index, .monotonic);
-    while (true) {
-        if (cur_buf_ptr + cur_end_index != buf.ptr + buf.len) {
-            // It's not the most recent allocation, so it cannot be expanded,
-            // but it's fine if they want to make it smaller.
-            return new_len <= buf.len;
-        }
-
-        const new_end_index: usize = new_end_index: {
-            if (buf.len >= new_len) {
-                break :new_end_index cur_end_index - (buf.len - new_len);
-            }
-            const cur_buf_len: usize = node.loadBuf().len;
-            // Saturating arithmetic because `end_index` and `size` are not
-            // guaranteed to be in sync.
-            if (cur_buf_len -| cur_end_index >= new_len - buf.len) {
-                break :new_end_index cur_end_index + (new_len - buf.len);
-            }
-            return false;
-        };
-
-        cur_end_index = @cmpxchgWeak(
-            usize,
-            &node.end_index,
-            cur_end_index,
-            new_end_index,
-            .monotonic,
-            .monotonic,
-        ) orelse {
-            return true;
-        };
+    const cur_end_index = @atomicLoad(usize, &node.end_index, .monotonic);
+    if (buf_ptr + cur_end_index != memory.ptr + memory.len) {
+        // It's not the most recent allocation, so it cannot be expanded,
+        // but it's fine if they want to make it smaller.
+        return new_len <= memory.len;
     }
+
+    const new_end_index: usize = new_end_index: {
+        if (memory.len >= new_len) {
+            break :new_end_index cur_end_index - (memory.len - new_len);
+        }
+        const cur_buf_len: usize = node.loadBuf().len;
+        // Saturating arithmetic because `end_index` and `size` are not
+        // guaranteed to be in sync.
+        if (cur_buf_len -| cur_end_index >= new_len - memory.len) {
+            break :new_end_index cur_end_index + (new_len - memory.len);
+        }
+        return false;
+    };
+    assert(buf_ptr + new_end_index == memory.ptr + new_len);
+
+    return null == @cmpxchgStrong(
+        usize,
+        &node.end_index,
+        cur_end_index,
+        new_end_index,
+        .monotonic,
+        .monotonic,
+    );
 }
 
-fn remap(
-    context: *anyopaque,
-    memory: []u8,
-    alignment: Alignment,
-    new_len: usize,
-    return_address: usize,
-) ?[*]u8 {
-    return if (resize(context, memory, alignment, new_len, return_address)) memory.ptr else null;
+fn remap(ctx: *anyopaque, memory: []u8, alignment: Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+    return if (resize(ctx, memory, alignment, new_len, ret_addr)) memory.ptr else null;
 }
 
-fn free(ctx: *anyopaque, buf: []u8, alignment: Alignment, ret_addr: usize) void {
+fn free(ctx: *anyopaque, memory: []u8, alignment: Alignment, ret_addr: usize) void {
     const arena: *ArenaAllocator = @ptrCast(@alignCast(ctx));
     _ = alignment;
     _ = ret_addr;
 
-    assert(buf.len > 0);
+    assert(memory.len > 0);
 
     const node = arena.loadFirstNode().?;
-    const cur_buf_ptr: [*]u8 = @as([*]u8, @ptrCast(node)) + @sizeOf(Node);
+    const buf_ptr = @as([*]u8, @ptrCast(node)) + @sizeOf(Node);
 
-    var cur_end_index = @atomicLoad(usize, &node.end_index, .monotonic);
-    while (true) {
-        if (cur_buf_ptr + cur_end_index != buf.ptr + buf.len) {
-            // Not the most recent allocation; we cannot free it.
-            return;
-        }
-        const new_end_index = cur_end_index - buf.len;
-
-        cur_end_index = @cmpxchgWeak(
-            usize,
-            &node.end_index,
-            cur_end_index,
-            new_end_index,
-            .monotonic,
-            .monotonic,
-        ) orelse {
-            return;
-        };
+    const cur_end_index = @atomicLoad(usize, &node.end_index, .monotonic);
+    if (buf_ptr + cur_end_index != memory.ptr + memory.len) {
+        // Not the most recent allocation; we cannot free it.
+        return;
     }
+
+    const new_end_index = cur_end_index - memory.len;
+    assert(buf_ptr + new_end_index == memory.ptr);
+
+    _ = @cmpxchgStrong(
+        usize,
+        &node.end_index,
+        cur_end_index,
+        new_end_index,
+        .monotonic,
+        .monotonic,
+    );
 }
 
 const std = @import("std");
