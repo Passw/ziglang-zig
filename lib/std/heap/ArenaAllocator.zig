@@ -261,7 +261,9 @@ const Node = struct {
         return @as([*]u8, @ptrCast(node))[0..size.toInt()];
     }
 
-    fn endResize(node: *Node, size: usize) void {
+    fn endResize(node: *Node, size: usize, prev_size: usize) void {
+        assert(size >= prev_size); // nodes must not shrink
+        assert(@atomicLoad(Size, &node.size, .unordered).toInt() == prev_size);
         return @atomicStore(Size, &node.size, .fromInt(size), .release); // syncs with acquire in `beginResize`
     }
 
@@ -302,6 +304,8 @@ fn stealFreeList(arena: *ArenaAllocator) ?*Node {
 
 fn pushFreeList(arena: *ArenaAllocator, first: *Node, last: *Node) void {
     assert(first != last.next);
+    assert(first != first.next);
+    assert(last != last.next);
     while (@cmpxchgWeak(
         ?*Node,
         &arena.state.free_list,
@@ -364,7 +368,7 @@ fn alloc(ctx: *anyopaque, n: usize, alignment: Alignment, ret_addr: usize) ?[*]u
             const node = first_node orelse break :resize;
             const allocated_slice = node.beginResize() orelse break :resize;
             var size = allocated_slice.len;
-            defer node.endResize(size);
+            defer node.endResize(size, allocated_slice.len);
 
             const buf = allocated_slice[@sizeOf(Node)..];
             const end_index = @atomicLoad(usize, &node.end_index, .monotonic);
@@ -406,92 +410,81 @@ fn alloc(ctx: *anyopaque, n: usize, alignment: Alignment, ret_addr: usize) ?[*]u
             // Also this avoids the ABA problem; stealing the list with an atomic
             // swap doesn't introduce any potentially stale `next` pointers.
 
-            const free_list = arena.stealFreeList();
-            var first_free: ?*Node = free_list;
-            var last_free: ?*Node = free_list;
-            defer {
-                // Push remaining stolen free list back onto `arena.state.free_list`.
-                if (first_free) |first| {
-                    const last = last_free.?;
-                    assert(last.next == null); // optimize for no new nodes added during steal
-                    arena.pushFreeList(first, last);
-                }
-            }
+            const free_list = arena.stealFreeList() orelse break :from_free_list;
 
-            const candidate: ?*Node, const prev: ?*Node = candidate: {
+            const first_free: *Node, const last_free: *Node, const node: *Node, const prev: ?*Node = find: {
                 var best_fit_prev: ?*Node = null;
                 var best_fit: ?*Node = null;
                 var best_fit_diff: usize = std.math.maxInt(usize);
 
                 var it_prev: ?*Node = null;
-                var it = free_list;
+                var it: ?*Node = free_list;
                 while (it) |node| : ({
-                    it_prev = it;
+                    it_prev = node;
                     it = node.next;
                 }) {
-                    last_free = node;
                     assert(!node.size.resizing);
                     const buf = node.allocatedSliceUnsafe()[@sizeOf(Node)..];
                     const aligned_index = alignedIndex(buf.ptr, 0, alignment);
 
-                    if (aligned_index + n <= buf.len) {
-                        break :candidate .{ node, it_prev };
-                    }
-
-                    const diff = aligned_index + n - buf.len;
-                    if (diff <= best_fit_diff) {
+                    const diff = aligned_index + n -| buf.len;
+                    if (diff < best_fit_diff) {
                         best_fit_prev = it_prev;
                         best_fit = node;
                         best_fit_diff = diff;
                     }
-                } else {
-                    // Ideally we want to use all nodes in `free_list` eventually,
-                    // so even if none fit we'll try to resize the one that was the
-                    // closest to being large enough.
-                    if (best_fit) |node| {
-                        const allocated_slice = node.allocatedSliceUnsafe();
-                        const buf = allocated_slice[@sizeOf(Node)..];
-                        const aligned_index = alignedIndex(buf.ptr, 0, alignment);
-                        const new_size = mem.alignForward(usize, @sizeOf(Node) + aligned_index + n, 2);
-
-                        if (arena.child_allocator.rawResize(allocated_slice, .of(Node), new_size, @returnAddress())) {
-                            node.size = .fromInt(new_size);
-                            break :candidate .{ node, best_fit_prev };
-                        }
-                    }
-                    break :from_free_list;
                 }
+
+                break :find .{ free_list, it_prev.?, best_fit.?, best_fit_prev };
             };
 
-            {
-                var it = last_free;
-                while (it) |node| : (it = node.next) {
-                    last_free = node;
+            const aligned_index, const need_resize = aligned_index: {
+                const buf = node.allocatedSliceUnsafe()[@sizeOf(Node)..];
+                const aligned_index = alignedIndex(buf.ptr, 0, alignment);
+                break :aligned_index .{ aligned_index, aligned_index + n > buf.len };
+            };
+
+            if (need_resize) {
+                // Ideally we want to use all nodes in `free_list` eventually,
+                // so even if none fit we'll try to resize the one that was the
+                // closest to being large enough.
+                const new_size = mem.alignForward(usize, @sizeOf(Node) + aligned_index + n, 2);
+                if (arena.child_allocator.rawResize(node.allocatedSliceUnsafe(), .of(Node), new_size, @returnAddress())) {
+                    node.size = .fromInt(new_size);
+                } else {
+                    arena.pushFreeList(first_free, last_free);
+                    break :from_free_list; // we couldn't find a fitting free node
                 }
             }
 
-            const node = candidate orelse break :from_free_list;
-            const old_next = node.next;
-
             const buf = node.allocatedSliceUnsafe()[@sizeOf(Node)..];
-            const aligned_index = alignedIndex(buf.ptr, 0, alignment);
+            const old_next = node.next;
 
             node.end_index = aligned_index + n;
             node.next = first_node;
 
             switch (arena.tryPushNode(node)) {
                 .success => {
-                    // finish removing node from free list
+                    // Finish removing node from free list.
                     if (prev) |p| p.next = old_next;
-                    if (node == first_free) first_free = old_next;
-                    if (node == last_free) last_free = prev;
+
+                    // Push remaining stolen free list back onto `arena.state.free_list`.
+                    const new_first_free = if (node == first_free) old_next else first_free;
+                    const new_last_free = if (node == last_free) prev else last_free;
+                    if (new_first_free) |first| {
+                        const last = new_last_free.?;
+                        arena.pushFreeList(first, last);
+                    }
+
                     return buf[aligned_index..][0..n].ptr;
                 },
                 .failure => |old_first_node| {
-                    cur_first_node = old_first_node;
                     // restore free list to as we found it
                     node.next = old_next;
-                    continue :retry;
+                    arena.pushFreeList(first_free, last_free);
+
+                    cur_first_node = old_first_node;
+                    continue :retry; // there's a new first node; retry!
                 },
             }
         }
@@ -503,16 +496,17 @@ fn alloc(ctx: *anyopaque, n: usize, alignment: Alignment, ret_addr: usize) ?[*]u
                 @branchHint(.cold);
             }
 
-            const size: usize = size: {
+            const size: Node.Size = size: {
                 const min_size = @sizeOf(Node) + alignment.toByteUnits() + n;
                 const big_enough_size = prev_size + min_size + 16;
-                break :size mem.alignForward(usize, big_enough_size + big_enough_size / 2, 2);
+                const size = mem.alignForward(usize, big_enough_size + big_enough_size / 2, 2);
+                break :size .fromInt(size);
             };
-            const ptr = arena.child_allocator.rawAlloc(size, .of(Node), @returnAddress()) orelse
+            const ptr = arena.child_allocator.rawAlloc(size.toInt(), .of(Node), @returnAddress()) orelse
                 return null;
             const new_node: *Node = @ptrCast(@alignCast(ptr));
             new_node.* = .{
-                .size = .fromInt(size),
+                .size = size,
                 .end_index = undefined, // set below
                 .next = undefined, // set below
             };
