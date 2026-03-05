@@ -656,3 +656,406 @@ test "reset while retaining a buffer" {
     try std.testing.expect(arena_allocator.state.used_list.?.next == null);
     try std.testing.expectEqual(2, arena_allocator.queryCapacity());
 }
+
+test "fuzz" {
+    @disableInstrumentation();
+    if (@import("builtin").single_threaded) return error.SkipZigTest;
+
+    const gpa = std.heap.smp_allocator;
+
+    var arena_state: ArenaAllocator.State = .init;
+    // No need to deinit arena_state, all allocations are in `sample_buffer`!
+
+    const control_buffer = try gpa.alloc(u8, 64 << 10 << 10);
+    defer gpa.free(control_buffer);
+    var control_instance: std.heap.FixedBufferAllocator = .init(control_buffer);
+
+    const sample_buffer = try gpa.alloc(u8, 64 << 10 << 10);
+    defer gpa.free(sample_buffer);
+    var sample_instance: FuzzAllocator = .init(sample_buffer);
+
+    var allocs: FuzzContext.Allocs = try .initCapacity(gpa, FuzzContext.max_alloc_count);
+    defer allocs.deinit(gpa);
+
+    try std.testing.fuzz(FuzzContext.Init{
+        .gpa = gpa,
+        .allocs = &allocs,
+        .arena_state = &arena_state,
+        .control_instance = &control_instance,
+        .sample_instance = &sample_instance,
+    }, fuzzArenaAllocator, .{});
+}
+
+fn fuzzArenaAllocator(fuzz_init: FuzzContext.Init, smith: *std.testing.Smith) anyerror!void {
+    @disableInstrumentation();
+    const testing = std.testing;
+
+    // We use a 'fresh' `Threaded` instance every time to reset threadlocals to
+    // their default values.
+
+    var io_instance: std.Io.Threaded = .init(fuzz_init.gpa, .{});
+    defer io_instance.deinit();
+    const io = io_instance.io();
+
+    fuzz_init.sample_instance.prepareFailures(smith);
+
+    const control_allocator = fuzz_init.control_instance.threadSafeAllocator();
+    const sample_child_allocator = fuzz_init.sample_instance.allocator();
+
+    var arena_instance = fuzz_init.arena_state.*.promote(sample_child_allocator);
+    defer fuzz_init.arena_state.* = arena_instance.state;
+
+    var ctx: FuzzContext = .init(
+        io,
+        control_allocator,
+        arena_instance.allocator(),
+        fuzz_init.allocs,
+    );
+    defer ctx.deinit();
+
+    ctx.rwl.lockUncancelable(io);
+
+    var group: std.Io.Group = .init;
+    defer group.cancel(io);
+
+    var n_actions: usize = 0;
+    while (!smith.eosWeightedSimple(99, 1) and n_actions < FuzzContext.max_action_count) {
+        errdefer comptime unreachable;
+
+        const ActionTag = @typeInfo(FuzzContext.Action).@"union".tag_type.?;
+        const weights: []const testing.Smith.Weight = weights: {
+            if (ctx.allocs.len == ctx.allocs.capacity)
+                break :weights &.{
+                    .value(ActionTag, .resize, 1),
+                    .value(ActionTag, .remap, 1),
+                    .value(ActionTag, .free, 1),
+                };
+            break :weights testing.Smith.baselineWeights(ActionTag) ++
+                .{testing.Smith.Weight.value(ActionTag, .alloc, 2)};
+        };
+        const action: FuzzContext.Action = switch (smith.valueWeighted(ActionTag, weights)) {
+            .alloc => action: {
+                const alloc_index = ctx.allocs.addOneBounded() catch continue;
+                ctx.allocs.items(.len)[alloc_index] = .free;
+                break :action .{ .alloc = .{
+                    .len = nextLen(smith),
+                    .alignment = smith.valueRangeAtMost(
+                        Alignment,
+                        .@"1",
+                        .fromByteUnits(2 * std.heap.page_size_max),
+                    ),
+                    .index = alloc_index,
+                } };
+            },
+            .resize => .{ .resize = .{ .new_len = nextLen(smith) } },
+            .remap => .{ .remap = .{ .new_len = nextLen(smith) } },
+            .free => .free,
+        };
+        group.concurrent(io, FuzzContext.doOneAction, .{ &ctx, action }) catch break;
+        n_actions += 1;
+    }
+
+    ctx.rwl.unlock(io);
+
+    try group.await(io);
+    try ctx.check();
+
+    // This also covers the `deinit` logic since `free_all` uses it internally.
+
+    const old_capacity = arena_instance.queryCapacity();
+    const reset_mode: ResetMode = switch (smith.value(@typeInfo(ResetMode).@"union".tag_type.?)) {
+        .free_all => .free_all,
+        .retain_capacity => .retain_capacity,
+        .retain_with_limit => .{ .retain_with_limit = smith.value(usize) },
+    };
+    const ok = arena_instance.reset(reset_mode);
+    const new_capacity = arena_instance.queryCapacity();
+    switch (reset_mode) {
+        .free_all => {
+            try testing.expect(ok);
+            try testing.expectEqual(0, new_capacity);
+            fuzz_init.sample_instance.reset();
+        },
+        .retain_with_limit => |limit| if (ok) try testing.expect(new_capacity <= limit),
+        .retain_capacity => if (ok) try testing.expectEqual(old_capacity, new_capacity),
+    }
+
+    fuzz_init.control_instance.reset();
+    fuzz_init.allocs.clearRetainingCapacity();
+}
+fn nextLen(smith: *std.testing.Smith) usize {
+    @disableInstrumentation();
+    return usizeRange(smith, 1, 16 << 10 << 10);
+}
+fn usizeRange(smith: *std.testing.Smith, at_least: usize, at_most: usize) usize {
+    @disableInstrumentation();
+    const Int = @Int(.unsigned, @min(64, @bitSizeOf(usize)));
+    return smith.valueRangeAtMost(Int, @intCast(at_least), @intCast(at_most));
+}
+
+const FuzzContext = struct {
+    io: std.Io,
+    rwl: std.Io.RwLock,
+
+    control_allocator: Allocator,
+    sample_allocator: Allocator,
+
+    allocs: *Allocs,
+
+    const max_alloc_count = 4096;
+    const max_action_count = 2 * max_alloc_count;
+
+    const Allocs = std.MultiArrayList(struct {
+        control_ptr: [*]u8,
+        sample_ptr: [*]u8,
+        len: Len,
+        alignment: Alignment,
+    });
+
+    const Len = enum(usize) {
+        free = std.math.maxInt(usize),
+        _,
+    };
+
+    const Action = union(enum(u8)) {
+        alloc: struct { len: usize, alignment: Alignment, index: usize },
+        resize: struct { new_len: usize },
+        remap: struct { new_len: usize },
+        free,
+    };
+
+    threadlocal var tls_next: u8 = 0;
+    threadlocal var tls_last_index: ?usize = null;
+
+    const Init = struct {
+        gpa: Allocator,
+        allocs: *FuzzContext.Allocs,
+        arena_state: *ArenaAllocator.State,
+        control_instance: *std.heap.FixedBufferAllocator,
+        sample_instance: *FuzzAllocator,
+    };
+
+    fn init(
+        io: std.Io,
+        control_allocator: Allocator,
+        sample_allocator: Allocator,
+        allocs: *Allocs,
+    ) FuzzContext {
+        @disableInstrumentation();
+        return .{
+            .io = io,
+            .rwl = .init,
+            .control_allocator = control_allocator,
+            .sample_allocator = sample_allocator,
+            .allocs = allocs,
+        };
+    }
+
+    fn deinit(ctx: *FuzzContext) void {
+        @disableInstrumentation();
+        ctx.* = undefined;
+    }
+
+    fn check(ctx: *const FuzzContext) !void {
+        @disableInstrumentation();
+        for (0..ctx.allocs.len) |index| {
+            const len: usize = switch (ctx.allocs.items(.len)[index]) {
+                .free => continue,
+                _ => |len| @intFromEnum(len),
+            };
+            const control = ctx.allocs.items(.control_ptr)[index][0..len];
+            const sample = ctx.allocs.items(.sample_ptr)[index][0..len];
+            try std.testing.expectEqualSlices(u8, control, sample);
+        }
+    }
+
+    fn doOneAction(ctx: *FuzzContext, action: Action) std.Io.Cancelable!void {
+        @disableInstrumentation();
+        ctx.rwl.lockSharedUncancelable(ctx.io);
+        defer ctx.rwl.unlockShared(ctx.io);
+
+        switch (action) {
+            .alloc => |act| ctx.doOneAlloc(act.len, act.alignment, act.index),
+            .resize => |act| ctx.doOneResize(act.new_len),
+            .remap => |act| ctx.doOneRemap(act.new_len),
+            .free => ctx.doOneFree(),
+        }
+    }
+
+    fn doOneAlloc(ctx: *FuzzContext, len: usize, alignment: Alignment, index: usize) void {
+        @disableInstrumentation();
+        assert(ctx.allocs.items(.len)[index] == .free);
+
+        const control_ptr = ctx.control_allocator.rawAlloc(len, alignment, @returnAddress()) orelse
+            return;
+        const sample_ptr = ctx.sample_allocator.rawAlloc(len, alignment, @returnAddress()) orelse {
+            ctx.control_allocator.rawFree(control_ptr[0..len], alignment, @returnAddress());
+            return;
+        };
+
+        ctx.allocs.set(index, .{
+            .control_ptr = control_ptr,
+            .sample_ptr = sample_ptr,
+            .len = @enumFromInt(len),
+            .alignment = alignment,
+        });
+
+        for (control_ptr[0..len], sample_ptr[0..len]) |*control, *sample| {
+            control.* = tls_next;
+            sample.* = tls_next;
+            tls_next +%= 1;
+        }
+
+        tls_last_index = index;
+    }
+    fn doOneResize(ctx: *FuzzContext, new_len: usize) void {
+        @disableInstrumentation();
+        const index = tls_last_index orelse return;
+        const len = ctx.allocs.items(.len)[index];
+        assert(len != .free);
+        const memory = ctx.allocs.items(.sample_ptr)[index][0..@intFromEnum(len)];
+        const alignment = ctx.allocs.items(.alignment)[index];
+
+        assert(alignment.check(@intFromPtr(ctx.allocs.items(.control_ptr)[index])));
+        assert(alignment.check(@intFromPtr(ctx.allocs.items(.sample_ptr)[index])));
+
+        // Since `resize` is fallible, we have to ensure that `control_allocator`
+        // is always successful by reserving the memory we need beforehand.
+        const new_control_ptr = ctx.control_allocator.rawAlloc(new_len, alignment, @returnAddress()) orelse
+            return;
+        if (ctx.sample_allocator.rawResize(memory, alignment, new_len, @returnAddress())) {
+            const old_control = ctx.allocs.items(.control_ptr)[index][0..memory.len];
+            const overlap = @min(memory.len, new_len);
+            @memcpy(new_control_ptr[0..overlap], old_control[0..overlap]);
+            ctx.control_allocator.rawFree(old_control, alignment, @returnAddress());
+        } else {
+            ctx.control_allocator.rawFree(new_control_ptr[0..new_len], alignment, @returnAddress());
+            return;
+        }
+
+        ctx.allocs.set(index, .{
+            .control_ptr = new_control_ptr,
+            .sample_ptr = memory.ptr,
+            .len = @enumFromInt(new_len),
+            .alignment = alignment,
+        });
+
+        if (new_len > memory.len) {
+            for (
+                ctx.allocs.items(.control_ptr)[index][memory.len..new_len],
+                ctx.allocs.items(.sample_ptr)[index][memory.len..new_len],
+            ) |*control, *sample| {
+                control.* = tls_next;
+                sample.* = tls_next;
+                tls_next +%= 1;
+            }
+        }
+    }
+    fn doOneRemap(ctx: *FuzzContext, new_len: usize) void {
+        @disableInstrumentation();
+        return doOneResize(ctx, new_len);
+    }
+    fn doOneFree(ctx: *FuzzContext) void {
+        @disableInstrumentation();
+        const index = tls_last_index orelse return;
+        const len = ctx.allocs.items(.len)[index];
+        assert(len != .free);
+        const memory = ctx.allocs.items(.sample_ptr)[index][0..@intFromEnum(len)];
+        const alignment = ctx.allocs.items(.alignment)[index];
+
+        assert(alignment.check(@intFromPtr(ctx.allocs.items(.control_ptr)[index])));
+        assert(alignment.check(@intFromPtr(ctx.allocs.items(.sample_ptr)[index])));
+
+        ctx.control_allocator.rawFree(ctx.allocs.items(.control_ptr)[index][0..memory.len], alignment, @returnAddress());
+        ctx.sample_allocator.rawFree(ctx.allocs.items(.sample_ptr)[index][0..memory.len], alignment, @returnAddress());
+
+        ctx.allocs.set(index, .{
+            .control_ptr = undefined,
+            .sample_ptr = undefined,
+            .len = .free,
+            .alignment = undefined,
+        });
+
+        tls_last_index = null;
+    }
+};
+
+const FuzzAllocator = struct {
+    fba: std.heap.FixedBufferAllocator,
+    spurious_failures: [256]u8,
+    index: u8,
+
+    fn init(buffer: []u8) FuzzAllocator {
+        @disableInstrumentation();
+        return .{
+            .fba = .init(buffer),
+            .spurious_failures = undefined, // set with `preprepareFailures`
+            .index = 0,
+        };
+    }
+
+    fn prepareFailures(fa: *FuzzAllocator, smith: *std.testing.Smith) void {
+        @disableInstrumentation();
+        const bool_weights: []const std.testing.Smith.Weight = &.{
+            .value(u8, 0, 10),
+            .value(u8, 1, 1),
+        };
+        smith.bytesWeighted(&fa.spurious_failures, bool_weights);
+        fa.index = 0;
+    }
+
+    fn reset(fa: *FuzzAllocator) void {
+        @disableInstrumentation();
+        fa.fba.reset();
+    }
+
+    fn allocator(fa: *FuzzAllocator) Allocator {
+        @disableInstrumentation();
+        return .{
+            .ptr = fa,
+            .vtable = &.{
+                .alloc = FuzzAllocator.alloc,
+                .resize = FuzzAllocator.resize,
+                .remap = FuzzAllocator.remap,
+                .free = FuzzAllocator.free,
+            },
+        };
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: Alignment, ret_addr: usize) ?[*]u8 {
+        @disableInstrumentation();
+        const fa: *FuzzAllocator = @ptrCast(@alignCast(ctx));
+        _ = ret_addr;
+
+        const index = @atomicRmw(u8, &fa.index, .Add, 1, .monotonic);
+        if (fa.spurious_failures[index] != 0) return null;
+        return fa.fba.threadSafeAllocator().rawAlloc(len, alignment, @returnAddress());
+    }
+
+    fn resize(ctx: *anyopaque, memory: []u8, alignment: Alignment, new_len: usize, ret_addr: usize) bool {
+        @disableInstrumentation();
+        const fa: *FuzzAllocator = @ptrCast(@alignCast(ctx));
+        _ = ret_addr;
+
+        const index = @atomicRmw(u8, &fa.index, .Add, 1, .monotonic);
+        if (fa.spurious_failures[index] != 0) return false;
+        return fa.fba.threadSafeAllocator().rawResize(memory, alignment, new_len, @returnAddress());
+    }
+
+    fn remap(ctx: *anyopaque, memory: []u8, alignment: Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        @disableInstrumentation();
+        const fa: *FuzzAllocator = @ptrCast(@alignCast(ctx));
+        _ = ret_addr;
+
+        const index = @atomicRmw(u8, &fa.index, .Add, 1, .monotonic);
+        if (fa.spurious_failures[index] != 0) return null;
+        return fa.fba.threadSafeAllocator().rawRemap(memory, alignment, new_len, @returnAddress());
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: Alignment, ret_addr: usize) void {
+        @disableInstrumentation();
+        const fa: *FuzzAllocator = @ptrCast(@alignCast(ctx));
+        _ = ret_addr;
+        return fa.fba.threadSafeAllocator().rawFree(memory, alignment, @returnAddress());
+    }
+};
