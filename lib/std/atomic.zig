@@ -513,7 +513,7 @@ pub const Mutex = enum(u8) {
     }
 
     pub fn unlock(m: *Mutex) void {
-        assert(m.* == .locked);
+        assert(@atomicLoad(Mutex, m, .unordered) == .locked);
         @atomicStore(Mutex, m, .unlocked, .release);
     }
 };
