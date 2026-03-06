@@ -13435,23 +13435,6 @@ fn netReceiveWindowsOne(
     }
 }
 
-fn netReceiveUnavailable(
-    userdata: ?*anyopaque,
-    handle: net.Socket.Handle,
-    message_buffer: []net.IncomingMessage,
-    data_buffer: []u8,
-    flags: net.ReceiveFlags,
-    timeout: Io.Timeout,
-) struct { ?net.Socket.ReceiveTimeoutError, usize } {
-    _ = userdata;
-    _ = handle;
-    _ = message_buffer;
-    _ = data_buffer;
-    _ = flags;
-    _ = timeout;
-    return .{ error.NetworkDown, 0 };
-}
-
 fn netWritePosix(
     userdata: ?*anyopaque,
     fd: net.Socket.Handle,
