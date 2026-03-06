@@ -572,7 +572,8 @@ fn resize(ctx: *anyopaque, memory: []u8, alignment: Alignment, new_len: usize, r
         new_end_index,
         .monotonic,
         .monotonic,
-    );
+    ) or
+        new_len <= memory.len; // Shrinking allocations should always succeed.
 }
 
 fn remap(ctx: *anyopaque, memory: []u8, alignment: Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {

@@ -172,7 +172,8 @@ fn threadSafeResize(ctx: *anyopaque, memory: []u8, alignment: mem.Alignment, new
         new_end_index,
         .monotonic,
         .monotonic,
-    );
+    ) or
+        new_len <= memory.len; // Shrinking allocations should always succeed.
 }
 
 fn threadSafeRemap(ctx: *anyopaque, memory: []u8, alignment: mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
