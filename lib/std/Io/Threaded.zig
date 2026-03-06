@@ -1908,142 +1908,10 @@ pub fn io(t: *Threaded) Io {
     };
 }
 
-/// Same as `io` but disables all networking functionality, which has
-/// an additional dependency on Windows (ws2_32).
-pub fn ioBasic(t: *Threaded) Io {
-    return .{
-        .userdata = t,
-        .vtable = &.{
-            .crashHandler = crashHandler,
-
-            .async = async,
-            .concurrent = concurrent,
-            .await = await,
-            .cancel = cancel,
-
-            .groupAsync = groupAsync,
-            .groupConcurrent = groupConcurrent,
-            .groupAwait = groupAwait,
-            .groupCancel = groupCancel,
-
-            .recancel = recancel,
-            .swapCancelProtection = swapCancelProtection,
-            .checkCancel = checkCancel,
-
-            .futexWait = futexWait,
-            .futexWaitUncancelable = futexWaitUncancelable,
-            .futexWake = futexWake,
-
-            .operate = operate,
-            .batchAwaitAsync = batchAwaitAsync,
-            .batchAwaitConcurrent = batchAwaitConcurrent,
-            .batchCancel = batchCancel,
-
-            .dirCreateDir = dirCreateDir,
-            .dirCreateDirPath = dirCreateDirPath,
-            .dirCreateDirPathOpen = dirCreateDirPathOpen,
-            .dirStat = dirStat,
-            .dirStatFile = dirStatFile,
-            .dirAccess = dirAccess,
-            .dirCreateFile = dirCreateFile,
-            .dirCreateFileAtomic = dirCreateFileAtomic,
-            .dirOpenFile = dirOpenFile,
-            .dirOpenDir = dirOpenDir,
-            .dirClose = dirClose,
-            .dirRead = dirRead,
-            .dirRealPath = dirRealPath,
-            .dirRealPathFile = dirRealPathFile,
-            .dirDeleteFile = dirDeleteFile,
-            .dirDeleteDir = dirDeleteDir,
-            .dirRename = dirRename,
-            .dirRenamePreserve = dirRenamePreserve,
-            .dirSymLink = dirSymLink,
-            .dirReadLink = dirReadLink,
-            .dirSetOwner = dirSetOwner,
-            .dirSetFileOwner = dirSetFileOwner,
-            .dirSetPermissions = dirSetPermissions,
-            .dirSetFilePermissions = dirSetFilePermissions,
-            .dirSetTimestamps = dirSetTimestamps,
-            .dirHardLink = dirHardLink,
-
-            .fileStat = fileStat,
-            .fileLength = fileLength,
-            .fileClose = fileClose,
-            .fileWritePositional = fileWritePositional,
-            .fileWriteFileStreaming = fileWriteFileStreaming,
-            .fileWriteFilePositional = fileWriteFilePositional,
-            .fileReadPositional = fileReadPositional,
-            .fileSeekBy = fileSeekBy,
-            .fileSeekTo = fileSeekTo,
-            .fileSync = fileSync,
-            .fileIsTty = fileIsTty,
-            .fileEnableAnsiEscapeCodes = fileEnableAnsiEscapeCodes,
-            .fileSupportsAnsiEscapeCodes = fileSupportsAnsiEscapeCodes,
-            .fileSetLength = fileSetLength,
-            .fileSetOwner = fileSetOwner,
-            .fileSetPermissions = fileSetPermissions,
-            .fileSetTimestamps = fileSetTimestamps,
-            .fileLock = fileLock,
-            .fileTryLock = fileTryLock,
-            .fileUnlock = fileUnlock,
-            .fileDowngradeLock = fileDowngradeLock,
-            .fileRealPath = fileRealPath,
-            .fileHardLink = fileHardLink,
-
-            .fileMemoryMapCreate = fileMemoryMapCreate,
-            .fileMemoryMapDestroy = fileMemoryMapDestroy,
-            .fileMemoryMapSetLength = fileMemoryMapSetLength,
-            .fileMemoryMapRead = fileMemoryMapRead,
-            .fileMemoryMapWrite = fileMemoryMapWrite,
-
-            .processExecutableOpen = processExecutableOpen,
-            .processExecutablePath = processExecutablePath,
-            .lockStderr = lockStderr,
-            .tryLockStderr = tryLockStderr,
-            .unlockStderr = unlockStderr,
-            .processCurrentPath = processCurrentPath,
-            .processSetCurrentDir = processSetCurrentDir,
-            .processSetCurrentPath = processSetCurrentPath,
-            .processReplace = processReplace,
-            .processReplacePath = processReplacePath,
-            .processSpawn = processSpawn,
-            .processSpawnPath = processSpawnPath,
-            .childWait = childWait,
-            .childKill = childKill,
-
-            .progressParentFile = progressParentFile,
-
-            .now = now,
-            .clockResolution = clockResolution,
-            .sleep = sleep,
-
-            .random = random,
-            .randomSecure = randomSecure,
-
-            .netListenIp = netListenIpUnavailable,
-            .netListenUnix = netListenUnixUnavailable,
-            .netAccept = netAcceptUnavailable,
-            .netBindIp = netBindIpUnavailable,
-            .netConnectIp = netConnectIpUnavailable,
-            .netSocketCreatePair = netSocketCreatePairUnavailable,
-            .netConnectUnix = netConnectUnixUnavailable,
-            .netClose = netCloseUnavailable,
-            .netShutdown = netShutdownUnavailable,
-            .netRead = netReadUnavailable,
-            .netWrite = netWriteUnavailable,
-            .netWriteFile = netWriteFileUnavailable,
-            .netSend = netSendUnavailable,
-            .netInterfaceNameResolve = netInterfaceNameResolveUnavailable,
-            .netInterfaceName = netInterfaceNameUnavailable,
-            .netLookup = netLookupUnavailable,
-        },
-    };
-}
-
 pub const socket_flags_unsupported = is_darwin or native_os == .haiku;
 const have_accept4 = !socket_flags_unsupported;
 const have_flock_open_flags = @hasField(posix.O, "EXLOCK");
-const have_networking = native_os != .wasi;
+const have_networking = std.options.networking and native_os != .wasi;
 const have_flock = @TypeOf(posix.system.flock) != void;
 const have_sendmmsg = native_os == .linux;
 const have_futex = switch (builtin.cpu.arch) {
@@ -2595,7 +2463,7 @@ fn futexWait(userdata: ?*anyopaque, ptr: *const u32, expected: u32, timeout: Io.
         return;
     }
     const t: *Threaded = @ptrCast(@alignCast(userdata));
-    const t_io = ioBasic(t);
+    const t_io = io(t);
     const timeout_ns: ?u64 = ns: {
         const d = timeout.toDurationFromNow(t_io) orelse break :ns null;
         break :ns std.math.lossyCast(u64, d.raw.toNanoseconds());
@@ -2788,7 +2656,7 @@ fn batchAwaitAsync(userdata: ?*anyopaque, b: *Io.Batch) Io.Cancelable!void {
 fn batchAwaitConcurrent(userdata: ?*anyopaque, b: *Io.Batch, timeout: Io.Timeout) Io.Batch.AwaitConcurrentError!void {
     const t: *Threaded = @ptrCast(@alignCast(userdata));
     if (is_windows) {
-        const deadline: ?Io.Clock.Timestamp = timeout.toTimestamp(ioBasic(t));
+        const deadline: ?Io.Clock.Timestamp = timeout.toTimestamp(io(t));
         try batchDrainSubmittedWindows(t, b, true);
         while (b.pending.head != .none and b.completed.head == .none) {
             var delay_interval: windows.LARGE_INTEGER = interval: {
@@ -2898,7 +2766,7 @@ fn batchAwaitConcurrent(userdata: ?*anyopaque, b: *Io.Batch, timeout: Io.Timeout
         },
         else => {},
     }
-    const t_io = ioBasic(t);
+    const t_io = io(t);
     const deadline = timeout.toTimestamp(t_io);
     while (true) {
         const timeout_ms: i32 = t: {
@@ -3536,7 +3404,7 @@ fn dirCreateDirPathOpenPosix(
     options: Dir.OpenOptions,
 ) Dir.CreateDirPathOpenError!Dir {
     const t: *Threaded = @ptrCast(@alignCast(userdata));
-    const t_io = ioBasic(t);
+    const t_io = io(t);
     return dirOpenDirPosix(t, dir, sub_path, options) catch |err| switch (err) {
         error.FileNotFound => {
             _ = try dir.createDirPathStatus(t_io, sub_path, permissions);
@@ -3657,7 +3525,7 @@ fn dirCreateDirPathOpenWasi(
     options: Dir.OpenOptions,
 ) Dir.CreateDirPathOpenError!Dir {
     const t: *Threaded = @ptrCast(@alignCast(userdata));
-    const t_io = ioBasic(t);
+    const t_io = io(t);
     return dirOpenDirWasi(t, dir, sub_path, options) catch |err| switch (err) {
         error.FileNotFound => {
             _ = try dir.createDirPathStatus(t_io, sub_path, permissions);
@@ -4698,7 +4566,7 @@ fn dirCreateFileAtomic(
     options: Dir.CreateFileAtomicOptions,
 ) Dir.CreateFileAtomicError!File.Atomic {
     const t: *Threaded = @ptrCast(@alignCast(userdata));
-    const t_io = ioBasic(t);
+    const t_io = io(t);
 
     // Linux has O_TMPFILE, but linkat() does not support AT_REPLACE, so it's
     // useless when we have to make up a bogus path name to do the rename()
@@ -10326,19 +10194,19 @@ fn processExecutablePath(userdata: ?*anyopaque, out_buffer: []u8) process.Execut
             const rc = std.c._NSGetExecutablePath(&symlink_path_buf, &n);
             if (rc != 0) return error.NameTooLong;
             const symlink_path = std.mem.sliceTo(&symlink_path_buf, 0);
-            return Io.Dir.realPathFileAbsolute(ioBasic(t), symlink_path, out_buffer) catch |err| switch (err) {
+            return Io.Dir.realPathFileAbsolute(io(t), symlink_path, out_buffer) catch |err| switch (err) {
                 error.NetworkNotFound => unreachable, // Windows-only
                 error.FileBusy => unreachable, // Windows-only
                 else => |e| return e,
             };
         },
-        .linux, .serenity => return Io.Dir.readLinkAbsolute(ioBasic(t), "/proc/self/exe", out_buffer) catch |err| switch (err) {
+        .linux, .serenity => return Io.Dir.readLinkAbsolute(io(t), "/proc/self/exe", out_buffer) catch |err| switch (err) {
             error.UnsupportedReparsePointType => unreachable, // Windows-only
             error.NetworkNotFound => unreachable, // Windows-only
             error.FileBusy => unreachable, // Windows-only
             else => |e| return e,
         },
-        .illumos => return Io.Dir.readLinkAbsolute(ioBasic(t), "/proc/self/path/a.out", out_buffer) catch |err| switch (err) {
+        .illumos => return Io.Dir.readLinkAbsolute(io(t), "/proc/self/path/a.out", out_buffer) catch |err| switch (err) {
             error.UnsupportedReparsePointType => unreachable, // Windows-only
             error.NetworkNotFound => unreachable, // Windows-only
             error.FileBusy => unreachable, // Windows-only
@@ -11700,7 +11568,7 @@ fn sleepPosix(timeout: Io.Timeout) Io.Cancelable!void {
 }
 
 fn sleepWasi(t: *Threaded, timeout: Io.Timeout) Io.Cancelable!void {
-    const t_io = ioBasic(t);
+    const t_io = io(t);
     const w = std.os.wasi;
 
     const clock: w.subscription_clock_t = if (timeout.toDurationFromNow(t_io)) |d| .{
@@ -11729,7 +11597,7 @@ fn sleepWasi(t: *Threaded, timeout: Io.Timeout) Io.Cancelable!void {
 }
 
 fn sleepNanosleep(t: *Threaded, timeout: Io.Timeout) Io.Cancelable!void {
-    const t_io = ioBasic(t);
+    const t_io = io(t);
     const sec_type = @typeInfo(posix.timespec).@"struct".fields[0].type;
     const nsec_type = @typeInfo(posix.timespec).@"struct".fields[1].type;
 
@@ -11961,6 +11829,7 @@ fn netListenUnixWindows(
     options: net.UnixAddress.ListenOptions,
 ) net.UnixAddress.ListenError!net.Socket.Handle {
     if (!net.has_unix_sockets) return error.AddressFamilyUnsupported;
+    if (!have_networking) return error.NetworkDown;
     const t: *Threaded = @ptrCast(@alignCast(userdata));
 
     const socket_handle = openSocketWsa(t, posix.AF.UNIX, .{ .mode = .stream }) catch |err| switch (err) {
@@ -12457,6 +12326,7 @@ fn netConnectUnixWindows(
     address: *const net.UnixAddress,
 ) net.UnixAddress.ConnectError!net.Socket.Handle {
     if (!net.has_unix_sockets) return error.AddressFamilyUnsupported;
+    if (!have_networking) return error.NetworkDown;
     const t: *Threaded = @ptrCast(@alignCast(userdata));
 
     const socket_handle = try openSocketWsa(t, posix.AF.UNIX, .{ .mode = .stream });
@@ -13426,7 +13296,7 @@ fn netReceiveWindowsOne(
     data_buffer: []u8,
     flags: net.ReceiveFlags,
 ) net.Socket.ReceiveError!void {
-    comptime assert(have_networking);
+    if (!have_networking) return error.NetworkDown;
 
     var windows_flags: u32 =
         @as(u32, if (flags.oob) ws2_32.MSG.OOB else 0) |
@@ -13601,6 +13471,7 @@ fn netWriteWindows(
     data: []const []const u8,
     splat: usize,
 ) net.Stream.Writer.Error!usize {
+    if (!have_networking) return error.NetworkDown;
     const t: *Threaded = @ptrCast(@alignCast(userdata));
     comptime assert(is_windows);
 
@@ -13723,6 +13594,7 @@ fn addBuf(v: []posix.iovec_const, i: *iovlen_t, bytes: []const u8) void {
 }
 
 fn netClose(userdata: ?*anyopaque, handles: []const net.Socket.Handle) void {
+    if (!have_networking) unreachable;
     const t: *Threaded = @ptrCast(@alignCast(userdata));
     _ = t;
     switch (native_os) {
@@ -13931,7 +13803,7 @@ fn netLookupUnavailable(
     _ = host_name;
     _ = options;
     const t: *Threaded = @ptrCast(@alignCast(userdata));
-    resolved.close(ioBasic(t));
+    resolved.close(io(t));
     return error.NetworkDown;
 }
 
@@ -14214,7 +14086,7 @@ fn tryLockStderr(userdata: ?*anyopaque, terminal_mode: ?Io.Terminal.Mode) Io.Can
 
 fn initLockedStderr(t: *Threaded, terminal_mode: ?Io.Terminal.Mode) Io.Cancelable!Io.LockedStderr {
     if (!t.stderr_writer_initialized) {
-        const io_t = ioBasic(t);
+        const io_t = io(t);
         if (is_windows) t.stderr_writer.file = .stderr();
         t.stderr_writer.io = io_t;
         t.stderr_writer_initialized = true;
