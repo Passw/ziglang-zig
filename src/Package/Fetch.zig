@@ -447,7 +447,7 @@ pub const JobQueue = struct {
 
         // intentionally omitting the pointless trailer
         //try archiver.finish();
-        compress.writer.flush() catch |err| switch (err) {
+        compress.finish() catch |err| switch (err) {
             error.WriteFailed => return file_writer.err.?,
         };
         try file_writer.flush();
