@@ -1117,12 +1117,13 @@ pub const Socket = struct {
     /// * `receiveTimeout`
     pub fn receive(s: *const Socket, io: Io, buffer: []u8) ReceiveError!IncomingMessage {
         var message: IncomingMessage = .init;
-        const maybe_err, const count = io.vtable.netReceive(io.userdata, s.handle, (&message)[0..1], buffer, .{}, .none);
-        if (maybe_err) |err| switch (err) {
-            // No timeout is passed to `netReceieve`, so it must not return timeout related errors.
-            error.Timeout => unreachable,
-            else => |e| return e,
-        };
+        const maybe_err, const count = (try io.operate(.{ .net_receive = .{
+            .socket_handle = s.handle,
+            .message_buffer = (&message)[0..1],
+            .data_buffer = buffer,
+            .flags = .{},
+        } })).net_receive;
+        if (maybe_err) |err| return err;
         assert(1 == count);
         return message;
     }
@@ -1144,7 +1145,7 @@ pub const Socket = struct {
     ) ReceiveTimeoutError!IncomingMessage {
         var message: IncomingMessage = .init;
         const maybe_err, const count = (try io.operateTimeout(.{ .net_receive = .{
-            .socket = s.handle,
+            .socket_handle = s.handle,
             .message_buffer = (&message)[0..1],
             .data_buffer = buffer,
             .flags = .{},

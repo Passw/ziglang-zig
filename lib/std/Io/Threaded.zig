@@ -13072,11 +13072,76 @@ fn netSendWindows(
 ) struct { ?net.Socket.SendError, usize } {
     if (!have_networking) return .{ error.NetworkDown, 0 };
     const t: *Threaded = @ptrCast(@alignCast(userdata));
-    _ = t;
-    _ = handle;
-    _ = messages;
-    _ = flags;
-    @panic("TODO netSendWindows");
+
+    // Ignored flags: confirm, eor, fastopen
+    const windows_flags: u32 =
+        @as(u32, if (flags.oob) ws2_32.MSG.OOB else 0) |
+        @as(u32, if (flags.dont_route) ws2_32.MSG.DONTROUTE else 0);
+
+    for (messages, 0..) |*m, i| {
+        netSendWindowsOne(t, handle, m, windows_flags) catch |err| return .{ err, i };
+    }
+    return .{ null, messages.len };
+}
+
+fn netSendWindowsOne(
+    t: *Threaded,
+    handle: net.Socket.Handle,
+    message: *net.OutgoingMessage,
+    flags: u32,
+) net.Socket.SendError!void {
+    var buf: ws2_32.WSABUF = .{
+        .buf = @constCast(message.data_ptr),
+        .len = std.math.cast(u32, message.data_len) orelse return error.MessageOversize,
+    };
+    var n: u32 = undefined;
+    var address: WsaAddress = undefined;
+    const address_size = addressToWsa(message.address, &address);
+    var syscall: Syscall = try .start();
+    while (true) {
+        const rc = ws2_32.WSASendTo(
+            handle,
+            (&buf)[0..1],
+            1,
+            &n,
+            flags,
+            &address.any,
+            address_size,
+            null,
+            null,
+        );
+        if (rc != ws2_32.SOCKET_ERROR) {
+            syscall.finish();
+            return;
+        }
+        switch (ws2_32.WSAGetLastError()) {
+            .EINTR, .ECANCELLED, .E_CANCELLED, .OPERATION_ABORTED => {
+                try syscall.checkCancel();
+                continue;
+            },
+            .NOTINITIALISED => {
+                syscall.finish();
+                try initializeWsa(t);
+                syscall = try .start();
+                continue;
+            },
+
+            .ECONNRESET => return syscall.fail(error.ConnectionResetByPeer),
+            .ENETDOWN => return syscall.fail(error.NetworkDown),
+            .ENETRESET => return syscall.fail(error.ConnectionResetByPeer),
+            .ENOTCONN => return syscall.fail(error.SocketUnconnected),
+            .EFAULT => unreachable, // a pointer is not completely contained in user address space.
+
+            else => |err| {
+                syscall.finish();
+                switch (err) {
+                    .EINVAL => return wsaErrorBug(err),
+                    .EMSGSIZE => return wsaErrorBug(err),
+                    else => return windows.unexpectedWSAError(err),
+                }
+            },
+        }
+    }
 }
 
 fn netSendUnavailable(
