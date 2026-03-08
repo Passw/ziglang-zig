@@ -65,7 +65,6 @@ stage3-release/bin/zig build test docs \
   --libc-runtimes $HOME/deps/glibc-2.43-musl-1.2.5 \
   -fwasmtime \
   -Dstatic-llvm \
-  -Dskip-test-incremental \
   -Dtarget=native-native-musl \
   --search-prefix "$PREFIX" \
   --zig-lib-dir "$PWD/../lib" \
