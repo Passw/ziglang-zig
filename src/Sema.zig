@@ -29920,7 +29920,6 @@ pub fn addReferenceEntry(
         .func => |f| assert(ip.unwrapCoercedFunc(f) == f), // for `.{ .func = f }`, `f` must be uncoerced
         else => {},
     }
-    if (!zcu.comp.config.incremental and zcu.comp.reference_trace == 0) return;
     const gop = try sema.references.getOrPut(sema.gpa, referenced_unit);
     if (gop.found_existing) return;
     try zcu.addUnitReference(sema.owner, referenced_unit, src, inline_frame: {
@@ -29937,7 +29936,6 @@ pub fn addTypeReferenceEntry(
     referenced_type: Type,
 ) !void {
     const zcu = sema.pt.zcu;
-    if (!zcu.comp.config.incremental and zcu.comp.reference_trace == 0) return;
     const gop = try sema.type_references.getOrPut(sema.gpa, referenced_type.toIntern());
     if (gop.found_existing) return;
     try zcu.addTypeReference(sema.owner, referenced_type.toIntern(), src);
