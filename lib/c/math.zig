@@ -45,6 +45,7 @@ comptime {
         symbol(&atanl, "atanl");
         symbol(&cbrt, "cbrt");
         symbol(&cbrtf, "cbrtf");
+        symbol(&cosh, "cosh");
         symbol(&exp10, "exp10");
         symbol(&exp10f, "exp10f");
         symbol(&hypot, "hypot");
@@ -123,6 +124,10 @@ fn copysign(x: f64, y: f64) callconv(.c) f64 {
 
 fn copysignl(x: c_longdouble, y: c_longdouble) callconv(.c) c_longdouble {
     return math.copysign(x, y);
+}
+
+fn cosh(x: f64) callconv(.c) f64 {
+    return math.cosh(x);
 }
 
 fn cbrt(x: f64) callconv(.c) f64 {
