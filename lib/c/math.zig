@@ -31,6 +31,7 @@ comptime {
     }
 
     if (builtin.target.isMinGW() or builtin.target.isMuslLibC() or builtin.target.isWasiLibC()) {
+        symbol(&coshf, "coshf");
         symbol(&hypotf, "hypotf");
         symbol(&hypotl, "hypotl");
         symbol(&nan, "nan");
@@ -127,6 +128,10 @@ fn copysignl(x: c_longdouble, y: c_longdouble) callconv(.c) c_longdouble {
 }
 
 fn cosh(x: f64) callconv(.c) f64 {
+    return math.cosh(x);
+}
+
+fn coshf(x: f32) callconv(.c) f32 {
     return math.cosh(x);
 }
 
