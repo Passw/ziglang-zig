@@ -509,7 +509,7 @@ pub const Mutex = enum(u8) {
     locked,
 
     pub fn tryLock(m: *Mutex) bool {
-        return @cmpxchgWeak(Mutex, m, .unlocked, .locked, .acquire, .monotonic) == null;
+        return @cmpxchgStrong(Mutex, m, .unlocked, .locked, .acquire, .monotonic) == null;
     }
 
     pub fn unlock(m: *Mutex) void {
