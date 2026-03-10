@@ -19,11 +19,11 @@ var base_allocator_instance = std.heap.FixedBufferAllocator.init("");
 
 /// This should only be used in temporary test programs.
 pub const allocator = allocator_instance.allocator();
-pub var allocator_instance: std.heap.GeneralPurposeAllocator(.{
+pub var allocator_instance: std.heap.DebugAllocator(.{
     .stack_trace_frames = if (std.debug.sys_can_stack_trace) 10 else 0,
     .resize_stack_traces = true,
     // A unique value so that when a default-constructed
-    // GeneralPurposeAllocator is incorrectly passed to testing allocator, or
+    // DebugAllocator is incorrectly passed to testing allocator, or
     // vice versa, panic occurs.
     .canary = @truncate(0x2731e675c3a701ba),
 }) = b: {
