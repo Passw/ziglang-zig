@@ -48,7 +48,6 @@ stage3-release/bin/zig build test docs \
   --maxrss ${ZSF_MAX_RSS:-0} \
   -Dstatic-llvm \
   -Dskip-non-native \
-  -Dskip-test-incremental \
   -Dtarget=native-native-musl \
   -Dcpu=native+longcall \
   --search-prefix "$PREFIX" \

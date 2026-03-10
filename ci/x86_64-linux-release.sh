@@ -21,7 +21,8 @@ export ZIG_LOCAL_CACHE_DIR="$PWD/zig-local-cache"
 
 # Test building from source without LLVM.
 cc -o bootstrap bootstrap.c
-./bootstrap
+# See comments in bootstrap.c for an explanation of the flag given here.
+./bootstrap --workaround-gcc-sra-miscomp
 ./zig2 build -Dno-lib
 ./zig-out/bin/zig test test/behavior.zig
 
@@ -64,7 +65,6 @@ stage3-release/bin/zig build test docs \
   --libc-runtimes $HOME/deps/glibc-2.43-musl-1.2.5 \
   -fwasmtime \
   -Dstatic-llvm \
-  -Dskip-test-incremental \
   -Dtarget=native-native-musl \
   --search-prefix "$PREFIX" \
   --zig-lib-dir "$PWD/../lib" \
