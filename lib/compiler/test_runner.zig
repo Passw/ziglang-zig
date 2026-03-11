@@ -17,7 +17,7 @@ var fba: std.heap.FixedBufferAllocator = .init(&fba_buffer);
 var fba_buffer: [8192]u8 = undefined;
 var stdin_buffer: [4096]u8 = undefined;
 var stdout_buffer: [4096]u8 = undefined;
-const runner_threaded_io: Io = Io.Threaded.global_single_threaded.ioBasic();
+const runner_threaded_io: Io = Io.Threaded.global_single_threaded.io();
 
 /// Keep in sync with logic in `std.Build.addRunArtifact` which decides whether
 /// the test runner will communicate with the build runner via `std.zig.Server`.
@@ -38,10 +38,10 @@ pub fn main(init: std.process.Init.Minimal) void {
     }
 
     if (need_simple) {
-        return mainSimple() catch @panic("test failure");
+        return mainSimple() catch |err| std.debug.panic("test failure: {t}", .{err});
     }
 
-    const args = init.args.toSlice(fba.allocator()) catch @panic("unable to parse command line args");
+    const args = init.args.toSlice(fba.allocator()) catch |err| std.debug.panic("unable to parse command line args: {t}", .{err});
 
     var listen = false;
     var opt_cache_dir: ?[]const u8 = null;
@@ -55,7 +55,7 @@ pub fn main(init: std.process.Init.Minimal) void {
         } else if (std.mem.startsWith(u8, arg, "--cache-dir")) {
             opt_cache_dir = arg["--cache-dir=".len..];
         } else {
-            @panic("unrecognized command line argument");
+            std.debug.panic("unrecognized command line argument: {s}", .{arg});
         }
     }
 
@@ -65,7 +65,7 @@ pub fn main(init: std.process.Init.Minimal) void {
     }
 
     if (listen) {
-        return mainServer(init) catch @panic("internal test runner failure");
+        return mainServer(init) catch |err| std.debug.panic("internal test runner failure: {t}", .{err});
     } else {
         return mainTerminal(init);
     }
@@ -379,7 +379,7 @@ var fuzz_amount_or_instance: u64 = undefined;
 
 pub fn fuzz(
     context: anytype,
-    comptime testOne: fn (context: @TypeOf(context), []const u8) anyerror!void,
+    comptime testOne: fn (context: @TypeOf(context), *std.testing.Smith) anyerror!void,
     options: testing.FuzzInputOptions,
 ) anyerror!void {
     // Prevent this function from confusing the fuzzer by omitting its own code
@@ -406,12 +406,12 @@ pub fn fuzz(
     const global = struct {
         var ctx: @TypeOf(context) = undefined;
 
-        fn test_one(input: fuzz_abi.Slice) callconv(.c) void {
+        fn test_one() callconv(.c) void {
             @disableInstrumentation();
             testing.allocator_instance = .{};
             defer if (testing.allocator_instance.deinit() == .leak) std.process.exit(1);
             log_err_count = 0;
-            testOne(ctx, input.toSlice()) catch |err| switch (err) {
+            testOne(ctx, @constCast(&testing.Smith{ .in = null })) catch |err| switch (err) {
                 error.SkipZigTest => return,
                 else => {
                     const stderr = std.debug.lockStderr(&.{}).terminal();
@@ -435,13 +435,11 @@ pub fn fuzz(
         const prev_allocator_state = testing.allocator_instance;
         testing.allocator_instance = .{};
         defer testing.allocator_instance = prev_allocator_state;
-
         global.ctx = context;
-        fuzz_abi.fuzzer_init_test(&global.test_one, .fromSlice(builtin.test_functions[fuzz_test_index].name));
 
+        fuzz_abi.fuzzer_set_test(&global.test_one, .fromSlice(builtin.test_functions[fuzz_test_index].name));
         for (options.corpus) |elem|
             fuzz_abi.fuzzer_new_input(.fromSlice(elem));
-
         fuzz_abi.fuzzer_main(fuzz_mode, fuzz_amount_or_instance);
         return;
     }
@@ -449,10 +447,12 @@ pub fn fuzz(
     // When the unit test executable is not built in fuzz mode, only run the
     // provided corpus.
     for (options.corpus) |input| {
-        try testOne(context, input);
+        var smith: testing.Smith = .{ .in = input };
+        try testOne(context, &smith);
     }
 
     // In case there is no provided corpus, also use an empty
     // string as a smoke test.
-    try testOne(context, "");
+    var smith: testing.Smith = .{ .in = "" };
+    try testOne(context, &smith);
 }

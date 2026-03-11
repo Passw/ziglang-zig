@@ -12,6 +12,8 @@ const Allocator = std.mem.Allocator;
 
 handle: Handle,
 
+pub const Handle = std.posix.fd_t;
+
 pub const path = std.fs.path;
 
 /// The maximum length of a file path that the operating system will accept.
@@ -332,7 +334,7 @@ pub fn walkSelectively(dir: Dir, allocator: Allocator) !SelectiveWalker {
 
     return .{
         .stack = stack,
-        .name_buffer = .{},
+        .name_buffer = .empty,
         .allocator = allocator,
     };
 }
@@ -395,8 +397,6 @@ pub const Walker = struct {
 pub fn walk(dir: Dir, allocator: Allocator) Allocator.Error!Walker {
     return .{ .inner = try walkSelectively(dir, allocator) };
 }
-
-pub const Handle = std.posix.fd_t;
 
 pub const PathNameError = error{
     /// Returned when an insufficient buffer is provided that cannot fit the
@@ -940,6 +940,7 @@ pub const RenameError = error{
     /// Attempted to replace a nonempty directory.
     DirNotEmpty,
     PermissionDenied,
+    /// The file attempted to be moved or replaced is a running executable.
     FileBusy,
     DiskQuota,
     IsDir,
@@ -952,7 +953,6 @@ pub const RenameError = error{
     ReadOnlyFileSystem,
     CrossDevice,
     NoDevice,
-    SharingViolation,
     PipeBusy,
     /// On Windows, `\\server` or `\\server\share` was not found.
     NetworkNotFound,
@@ -1167,6 +1167,8 @@ pub const ReadLinkError = error{
     /// intercepts file system operations and makes them significantly slower
     /// in addition to possibly failing with this error code.
     AntivirusInterference,
+    /// File attempted to be opened is a running executable.
+    FileBusy,
 } || PathNameError || Io.Cancelable || Io.UnexpectedError;
 
 /// Obtain target of a symbolic link.
@@ -1698,7 +1700,7 @@ pub fn copyFile(
     options: CopyFileOptions,
 ) CopyFileError!void {
     const file = try source_dir.openFile(io, source_path, .{});
-    var file_reader: File.Reader = .init(.{ .handle = file.handle }, io, &.{});
+    var file_reader: File.Reader = .init(file, io, &.{});
     defer file_reader.file.close(io);
 
     const permissions = options.permissions orelse blk: {
@@ -1791,6 +1793,8 @@ pub const CreateFileAtomicError = error{
     NotDir,
     WouldBlock,
     ReadOnlyFileSystem,
+    /// The file attempted to be created is a running executable.
+    FileBusy,
 } || Io.Dir.PathNameError || Io.Cancelable || Io.UnexpectedError;
 
 /// Create an unnamed ephemeral file that can eventually be atomically

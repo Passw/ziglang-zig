@@ -28,6 +28,8 @@ const TestTarget = struct {
     use_lld: ?bool = null,
     pic: ?bool = null,
     strip: ?bool = null,
+    function_sections: ?bool = null,
+    data_sections: ?bool = null,
     skip_modules: []const []const u8 = &.{},
 
     // This is intended for targets that, for any reason, shouldn't be run as part of a normal test
@@ -40,7 +42,7 @@ const test_targets = blk: {
     // getBaselineCpuFeatures calls populateDependencies which has a O(N ^ 2) algorithm
     // (where N is roughly 160, which technically makes it O(1), but it adds up to a
     // lot of branches)
-    @setEvalBranchQuota(60000);
+    @setEvalBranchQuota(80_000);
     break :blk [_]TestTarget{
         // Native Targets
 
@@ -1526,36 +1528,43 @@ const test_targets = blk: {
         },
 
         .{
-            .target = .{
-                .cpu_arch = .thumb,
-                .os_tag = .windows,
-                .abi = .msvc,
-            },
+            .target = std.Target.Query.parse(.{
+                .arch_os_abi = "thumb-windows-msvc",
+                .cpu_features = "baseline+long_calls",
+            }) catch unreachable,
+            .pic = false, // Long calls don't work with PIC.
+            .function_sections = true,
+            .data_sections = true,
         },
         .{
-            .target = .{
-                .cpu_arch = .thumb,
-                .os_tag = .windows,
-                .abi = .msvc,
-            },
+            .target = std.Target.Query.parse(.{
+                .arch_os_abi = "thumb-windows-msvc",
+                .cpu_features = "baseline+long_calls",
+            }) catch unreachable,
             .link_libc = true,
+            .pic = false, // Long calls don't work with PIC.
+            .function_sections = true,
+            .data_sections = true,
         },
-        // https://github.com/ziglang/zig/issues/24016
-        // .{
-        //     .target = .{
-        //         .cpu_arch = .thumb,
-        //         .os_tag = .windows,
-        //         .abi = .gnu,
-        //     },
-        // },
-        // .{
-        //     .target = .{
-        //         .cpu_arch = .thumb,
-        //         .os_tag = .windows,
-        //         .abi = .gnu,
-        //     },
-        //     .link_libc = true,
-        // },
+        .{
+            .target = std.Target.Query.parse(.{
+                .arch_os_abi = "thumb-windows-gnu",
+                .cpu_features = "baseline+long_calls",
+            }) catch unreachable,
+            .pic = false, // Long calls don't work with PIC.
+            .function_sections = true,
+            .data_sections = true,
+        },
+        .{
+            .target = std.Target.Query.parse(.{
+                .arch_os_abi = "thumb-windows-gnu",
+                .cpu_features = "baseline+long_calls",
+            }) catch unreachable,
+            .link_libc = true,
+            .pic = false, // Long calls don't work with PIC.
+            .function_sections = true,
+            .data_sections = true,
+        },
 
         .{
             .target = .{
@@ -1705,13 +1714,14 @@ const c_abi_targets = blk: {
             },
         },
 
-        .{
-            .target = .{
-                .cpu_arch = .hexagon,
-                .os_tag = .linux,
-                .abi = .musl,
-            },
-        },
+        // https://gitlab.com/qemu-project/qemu/-/issues/3291
+        // .{
+        //     .target = .{
+        //         .cpu_arch = .hexagon,
+        //         .os_tag = .linux,
+        //         .abi = .musl,
+        //     },
+        // },
 
         .{
             .target = .{
@@ -2300,7 +2310,7 @@ pub fn addCliTests(b: *std.Build) *Step {
     return step;
 }
 
-const ModuleTestOptions = struct {
+pub const ModuleTestOptions = struct {
     test_filters: []const []const u8,
     test_target_filters: []const []const u8,
     test_extra_targets: bool,
@@ -2309,7 +2319,7 @@ const ModuleTestOptions = struct {
     desc: []const u8,
     optimize_modes: []const OptimizeMode,
     include_paths: []const []const u8,
-    test_default_only: bool,
+    test_only: ?TestOnly,
     skip_single_threaded: bool,
     skip_non_native: bool,
     skip_spirv: bool,
@@ -2325,20 +2335,31 @@ const ModuleTestOptions = struct {
     max_rss: usize = 0,
     no_builtin: bool = false,
     build_options: ?*Step.Options = null,
+
+    pub const TestOnly = union(enum) {
+        default: void,
+        fuzz: OptimizeMode,
+    };
 };
 
 pub fn addModuleTests(b: *std.Build, options: ModuleTestOptions) *Step {
     const step = b.step(b.fmt("test-{s}", .{options.name}), options.desc);
 
-    if (options.test_default_only) {
-        const test_target = &test_targets[0];
+    if (options.test_only) |test_only| {
+        const test_target: TestTarget = switch (test_only) {
+            .default => test_targets[0],
+            .fuzz => |optimize| .{
+                .optimize_mode = optimize,
+                .use_llvm = true,
+            },
+        };
         const resolved_target = b.resolveTargetQuery(test_target.target);
         const triple_txt = resolved_target.query.zigTriple(b.allocator) catch @panic("OOM");
         addOneModuleTest(b, step, test_target, &resolved_target, triple_txt, options);
         return step;
     }
 
-    for_targets: for (&test_targets) |*test_target| {
+    for_targets: for (test_targets) |test_target| {
         if (test_target.skip_modules.len > 0) {
             for (test_target.skip_modules) |skip_mod| {
                 if (std.mem.eql(u8, options.name, skip_mod)) continue :for_targets;
@@ -2415,7 +2436,7 @@ pub fn addModuleTests(b: *std.Build, options: ModuleTestOptions) *Step {
 fn addOneModuleTest(
     b: *std.Build,
     step: *Step,
-    test_target: *const TestTarget,
+    test_target: TestTarget,
     resolved_target: *const std.Build.ResolvedTarget,
     triple_txt: []const u8,
     options: ModuleTestOptions,
@@ -2454,6 +2475,8 @@ fn addOneModuleTest(
     if (options.build_options) |build_options| {
         these_tests.root_module.addOptions("build_options", build_options);
     }
+    if (test_target.function_sections) |fs| these_tests.link_function_sections = fs;
+    if (test_target.data_sections) |ds| these_tests.link_data_sections = ds;
     const single_threaded_suffix = if (test_target.single_threaded == true) "-single" else "";
     const backend_suffix = if (test_target.use_llvm == true)
         "-llvm"
@@ -2885,12 +2908,11 @@ const libc_targets: []const std.Target.Query = &.{
         .os_tag = .linux,
         .abi = .musl,
     },
-    // Macros like FE_INVALID are defined by musl, but they shouldn't.
-    // .{
-    //     .cpu_arch = .loongarch64,
-    //     .os_tag = .linux,
-    //     .abi = .muslsf,
-    // },
+    .{
+        .cpu_arch = .loongarch64,
+        .os_tag = .linux,
+        .abi = .muslsf,
+    },
     // .{
     //     .cpu_arch = .mips,
     //     .os_tag = .linux,

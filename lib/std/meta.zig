@@ -63,7 +63,7 @@ pub fn alignment(comptime T: type) comptime_int {
             .pointer, .@"fn" => alignment(info.child),
             else => @alignOf(T),
         },
-        .pointer => |info| info.alignment,
+        .pointer => |info| info.alignment orelse @alignOf(info.child),
         else => @alignOf(T),
     };
 }
@@ -315,7 +315,7 @@ test declarationInfo {
         try testing.expect(comptime mem.eql(u8, info.name, "a"));
     }
 }
-pub fn fields(comptime T: type) switch (@typeInfo(T)) {
+pub inline fn fields(comptime T: type) switch (@typeInfo(T)) {
     .@"struct" => []const Type.StructField,
     .@"union" => []const Type.UnionField,
     .@"enum" => []const Type.EnumField,
@@ -750,25 +750,6 @@ pub fn fieldIndex(comptime T: type, comptime name: []const u8) ?comptime_int {
             return i;
     }
     return null;
-}
-
-/// Returns a slice of pointers to public declarations of a namespace.
-pub fn declList(comptime Namespace: type, comptime Decl: type) []const *const Decl {
-    const S = struct {
-        fn declNameLessThan(context: void, lhs: *const Decl, rhs: *const Decl) bool {
-            _ = context;
-            return mem.lessThan(u8, lhs.name, rhs.name);
-        }
-    };
-    comptime {
-        const decls = declarations(Namespace);
-        var array: [decls.len]*const Decl = undefined;
-        for (decls, 0..) |decl, i| {
-            array[i] = &@field(Namespace, decl.name);
-        }
-        mem.sort(*const Decl, &array, {}, S.declNameLessThan);
-        return &array;
-    }
 }
 
 /// Deprecated: use @Int

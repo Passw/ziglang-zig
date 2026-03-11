@@ -9,21 +9,16 @@ const Allocator = std.mem.Allocator;
 const windows = std.os.windows;
 const Alignment = std.mem.Alignment;
 
-pub const ArenaAllocator = @import("heap/arena_allocator.zig").ArenaAllocator;
+pub const ArenaAllocator = @import("heap/ArenaAllocator.zig");
 pub const SmpAllocator = @import("heap/SmpAllocator.zig");
 pub const FixedBufferAllocator = @import("heap/FixedBufferAllocator.zig");
 pub const PageAllocator = @import("heap/PageAllocator.zig");
-pub const SbrkAllocator = @import("heap/sbrk_allocator.zig").SbrkAllocator;
-pub const ThreadSafeAllocator = @import("heap/ThreadSafeAllocator.zig");
-pub const WasmAllocator = @import("heap/WasmAllocator.zig");
+pub const WasmAllocator = if (builtin.single_threaded) BrkAllocator else @compileError("unimplemented");
+pub const BrkAllocator = @import("heap/BrkAllocator.zig");
 
 pub const DebugAllocatorConfig = @import("heap/debug_allocator.zig").Config;
 pub const DebugAllocator = @import("heap/debug_allocator.zig").DebugAllocator;
 pub const Check = enum { ok, leak };
-/// Deprecated; to be removed after 0.14.0 is tagged.
-pub const GeneralPurposeAllocatorConfig = DebugAllocatorConfig;
-/// Deprecated; to be removed after 0.14.0 is tagged.
-pub const GeneralPurposeAllocator = DebugAllocator;
 
 /// A memory pool that can allocate objects of a single type very quickly.
 /// Use this when you need to allocate a lot of objects of the same type,
@@ -40,9 +35,6 @@ pub const MemoryPoolAligned = memory_pool.Aligned;
 pub const MemoryPoolExtra = memory_pool.Extra;
 /// Deprecated; use `memory_pool.Options`.
 pub const MemoryPoolOptions = memory_pool.Options;
-
-/// TODO Utilize this on Windows.
-pub var next_mmap_addr_hint: ?[*]align(page_size_min) u8 = null;
 
 /// comptime-known minimum page size of the target.
 ///
@@ -110,11 +102,11 @@ pub fn defaultQueryPageSize() usize {
             break :size @intCast(vm_info.page_size);
         },
         .windows => {
-            var sbi: windows.SYSTEM_BASIC_INFORMATION = undefined;
+            var sbi: windows.SYSTEM.BASIC_INFORMATION = undefined;
             switch (windows.ntdll.NtQuerySystemInformation(
-                .SystemBasicInformation,
+                .Basic,
                 &sbi,
-                @sizeOf(windows.SYSTEM_BASIC_INFORMATION),
+                @sizeOf(windows.SYSTEM.BASIC_INFORMATION),
                 null,
             )) {
                 .SUCCESS => break :size sbi.PageSize,
@@ -356,9 +348,6 @@ pub const page_allocator: Allocator = if (@hasDecl(root, "os") and
 else if (builtin.target.cpu.arch.isWasm()) .{
     .ptr = undefined,
     .vtable = &WasmAllocator.vtable,
-} else if (builtin.target.os.tag == .plan9) .{
-    .ptr = undefined,
-    .vtable = &SbrkAllocator(std.os.plan9.sbrk).vtable,
 } else .{
     .ptr = undefined,
     .vtable = &PageAllocator.vtable,
@@ -369,14 +358,16 @@ pub const smp_allocator: Allocator = .{
     .vtable = &SmpAllocator.vtable,
 };
 
-/// This allocator is fast, small, and specific to WebAssembly. In the future,
-/// this will be the implementation automatically selected by
-/// `GeneralPurposeAllocator` when compiling in `ReleaseSmall` mode for wasm32
-/// and wasm64 architectures.
-/// Until then, it is available here to play with.
+/// This allocator is fast, small, and specific to WebAssembly.
 pub const wasm_allocator: Allocator = .{
     .ptr = undefined,
     .vtable = &WasmAllocator.vtable,
+};
+
+/// Supports single-threaded WebAssembly and Linux.
+pub const brk_allocator: Allocator = .{
+    .ptr = undefined,
+    .vtable = &BrkAllocator.vtable,
 };
 
 /// Returns a `StackFallbackAllocator` allocating using either a
@@ -1011,12 +1002,13 @@ const page_size_max_default: ?usize = switch (builtin.os.tag) {
 test {
     _ = @import("heap/memory_pool.zig");
     _ = ArenaAllocator;
-    _ = GeneralPurposeAllocator;
+    _ = DebugAllocator(.{});
     _ = FixedBufferAllocator;
-    _ = ThreadSafeAllocator;
-    _ = SbrkAllocator;
-    if (builtin.target.cpu.arch.isWasm()) {
-        _ = WasmAllocator;
+    if (builtin.single_threaded) {
+        if (builtin.cpu.arch.isWasm() or (builtin.os.tag == .linux and !builtin.link_libc)) {
+            _ = brk_allocator;
+        }
+    } else {
+        _ = smp_allocator;
     }
-    if (!builtin.single_threaded) _ = smp_allocator;
 }

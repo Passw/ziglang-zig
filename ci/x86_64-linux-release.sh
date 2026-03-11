@@ -11,7 +11,7 @@ CACHE_BASENAME="zig+llvm+lld+clang-$TARGET-0.16.0-dev.104+689461e31"
 PREFIX="$HOME/deps/$CACHE_BASENAME"
 ZIG="$PREFIX/bin/zig"
 
-export PATH="$HOME/deps/wasmtime-v38.0.3-x86_64-linux:$HOME/deps/qemu-linux-x86_64-10.2.0/bin:$HOME/local/bin:$PATH"
+export PATH="$HOME/deps/wasmtime-v42.0.1-x86_64-linux:$HOME/deps/qemu-linux-x86_64-10.2.1.1/bin:$HOME/local/bin:$PATH"
 
 # Override the cache directories because they won't actually help other CI runs
 # which will be testing alternate versions of zig, and ultimately would just
@@ -21,7 +21,8 @@ export ZIG_LOCAL_CACHE_DIR="$PWD/zig-local-cache"
 
 # Test building from source without LLVM.
 cc -o bootstrap bootstrap.c
-./bootstrap
+# See comments in bootstrap.c for an explanation of the flag given here.
+./bootstrap --workaround-gcc-sra-miscomp
 ./zig2 build -Dno-lib
 ./zig-out/bin/zig test test/behavior.zig
 
@@ -59,7 +60,9 @@ stage3-release/bin/zig build \
 stage3-release/bin/zig build test docs \
   --maxrss ${ZSF_MAX_RSS:-0} \
   -Dlldb=$HOME/deps/lldb-zig/Release-e0a42bb34/bin/lldb \
+  -Dlibc-test-path=$HOME/deps/libc-test-f2bac77 \
   -fqemu \
+  --libc-runtimes $HOME/deps/glibc-2.43-musl-1.2.5 \
   -fwasmtime \
   -Dstatic-llvm \
   -Dtarget=native-native-musl \

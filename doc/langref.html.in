@@ -128,6 +128,7 @@
       }
       .table-wrapper {
         width: 100%;
+        margin: 1em auto;
         overflow-x: auto;
       }
 
@@ -2102,8 +2103,9 @@ or
       less than {#syntax#}1 << 29{#endsyntax#}.
       </p>
       <p>
-      In Zig, a pointer type has an alignment value. If the value is equal to the
-      alignment of the underlying type, it can be omitted from the type:
+      Pointer types may explicitly specify an alignment in bytes. If it is not
+      specified, the alignment is assumed to be equal to the alignment of the
+      underlying type.
       </p>
       {#code|test_variable_alignment.zig#}
 
@@ -3471,6 +3473,42 @@ void do_a_thing(struct Foo *foo) {
       without rounding (i.e. the integer's precision does not exceed the float's significand precision).
       Larger integer types that cannot be safely coerced must be explicitly casted with {#link|@floatFromInt#}.
       </p>
+      <div class="table-wrapper">
+      <table>
+        <thead>
+        <tr>
+          <th scope="col">Float Type</th>
+          <th scope="col">Largest Integer Types</th>
+        </tr>
+        </thead>
+        <tbody>
+        <tr>
+            <th scope="row">{#syntax#}f16{#endsyntax#}</th>
+            <td>{#syntax#}i12{#endsyntax#} and {#syntax#}u11{#endsyntax#}</td>
+        </tr>
+        <tr>
+            <th scope="row">{#syntax#}f32{#endsyntax#}</th>
+            <td>{#syntax#}i25{#endsyntax#} and {#syntax#}u24{#endsyntax#}</td>
+        </tr>
+        <tr>
+            <th scope="row">{#syntax#}f64{#endsyntax#}</th>
+            <td>{#syntax#}i54{#endsyntax#} and {#syntax#}u53{#endsyntax#}</td>
+        </tr>
+        <tr>
+            <th scope="row">{#syntax#}f80{#endsyntax#}</th>
+            <td>{#syntax#}i65{#endsyntax#} and {#syntax#}u64{#endsyntax#}</td>
+        </tr>
+        <tr>
+            <th scope="row">{#syntax#}f128{#endsyntax#}</th>
+            <td>{#syntax#}i114{#endsyntax#} and {#syntax#}u113{#endsyntax#}</td>
+        </tr>
+        <tr>
+            <th scope="row">{#syntax#}c_longdouble{#endsyntax#}</th>
+            <td>Varies by target</td>
+        </tr>
+        </tbody>
+      </table>
+      </div>
       {#code|test_int_to_float_coercion.zig#}
       {#code|test_failed_int_to_float_coercion.zig#}
 
@@ -4828,7 +4866,7 @@ fn cmpxchgWeakButNotAtomic(comptime T: type, ptr: *T, expected_value: T, new_val
       {#header_close#}
 
       {#header_open|@errorFromInt#}
-      <pre>{#syntax#}@errorFromInt(value: std.meta.Int(.unsigned, @bitSizeOf(anyerror))) anyerror{#endsyntax#}</pre>
+      <pre>{#syntax#}@errorFromInt(value: @Int(.unsigned, @bitSizeOf(anyerror))) anyerror{#endsyntax#}</pre>
       <p>
       Converts from the integer representation of an error into {#link|The Global Error Set#} type.
       </p>
@@ -5069,7 +5107,7 @@ fn cmpxchgWeakButNotAtomic(comptime T: type, ptr: *T, expected_value: T, new_val
       {#header_close#}
 
       {#header_open|@intFromError#}
-      <pre>{#syntax#}@intFromError(err: anytype) std.meta.Int(.unsigned, @bitSizeOf(anyerror)){#endsyntax#}</pre>
+      <pre>{#syntax#}@intFromError(err: anytype) @Int(.unsigned, @bitSizeOf(anyerror)){#endsyntax#}</pre>
       <p>
       Supports the following types:
       </p>
@@ -6330,7 +6368,7 @@ fn cmpxchgWeakButNotAtomic(comptime T: type, ptr: *T, expected_value: T, new_val
       </p>
       <p>
       Zig has a general purpose allocator available to be imported
-      with {#syntax#}std.heap.GeneralPurposeAllocator{#endsyntax#}. However, it is still recommended to
+      with {#syntax#}std.heap.DebugAllocator{#endsyntax#}. However, it is still recommended to
       follow the {#link|Choosing an Allocator#} guide.
       </p>
 

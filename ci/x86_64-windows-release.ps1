@@ -1,20 +1,9 @@
 $TARGET = "x86_64-windows-gnu"
-$ZIG_LLVM_CLANG_LLD_NAME = "zig+llvm+lld+clang-$TARGET-0.16.0-dev.104+689461e31"
 $MCPU = "baseline"
-$ZIG_LLVM_CLANG_LLD_URL = "https://ziglang.org/deps/$ZIG_LLVM_CLANG_LLD_NAME.zip"
-$PREFIX_PATH = "$($Env:USERPROFILE)\$ZIG_LLVM_CLANG_LLD_NAME"
+$PREFIX_PATH = "$($Env:USERPROFILE)\deps\zig+llvm+lld+clang-$TARGET-0.16.0-dev.104+689461e31"
 $ZIG = "$PREFIX_PATH\bin\zig.exe"
 $ZIG_LIB_DIR = "$(Get-Location)\lib"
 $ZSF_MAX_RSS = if ($Env:ZSF_MAX_RSS) { $Env:ZSF_MAX_RSS } else { 0 }
-
-if (!(Test-Path "$PREFIX_PATH.zip")) {
-    Write-Output "Downloading $ZIG_LLVM_CLANG_LLD_URL"
-    Invoke-WebRequest -Uri "$ZIG_LLVM_CLANG_LLD_URL" -OutFile "$PREFIX_PATH.zip"
-
-    Write-Output "Extracting..."
-    Add-Type -AssemblyName System.IO.Compression.FileSystem ;
-    [System.IO.Compression.ZipFile]::ExtractToDirectory("$PREFIX_PATH.zip", "$PREFIX_PATH\..")
-}
 
 function CheckLastExitCode {
     if (!$?) {
@@ -35,7 +24,7 @@ Set-Location -Path 'build-release'
 
 # CMake gives a syntax error when file paths with backward slashes are used.
 # Here, we use forward slashes only to work around this.
-& cmake .. `
+cmake .. `
   -GNinja `
   -DCMAKE_INSTALL_PREFIX="stage3-release" `
   -DCMAKE_PREFIX_PATH="$($PREFIX_PATH -Replace "\\", "/")" `
@@ -54,7 +43,7 @@ ninja install
 CheckLastExitCode
 
 Write-Output "Main test suite..."
-& "stage3-release\bin\zig.exe" build test docs `
+stage3-release\bin\zig.exe build test docs `
   --maxrss $ZSF_MAX_RSS `
   --zig-lib-dir "$ZIG_LIB_DIR" `
   --search-prefix "$PREFIX_PATH" `
@@ -67,7 +56,7 @@ CheckLastExitCode
 
 # Ensure that stage3 and stage4 are byte-for-byte identical.
 Write-Output "Build and compare stage4..."
-& "stage3-release\bin\zig.exe" build `
+stage3-release\bin\zig.exe build `
   --prefix stage4-release `
   -Denable-llvm `
   -Dno-lib `
@@ -85,39 +74,38 @@ Compare-Object (Get-Content stage3-release\bin\zig.exe) (Get-Content stage4-rele
 CheckLastExitCode
 
 Write-Output "Build x86_64-windows-msvc behavior tests using the C backend..."
-& "stage3-release\bin\zig.exe" test `
-  ..\test\behavior.zig `
-  --zig-lib-dir "$ZIG_LIB_DIR" `
-  -ofmt=c `
-  -femit-bin="test-x86_64-windows-msvc.c" `
-  --test-no-exec `
-  -target x86_64-windows-msvc `
-  -lc
-CheckLastExitCode
-
-& "stage3-release\bin\zig.exe" build-obj `
+stage3-release\bin\zig.exe build-obj `
   --zig-lib-dir "$ZIG_LIB_DIR" `
   -ofmt=c `
   -OReleaseSmall `
   --name compiler_rt `
   -femit-bin="compiler_rt-x86_64-windows-msvc.c" `
-  --dep build_options `
   -target x86_64-windows-msvc `
-  -Mroot="..\lib\compiler_rt.zig" `
-  -Mbuild_options="config.zig"
+  -lc `
+  ..\lib\compiler_rt.zig
 CheckLastExitCode
 
-Import-Module "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+stage3-release\bin\zig.exe test `
+  --zig-lib-dir "$ZIG_LIB_DIR" `
+  -ofmt=c `
+  -femit-bin="behavior-x86_64-windows-msvc.c" `
+  --test-no-exec `
+  -target x86_64-windows-msvc `
+  -lc `
+  ..\test\behavior.zig
 CheckLastExitCode
 
-Enter-VsDevShell -VsInstallPath "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools" `
+Import-Module "C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+CheckLastExitCode
+
+Enter-VsDevShell -VsInstallPath "C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools" `
   -DevCmdArguments '-arch=x64 -no_logo' `
   -StartInPath $(Get-Location)
 CheckLastExitCode
 
 Write-Output "Build and run behavior tests with msvc..."
-& cl.exe -I..\lib test-x86_64-windows-msvc.c compiler_rt-x86_64-windows-msvc.c /W3 /Z7 -link -nologo -debug -subsystem:console kernel32.lib ntdll.lib libcmt.lib ws2_32.lib
+cl /I..\lib /W3 /Z7 behavior-x86_64-windows-msvc.c compiler_rt-x86_64-windows-msvc.c /link /nologo /debug /subsystem:console kernel32.lib ntdll.lib libcmt.lib ws2_32.lib
 CheckLastExitCode
 
-& .\test-x86_64-windows-msvc.exe
+.\behavior-x86_64-windows-msvc
 CheckLastExitCode

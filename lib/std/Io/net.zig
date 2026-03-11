@@ -153,8 +153,9 @@ pub const IpAddress = union(enum) {
 
     /// `port` is native-endian.
     pub fn setPort(a: *IpAddress, port: u16) void {
-        switch (a) {
-            inline .ip4, .ip6 => |*x| x.port = port,
+        switch (a.*) {
+            .ip4 => a.ip4.port = port,
+            .ip6 => a.ip6.port = port,
         }
     }
 
@@ -1108,25 +1109,7 @@ pub const Socket = struct {
         if (n != messages.len) return err.?;
     }
 
-    pub const ReceiveError = error{
-        /// Insufficient memory or other resource internal to the operating system.
-        SystemResources,
-        /// Per-process limit on the number of open file descriptors has been reached.
-        ProcessFdQuotaExceeded,
-        /// System-wide limit on the total number of open files has been reached.
-        SystemFdQuotaExceeded,
-        /// Local end has been shut down on a connection-oriented socket, or
-        /// the socket was never connected.
-        SocketUnconnected,
-        /// The socket type requires that message be sent atomically, and the
-        /// size of the message to be sent made this impossible. The message
-        /// was not transmitted, or was partially transmitted.
-        MessageOversize,
-        /// Network connection was unexpectedly closed by sender.
-        ConnectionResetByPeer,
-        /// The local network interface used to reach the destination is offline.
-        NetworkDown,
-    } || Io.UnexpectedError || Io.Cancelable;
+    pub const ReceiveError = Io.Operation.NetReceive.Error || Io.Cancelable;
 
     /// Waits for data. Connectionless.
     ///
@@ -1134,17 +1117,18 @@ pub const Socket = struct {
     /// * `receiveTimeout`
     pub fn receive(s: *const Socket, io: Io, buffer: []u8) ReceiveError!IncomingMessage {
         var message: IncomingMessage = .init;
-        const maybe_err, const count = io.vtable.netReceive(io.userdata, s.handle, (&message)[0..1], buffer, .{}, .none);
-        if (maybe_err) |err| switch (err) {
-            // No timeout is passed to `netReceieve`, so it must not return timeout related errors.
-            error.Timeout, error.UnsupportedClock => unreachable,
-            else => |e| return e,
-        };
+        const maybe_err, const count = (try io.operate(.{ .net_receive = .{
+            .socket_handle = s.handle,
+            .message_buffer = (&message)[0..1],
+            .data_buffer = buffer,
+            .flags = .{},
+        } })).net_receive;
+        if (maybe_err) |err| return err;
         assert(1 == count);
         return message;
     }
 
-    pub const ReceiveTimeoutError = ReceiveError || Io.Timeout.Error;
+    pub const ReceiveTimeoutError = ReceiveError || Io.Timeout.Error || Io.ConcurrentError;
 
     /// Waits for data. Connectionless.
     ///
@@ -1160,7 +1144,12 @@ pub const Socket = struct {
         timeout: Io.Timeout,
     ) ReceiveTimeoutError!IncomingMessage {
         var message: IncomingMessage = .init;
-        const maybe_err, const count = io.vtable.netReceive(io.userdata, s.handle, (&message)[0..1], buffer, .{}, timeout);
+        const maybe_err, const count = (try io.operateTimeout(.{ .net_receive = .{
+            .socket_handle = s.handle,
+            .message_buffer = (&message)[0..1],
+            .data_buffer = buffer,
+            .flags = .{},
+        } }, timeout)).net_receive;
         if (maybe_err) |err| return err;
         assert(1 == count);
         return message;
@@ -1185,7 +1174,42 @@ pub const Socket = struct {
         flags: ReceiveFlags,
         timeout: Io.Timeout,
     ) struct { ?ReceiveTimeoutError, usize } {
-        return io.vtable.netReceive(io.userdata, s.handle, message_buffer, data_buffer, flags, timeout);
+        const result = io.operateTimeout(.{ .net_receive = .{
+            .socket_handle = s.handle,
+            .message_buffer = message_buffer,
+            .data_buffer = data_buffer,
+            .flags = flags,
+        } }, timeout) catch |err| return .{ err, 0 };
+        return result.net_receive;
+    }
+
+    pub const CreatePairError = error{
+        OperationUnsupported,
+        AccessDenied,
+        AddressFamilyUnsupported,
+        ProtocolUnsupportedBySystem,
+        /// The per-process limit on the number of open file descriptors has been reached.
+        ProcessFdQuotaExceeded,
+        /// The system-wide limit on the total number of open files has been reached.
+        SystemFdQuotaExceeded,
+        /// Insufficient memory is available. The socket cannot be created
+        /// until sufficient resources are freed.
+        SystemResources,
+        ProtocolUnsupportedByAddressFamily,
+        SocketModeUnsupported,
+    } || Io.UnexpectedError || Io.Cancelable;
+
+    pub const CreatePairOptions = struct {
+        family: IpAddress.Family = .ip4,
+        mode: Mode = .stream,
+        protocol: ?Protocol = null,
+    };
+
+    /// Create a set of two sockets that are connected to each other.
+    ///
+    /// Also known as "socketpair".
+    pub fn createPair(io: Io, options: CreatePairOptions) CreatePairError![2]Socket {
+        return io.vtable.netSocketCreatePair(io.userdata, options);
     }
 };
 
@@ -1400,6 +1424,11 @@ test "parsing IPv6 addresses" {
     try testIp6Parse("fe80::abcd:ef12%3");
     try testIp6Parse("ff02::");
     try testIp6Parse("ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff");
+}
+test "IpAddress.setPort works" {
+    var addr: IpAddress = .{ .ip4 = undefined };
+    addr.setPort(0);
+    try std.testing.expectEqual(0, addr.getPort());
 }
 
 fn testIp6Parse(input: []const u8) !void {

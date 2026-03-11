@@ -14,6 +14,7 @@ pub const Server = @import("zig/Server.zig");
 pub const Client = @import("zig/Client.zig");
 pub const Token = tokenizer.Token;
 pub const Tokenizer = tokenizer.Tokenizer;
+pub const TokenSmith = @import("zig/TokenSmith.zig");
 pub const string_literal = @import("zig/string_literal.zig");
 pub const number_literal = @import("zig/number_literal.zig");
 pub const primitives = @import("zig/primitives.zig");
@@ -737,7 +738,6 @@ pub const EnvVar = enum {
     ZIG_BUILD_MULTILINE_ERRORS,
     ZIG_VERBOSE_LINK,
     ZIG_VERBOSE_CC,
-    ZIG_BTRFS_WORKAROUND,
     ZIG_DEBUG_CMD,
     ZIG_IS_DETECTING_LIBC_PATHS,
     ZIG_IS_TRYING_TO_NOT_CALL_ITSELF,
@@ -837,6 +837,10 @@ pub const SimpleComptimeReason = enum(u32) {
     tuple_field_types,
     enum_field_names,
     enum_field_values,
+    union_enum_tag_type,
+    enum_int_tag_type,
+    packed_struct_backing_int_type,
+    packed_union_backing_int_type,
 
     // Evaluating at comptime because decl/field name must be comptime-known.
     decl_name,
@@ -864,7 +868,7 @@ pub const SimpleComptimeReason = enum(u32) {
     casted_to_comptime_enum,
     casted_to_comptime_int,
     casted_to_comptime_float,
-    panic_handler,
+    std_builtin_decl,
 
     pub fn message(r: SimpleComptimeReason) []const u8 {
         return switch (r) {
@@ -925,6 +929,11 @@ pub const SimpleComptimeReason = enum(u32) {
             .enum_field_names    => "enum field names must be comptime-known",
             .enum_field_values   => "enum field values must be comptime-known",
 
+            .union_enum_tag_type            => "enum tag type of union must be comptime-known",
+            .enum_int_tag_type              => "integer tag type of enum must be comptime-known",
+            .packed_struct_backing_int_type => "packed struct backing integer type must be comptime-known",
+            .packed_union_backing_int_type  => "packed struct backing integer type must be comptime-known",
+
             .decl_name         => "declaration name must be comptime-known",
             .field_name        => "field name must be comptime-known",
             .tuple_field_index => "tuple field index must be comptime-known",
@@ -948,7 +957,7 @@ pub const SimpleComptimeReason = enum(u32) {
             .casted_to_comptime_enum      => "value casted to enum with 'comptime_int' tag type must be comptime-known",
             .casted_to_comptime_int       => "value casted to 'comptime_int' must be comptime-known",
             .casted_to_comptime_float     => "value casted to 'comptime_float' must be comptime-known",
-            .panic_handler                => "panic handler must be comptime-known",
+            .std_builtin_decl             => "'std.builtin' declaration values must be comptime-known",
             // zig fmt: on
         };
     }
@@ -992,6 +1001,7 @@ test {
     _ = LibCDirs;
     _ = LibCInstallation;
     _ = Server;
+    _ = TokenSmith;
     _ = WindowsSdk;
     _ = number_literal;
     _ = primitives;
