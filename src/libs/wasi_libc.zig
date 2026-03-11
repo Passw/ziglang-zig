@@ -668,7 +668,6 @@ const libc_top_half_src_files = [_][]const u8{
     "musl/src/math/acoshf.c",
     "musl/src/math/acoshl.c",
     "musl/src/math/acosl.c",
-    "musl/src/math/asin.c",
     "musl/src/math/asinf.c",
     "musl/src/math/asinh.c",
     "musl/src/math/asinhf.c",
