@@ -70,7 +70,7 @@ fn acos(x: f64) callconv(.c) f64 {
 }
 
 fn acosf(x: f32) callconv(.c) f32 {
-    return std.math.acos(x);
+    return math.acos(x);
 }
 
 fn atan(x: f64) callconv(.c) f64 {
@@ -177,7 +177,7 @@ fn pow10f(x: f32) callconv(.c) f32 {
 }
 
 fn rint(x: f64) callconv(.c) f64 {
-    const toint: f64 = 1.0 / @as(f64, std.math.floatEps(f64));
+    const toint: f64 = 1.0 / @as(f64, math.floatEps(f64));
     const a: u64 = @bitCast(x);
     const e = a >> 52 & 0x7ff;
     const s = a >> 63;
