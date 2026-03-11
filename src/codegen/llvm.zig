@@ -5750,7 +5750,7 @@ pub const FuncGen = struct {
                 return phi.toValue();
             },
             .float => return self.buildFloatCmp(fast, op, operand_ty, .{ lhs, rhs }),
-            .@"struct" => scalar_ty.bitpackBackingInt(zcu),
+            .@"struct", .@"union" => scalar_ty.bitpackBackingInt(zcu),
             else => unreachable,
         };
         const is_signed = int_ty.isSignedInt(zcu);
