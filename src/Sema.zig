@@ -20859,7 +20859,7 @@ fn zirRoundCast(
     };
 
     const dest_ty = try sema.resolveDestType(block, src, extra.lhs, .remove_eu_opt, builtin_name);
-    const operand = try sema.resolveInst(extra.rhs);
+    const operand = sema.resolveInst(extra.rhs);
     const operand_ty = sema.typeOf(operand);
 
     try sema.checkVectorizableBinaryOperands(block, operand_src, dest_ty, operand_ty, src, operand_src);
@@ -20894,7 +20894,7 @@ fn zirRoundCast(
     _ = try sema.checkIntType(block, src, dest_scalar_ty);
     try sema.checkFloatType(block, operand_src, operand_scalar_ty);
 
-    if (try sema.resolveValue(operand)) |operand_val| {
+    if (sema.resolveValue(operand)) |operand_val| {
         const result_val = try sema.intFromFloat(block, operand_src, operand_val, operand_ty, dest_ty, mode);
         return Air.internedToRef(result_val.toIntern());
     } else if (dest_scalar_ty.zigTypeTag(zcu) == .comptime_int) {
