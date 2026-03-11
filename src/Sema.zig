@@ -20850,30 +20850,36 @@ fn zirRoundCast(
     const src = block.nodeOffset(extra.node);
     const operand_src = block.builtinCallArgSrc(extra.node, 0);
 
-    const builtin_name = switch (mode) {
-        .round => "@round",
-        .floor => "@floor",
-        .ceil => "@ceil",
-        .truncate => "@trunc",
-        .exact => unreachable,
-    };
+    const dest_ty_or_poison = try sema.resolveTypeOrPoison(block, src, extra.lhs) orelse Type.generic_poison;
+    var dest_ty = dest_ty_or_poison;
+    if (!dest_ty.isGenericPoison()) {
+        if (dest_ty.zigTypeTag(zcu) == .error_union) {
+            dest_ty = dest_ty.errorUnionPayload(zcu);
+        }
+        if (dest_ty.zigTypeTag(zcu) == .optional) {
+            dest_ty = dest_ty.childType(zcu);
+        }
+    }
 
-    const dest_ty = try sema.resolveDestType(block, src, extra.lhs, .remove_eu_opt, builtin_name);
     const operand = sema.resolveInst(extra.rhs);
     const operand_ty = sema.typeOf(operand);
 
-    try sema.checkVectorizableBinaryOperands(block, operand_src, dest_ty, operand_ty, src, operand_src);
-    const dest_scalar_ty = dest_ty.scalarType(zcu);
+    const is_poison = dest_ty.isGenericPoison();
+    if (!is_poison) {
+        try sema.checkVectorizableBinaryOperands(block, operand_src, dest_ty, operand_ty, src, operand_src);
+    }
+    const dest_scalar_ty = if (is_poison) dest_ty else dest_ty.scalarType(zcu);
     const operand_scalar_ty = operand_ty.scalarType(zcu);
 
-    if (dest_scalar_ty.zigTypeTag(zcu) == .float or dest_scalar_ty.zigTypeTag(zcu) == .comptime_float) {
+    if (is_poison or dest_scalar_ty.zigTypeTag(zcu) == .float or dest_scalar_ty.zigTypeTag(zcu) == .comptime_float) {
         const coerced_operand = try sema.coerce(block, dest_ty, operand, operand_src);
+        const math_ty = if (is_poison) operand_ty else dest_ty;
 
         const result_ref = switch (mode) {
-            .round => try sema.maybeConstantUnaryMath(coerced_operand, dest_ty, Value.round),
-            .floor => try sema.maybeConstantUnaryMath(coerced_operand, dest_ty, Value.floor),
-            .ceil => try sema.maybeConstantUnaryMath(coerced_operand, dest_ty, Value.ceil),
-            .truncate => try sema.maybeConstantUnaryMath(coerced_operand, dest_ty, Value.trunc),
+            .round => try sema.maybeConstantUnaryMath(coerced_operand, math_ty, Value.round),
+            .floor => try sema.maybeConstantUnaryMath(coerced_operand, math_ty, Value.floor),
+            .ceil => try sema.maybeConstantUnaryMath(coerced_operand, math_ty, Value.ceil),
+            .truncate => try sema.maybeConstantUnaryMath(coerced_operand, math_ty, Value.trunc),
             else => unreachable,
         };
 
@@ -25122,9 +25128,11 @@ fn zirRoundOpType(sema: *Sema, block: *Block, extended: Zir.Inst.Extended.InstDa
     const extra = sema.code.extraData(Zir.Inst.UnNode, extended.operand).data;
     const operand_src = block.builtinCallArgSrc(extra.node, 0);
 
-    const dest_ty = try sema.resolveDestType(block, operand_src, extra.operand, .remove_eu_opt, "type hint");
+    const dest_ty_or_poison = try sema.resolveTypeOrPoison(block, operand_src, extra.operand) orelse Type.generic_poison;
 
-    const float_ty = dest_ty.optEuBaseType(zcu);
+    if (dest_ty_or_poison.isGenericPoison()) return .generic_poison_type;
+
+    const float_ty = dest_ty_or_poison.optEuBaseType(zcu);
     switch (float_ty.scalarType(zcu).zigTypeTag(zcu)) {
         .float, .comptime_float => return .fromType(float_ty),
         else => return .comptime_float_type,

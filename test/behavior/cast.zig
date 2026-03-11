@@ -253,6 +253,23 @@ fn testIntFromFloats() !void {
     try expectTruncCast(f32, -128.2, i8, -128);
 }
 
+test "rounding builtins with anytype and context propagation" {
+    const S = struct {
+        const x: i32 = 10;
+        fn check(expected: anytype, actual: anytype) !void {
+            try expectEqual(expected, actual);
+        }
+    };
+    try expectEqual(@as(f32, 1.0), @round(@as(f32, 1.4)));
+    try S.check(@as(f32, 1.0), @round(@as(f32, 1.4)));
+
+    const y: f64 = @floor(@floatFromInt(S.x));
+    try expect(y == 10.0);
+
+    try expectEqual(1.0, @round(1.4));
+    try S.check(1.0, @round(1.4));
+}
+
 fn expectIntFromFloat(comptime F: type, f: F, comptime I: type, i: I) !void {
     try expect(@as(I, @intFromFloat(f)) == i);
 }
