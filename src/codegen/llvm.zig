@@ -6252,7 +6252,7 @@ pub const FuncGen = struct {
             const cond_ty = self.typeOf(switch_br.operand);
             switch (cond_ty.zigTypeTag(zcu)) {
                 .bool, .pointer => break :jmp_table null,
-                .@"enum", .int, .error_set => {},
+                .@"enum", .int, .error_set, .@"struct", .@"union" => {},
                 else => unreachable,
             }
 
