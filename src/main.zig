@@ -871,6 +871,7 @@ fn buildOutputType(
     var emit_h: Emit = .no;
     var soname: SOName = undefined;
     var want_compiler_rt: ?bool = null;
+    var zig_cc_explicitly_link_compiler_rt = false;
     var want_ubsan_rt: ?bool = null;
     var linker_script: ?[]const u8 = null;
     var version_script: ?[]const u8 = null;
@@ -2000,8 +2001,8 @@ fn buildOutputType(
                             try create_module.cli_link_inputs.append(arena, .{ .dso_exact = .{
                                 .name = it.only_arg,
                             } });
-                        } else {
-                            try create_module.cli_link_inputs.append(arena, .{ .name_query = .{
+                        } else switch (target_util.classifyCompilerRtLibName(it.only_arg)) {
+                            .none => try create_module.cli_link_inputs.append(arena, .{ .name_query = .{
                                 .name = it.only_arg,
                                 .query = .{
                                     .must_link = must_link,
@@ -2011,7 +2012,21 @@ fn buildOutputType(
                                     .search_strategy = lib_search_strategy,
                                     .allow_so_scripts = allow_so_scripts,
                                 },
-                            } });
+                            } }),
+                            .only_compiler_rt => {
+                                // We need this variable separately from `want_compiler_rt` because of
+                                // invocations such as `zig cc -lcompiler_rt -nostdlib`. If we just set
+                                // `want_compiler_rt = true` here, processing of the later `-nostdlib`
+                                // would undo that.
+                                zig_cc_explicitly_link_compiler_rt = true;
+                            },
+                            .only_libunwind => {
+                                create_module.opts.link_libunwind = true;
+                            },
+                            .both => {
+                                zig_cc_explicitly_link_compiler_rt = true;
+                                create_module.opts.link_libunwind = true;
+                            },
                         }
                     },
                     .ignore => {},
@@ -3547,7 +3562,7 @@ fn buildOutputType(
         .framework_dirs = create_module.framework_dirs.items,
         .frameworks = resolved_frameworks.items,
         .windows_lib_names = create_module.windows_libs.keys(),
-        .want_compiler_rt = want_compiler_rt,
+        .want_compiler_rt = if (zig_cc_explicitly_link_compiler_rt) true else want_compiler_rt,
         .want_ubsan_rt = want_ubsan_rt,
         .hash_style = hash_style,
         .linker_script = linker_script,
@@ -3977,15 +3992,6 @@ fn createModule(
                 if (std.zig.target.isLibCxxLibName(target, lib_name)) {
                     create_module.opts.link_libcpp = true;
                     continue;
-                }
-
-                switch (target_util.classifyCompilerRtLibName(lib_name)) {
-                    .none => {},
-                    .only_libunwind, .both => {
-                        create_module.opts.link_libunwind = true;
-                        continue;
-                    },
-                    .only_compiler_rt => continue,
                 }
 
                 if (target.isMinGW()) {
