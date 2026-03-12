@@ -406,13 +406,13 @@ pub fn fuzz(
     const global = struct {
         var ctx: @TypeOf(context) = undefined;
 
-        fn test_one() callconv(.c) void {
+        fn test_one() callconv(.c) bool {
             @disableInstrumentation();
             testing.allocator_instance = .{};
             defer if (testing.allocator_instance.deinit() == .leak) std.process.exit(1);
             log_err_count = 0;
             testOne(ctx, @constCast(&testing.Smith{ .in = null })) catch |err| switch (err) {
-                error.SkipZigTest => return,
+                error.SkipZigTest => return true,
                 else => {
                     const stderr = std.debug.lockStderr(&.{}).terminal();
                     p: {
@@ -429,6 +429,7 @@ pub fn fuzz(
                 stderr.writer.print("error logs detected\n", .{}) catch {};
                 std.process.exit(1);
             }
+            return false;
         }
     };
     if (builtin.fuzz) {

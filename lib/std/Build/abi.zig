@@ -139,7 +139,8 @@ pub const Rebuild = extern struct {
 
 /// ABI bits specifically relating to the fuzzer interface.
 pub const fuzz = struct {
-    pub const TestOne = *const fn () callconv(.c) void;
+    /// Returns if `error.SkipZigTest` was indicated
+    pub const TestOne = *const fn () callconv(.c) bool;
 
     /// A unique value to identify the related requests across runs
     pub const Uid = packed struct(u32) {

@@ -686,7 +686,7 @@ const Fuzzer = struct {
         const len = mem.readInt(u32, f.mmap_input.mmap.memory[0..4], .little);
         if (len < f.mmap_input.mmap.memory[4..].len) {
             f.mmap_input.len = len;
-            f.runBytes(f.mmap_input.inputSlice(), .bytes_dry);
+            _ = f.runBytes(f.mmap_input.inputSlice(), .bytes_dry);
             f.mmap_input.clearRetainingCapacity();
         }
     }
@@ -761,12 +761,13 @@ const Fuzzer = struct {
         return fresh;
     }
 
-    fn runBytes(f: *Fuzzer, bytes: []const u8, mode: Input.Index) void {
+    /// Returns if `error.SkipZigTest` was indicated
+    fn runBytes(f: *Fuzzer, bytes: []const u8, mode: Input.Index) bool {
         assert(mode == .bytes_dry or mode == .bytes_fresh);
 
         f.bytes_input = .{ .in = bytes };
         f.corpus_pos = mode;
-        f.run(0); // 0 since `f.uid_data` is unused
+        return f.run(0); // 0 since `f.uid_data` is unused
     }
 
     fn updateSeenPcs(f: *Fuzzer) void {
@@ -871,7 +872,11 @@ const Fuzzer = struct {
 
     fn newInput(f: *Fuzzer, modify_fs_corpus: bool) void {
         const bytes = f.mmap_input.inputSlice();
-        f.runBytes(bytes, .bytes_fresh);
+        // `error.SkipZigTest` here can be from one of these causes:
+        // * The test has changed and a previous corpus input is being used
+        // * An input provided by the test results in it
+        // * The test is non-deterministic
+        if (f.runBytes(bytes, .bytes_fresh)) return;
         f.req_values = f.input_builder.total_ints + f.input_builder.total_bytes;
         f.req_bytes = @intCast(f.input_builder.bytes_table.items.len);
         var input = f.input_builder.build();
@@ -1005,15 +1010,17 @@ const Fuzzer = struct {
             panic("failed to write corpus file '{s}': {t}", .{ name, e });
     }
 
-    fn run(f: *Fuzzer, input_uids: usize) void {
+    /// Returns if `error.SkipZigTest` was indicated
+    fn run(f: *Fuzzer, input_uids: usize) bool {
         @memset(exec.pc_counters, 0);
         f.uid_data_i.items.len = input_uids;
         @memset(f.uid_data_i.items, 0);
         f.req_values = 0;
         f.req_bytes = 0;
 
-        f.test_one();
+        const skip = f.test_one();
         _ = @atomicRmw(usize, &exec.seenPcsHeader().n_runs, .Add, 1, .monotonic);
+        return skip;
     }
 
     /// Returns a number of mutations to perform from 1-4
@@ -1085,8 +1092,8 @@ const Fuzzer = struct {
             i.* = data.order[order_i];
         };
 
-        f.run(data.uid_slices.entries.len);
-        if (f.isFresh()) {
+        const skip = f.run(data.uid_slices.entries.len);
+        if (!skip and f.isFresh()) {
             @branchHint(.unlikely);
 
             _ = @atomicRmw(usize, &exec.seenPcsHeader().unique_runs, .Add, 1, .monotonic);
