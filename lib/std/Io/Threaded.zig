@@ -15321,7 +15321,7 @@ fn childKillWindows(t: *Threaded, child: *process.Child, exit_code: windows.UINT
     const handle = child.id.?;
     _ = windows.ntdll.RtlReportSilentProcessExit(handle, @enumFromInt(exit_code));
     switch (windows.ntdll.NtTerminateProcess(handle, @enumFromInt(exit_code))) {
-        .SUCCESS => {
+        .SUCCESS, .PROCESS_IS_TERMINATING => {
             const infinite_timeout: windows.LARGE_INTEGER = std.math.minInt(windows.LARGE_INTEGER);
             _ = windows.ntdll.NtWaitForSingleObject(handle, windows.FALSE, &infinite_timeout);
             childCleanupWindows(child);
