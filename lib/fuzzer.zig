@@ -703,7 +703,7 @@ const Fuzzer = struct {
                 else => panic("failed to read corpus file '{s}': {t}", .{ name, e }),
             };
             defer gpa.free(bytes);
-            f.newInput(bytes, false);
+            f.newInputExternal(bytes);
         }
         f.corpus_pos = @enumFromInt(0);
     }
@@ -861,7 +861,16 @@ const Fuzzer = struct {
         }
     }
 
-    pub fn newInput(f: *Fuzzer, bytes: []const u8, modify_fs_corpus: bool) void {
+    pub fn newInputExternal(f: *Fuzzer, bytes: []const u8) void {
+        // All inputs including the corpus are required to go through the memory
+        // mapped input in case they cause a crash so they can be identified.
+        f.mmap_input.appendSlice(bytes);
+        f.newInput(false);
+        f.mmap_input.clearRetainingCapacity();
+    }
+
+    fn newInput(f: *Fuzzer, modify_fs_corpus: bool) void {
+        const bytes = f.mmap_input.inputSlice();
         f.runBytes(bytes, .bytes_fresh);
         f.req_values = f.input_builder.total_ints + f.input_builder.total_bytes;
         f.req_bytes = @intCast(f.input_builder.bytes_table.items.len);
@@ -1081,7 +1090,7 @@ const Fuzzer = struct {
             @branchHint(.unlikely);
 
             _ = @atomicRmw(usize, &exec.seenPcsHeader().unique_runs, .Add, 1, .monotonic);
-            f.newInput(f.mmap_input.inputSlice(), true);
+            f.newInput(true);
         }
         f.mmap_input.clearRetainingCapacity();
 
@@ -1675,7 +1684,7 @@ export fn fuzzer_set_test(test_one: abi.TestOne, unit_test_name: abi.Slice) void
 
 export fn fuzzer_new_input(bytes: abi.Slice) void {
     if (bytes.len == 0) return; // An entry of length zero is always present
-    fuzzer.newInput(bytes.toSlice(), false);
+    fuzzer.newInputExternal(bytes.toSlice());
 }
 
 export fn fuzzer_main(limit_kind: abi.LimitKind, amount: u64) void {
