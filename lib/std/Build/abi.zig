@@ -250,9 +250,12 @@ pub const fuzz = struct {
                         }
                         // Reject types that don't have a fixed bitsize (esp. usize)
                         // since they are not gauraunteed to fit in a u64 across targets.
-                        if (std.mem.indexOfScalar(type, &.{
-                            usize, c_char, c_ushort, c_uint, c_ulong, c_ulonglong,
-                        }, T) != null) {
+                        //
+                        // std.mem.indexOfScalar is not used to avoid backward branches
+                        // and preserve the eval branch quota.
+                        if (T == usize or T == c_char or T == c_ushort or
+                            T == c_uint or T == c_ulong or T == c_ulonglong)
+                        {
                             @compileError("type does not have a fixed bitsize: " ++ @typeName(T));
                         }
                     }
