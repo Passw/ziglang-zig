@@ -340,6 +340,11 @@ test "decompress compressed DNS name" {
 }
 
 test "cancel accept" {
+    if (builtin.os.tag == .windows) {
+        // https://codeberg.org/ziglang/zig/issues/30865
+        return error.SkipZigTest;
+    }
+
     const io = testing.io;
     const localhost: net.IpAddress = .{ .ip4 = .loopback(0) };
 
