@@ -1320,13 +1320,23 @@ const Fuzzer = struct {
 
         if (opts.copy != 0) {
             if (opts.fresh == 0 or slice_i == data_slice.len) return .fresh;
-            return .{ .mutate = switch (uid.kind) {
-                .int => .{ .int = data.ints[data_i] },
-                .bytes => .{ .bytes = b: {
+            switch (uid.kind) {
+                .int => {
+                    const int = data.ints[data_i];
+                    if (weightsContain(int, weights)) {
+                        @branchHint(.likely);
+                        return .{ .mutate = .{ .int = int } };
+                    }
+                },
+                .bytes => {
                     const entry = data.bytes.entries[data_i];
-                    break :b data.bytes.table[entry.off..][0..entry.len];
-                } },
-            } };
+                    const bytes = data.bytes.table[entry.off..][0..entry.len];
+                    if (weightsContainBytes(bytes, weights)) {
+                        @branchHint(.likely);
+                        return .{ .mutate = .{ .bytes = bytes } };
+                    }
+                },
+            }
         }
 
         if (!opts.splice) {
