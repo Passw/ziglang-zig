@@ -13439,7 +13439,6 @@ fn netWriteWindows(
             return n;
         }
         switch (ws2_32.WSAGetLastError()) {
-            .IO_PENDING => unreachable, // not overlapped
             .EINTR, .ECANCELLED, .E_CANCELLED, .OPERATION_ABORTED => {
                 try syscall.checkCancel();
                 continue;
@@ -13461,6 +13460,7 @@ fn netWriteWindows(
             .ENOTSOCK => |err| return syscall.wsaErrorBug(err),
             .EOPNOTSUPP => |err| return syscall.wsaErrorBug(err),
             .ESHUTDOWN => |err| return syscall.wsaErrorBug(err),
+            .IO_PENDING => |err| return syscall.wsaErrorBug(err),
             else => |err| return syscall.unexpectedWsaError(err),
         }
     }
