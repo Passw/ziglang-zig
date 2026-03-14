@@ -53,6 +53,7 @@ comptime {
         symbol(&exp10, "exp10");
         symbol(&exp10f, "exp10f");
         symbol(&hypot, "hypot");
+        symbol(&modf, "modf");
         symbol(&pow, "pow");
         symbol(&pow10, "pow10");
         symbol(&pow10f, "pow10f");
@@ -160,6 +161,68 @@ fn isnanf(x: f32) callconv(.c) c_int {
 
 fn isnanl(x: c_longdouble) callconv(.c) c_int {
     return if (math.isNan(x)) 1 else 0;
+}
+
+fn modf(x: f64, iptr: *f64) callconv(.c) f64 {
+    if (math.isNegativeInf(x)) {
+        iptr.* = -math.inf(f64);
+        return -0.0;
+    }
+
+    if (math.isPositiveInf(x)) {
+        iptr.* = math.inf(f64);
+        return 0.0;
+    }
+
+    // Avoids raising the INVALID flag on qemu-riscv
+    if (math.isNan(x)) {
+        iptr.* = math.nan(f64);
+        return math.nan(f64);
+    }
+
+    const r = math.modf(x);
+    iptr.* = r.ipart;
+
+    // If the result would be a negative zero, we must be explicit about
+    // returning a negative zero.
+    return if (math.isNegativeZero(x) or (x < 0.0 and x == r.ipart)) -0.0 else r.fpart;
+}
+
+test "modf" {
+    var int: f64 = undefined;
+    const iptr = &int;
+    const eps_val = 1e-6;
+
+    const normal_frac = modf(1234.5678, iptr);
+    try std.testing.expectApproxEqRel(0.5678, normal_frac, eps_val);
+    try std.testing.expectApproxEqRel(1234.0, iptr.*, eps_val);
+
+    // When `x` is a NaN, NaN is returned and `*iptr` is set to NaN
+    const nan_frac = modf(math.nan(f64), iptr);
+    try std.testing.expect(math.isNan(nan_frac));
+    try std.testing.expect(math.isNan(iptr.*));
+
+    // When `x` is positive infinity, +0 is returned and `*iptr` is set to
+    // positive infinity
+    const pos_zero_frac = modf(math.inf(f64), iptr);
+    try std.testing.expect(math.isPositiveZero(pos_zero_frac));
+    try std.testing.expect(math.isPositiveInf(iptr.*));
+
+    // When `x` is negative infinity, -0 is returned and `*iptr` is set to
+    // negative infinity
+    const neg_zero_frac = modf(-math.inf(f64), iptr);
+    try std.testing.expect(math.isNegativeZero(neg_zero_frac));
+    try std.testing.expect(math.isNegativeInf(iptr.*));
+
+    // Return -0 when `x` is a negative integer
+    const nz_frac = modf(-1000.0, iptr);
+    try std.testing.expect(math.isNegativeZero(nz_frac));
+    try std.testing.expectEqual(-1000.0, iptr.*);
+
+    // Return +0 when `x` is a positive integer
+    const pz_frac = modf(1000.0, iptr);
+    try std.testing.expect(math.isPositiveZero(pz_frac));
+    try std.testing.expectEqual(1000.0, iptr.*);
 }
 
 fn nan(_: [*:0]const c_char) callconv(.c) f64 {
