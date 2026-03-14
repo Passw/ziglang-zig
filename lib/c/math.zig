@@ -42,6 +42,7 @@ comptime {
     if (builtin.target.isMuslLibC() or builtin.target.isWasiLibC()) {
         symbol(&acos, "acos");
         symbol(&acosf, "acosf");
+        symbol(&acoshf, "acoshf");
         symbol(&asin, "asin");
         symbol(&atan, "atan");
         symbol(&atanf, "atanf");
@@ -72,6 +73,10 @@ fn acos(x: f64) callconv(.c) f64 {
 
 fn acosf(x: f32) callconv(.c) f32 {
     return math.acos(x);
+}
+
+fn acoshf(x: f32) callconv(.c) f32 {
+    return math.acosh(x);
 }
 
 fn asin(x: f64) callconv(.c) f64 {

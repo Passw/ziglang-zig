@@ -796,7 +796,6 @@ const src_files = [_][]const u8{
     "musl/src/math/aarch64/nearbyintf.c",
     "musl/src/math/aarch64/rintf.c",
     "musl/src/math/acosh.c",
-    "musl/src/math/acoshf.c",
     "musl/src/math/acoshl.c",
     "musl/src/math/acosl.c",
     "musl/src/math/arm/fma.c",
