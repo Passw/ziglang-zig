@@ -2,6 +2,9 @@ const builtin = @import("builtin");
 
 const std = @import("std");
 const math = std.math;
+const expect = std.testing.expect;
+const expectEqual = std.testing.expectEqual;
+const expectApproxEqRel = std.testing.expectApproxEqRel;
 
 const symbol = @import("../c.zig").symbol;
 
@@ -194,35 +197,35 @@ test "modf" {
     const eps_val = 1e-6;
 
     const normal_frac = modf(1234.5678, iptr);
-    try std.testing.expectApproxEqRel(0.5678, normal_frac, eps_val);
-    try std.testing.expectApproxEqRel(1234.0, iptr.*, eps_val);
+    try expectApproxEqRel(0.5678, normal_frac, eps_val);
+    try expectApproxEqRel(1234.0, iptr.*, eps_val);
 
     // When `x` is a NaN, NaN is returned and `*iptr` is set to NaN
     const nan_frac = modf(math.nan(f64), iptr);
-    try std.testing.expect(math.isNan(nan_frac));
-    try std.testing.expect(math.isNan(iptr.*));
+    try expect(math.isNan(nan_frac));
+    try expect(math.isNan(iptr.*));
 
     // When `x` is positive infinity, +0 is returned and `*iptr` is set to
     // positive infinity
     const pos_zero_frac = modf(math.inf(f64), iptr);
-    try std.testing.expect(math.isPositiveZero(pos_zero_frac));
-    try std.testing.expect(math.isPositiveInf(iptr.*));
+    try expect(math.isPositiveZero(pos_zero_frac));
+    try expect(math.isPositiveInf(iptr.*));
 
     // When `x` is negative infinity, -0 is returned and `*iptr` is set to
     // negative infinity
     const neg_zero_frac = modf(-math.inf(f64), iptr);
-    try std.testing.expect(math.isNegativeZero(neg_zero_frac));
-    try std.testing.expect(math.isNegativeInf(iptr.*));
+    try expect(math.isNegativeZero(neg_zero_frac));
+    try expect(math.isNegativeInf(iptr.*));
 
     // Return -0 when `x` is a negative integer
     const nz_frac = modf(-1000.0, iptr);
-    try std.testing.expect(math.isNegativeZero(nz_frac));
-    try std.testing.expectEqual(-1000.0, iptr.*);
+    try expect(math.isNegativeZero(nz_frac));
+    try expectEqual(-1000.0, iptr.*);
 
     // Return +0 when `x` is a positive integer
     const pz_frac = modf(1000.0, iptr);
-    try std.testing.expect(math.isPositiveZero(pz_frac));
-    try std.testing.expectEqual(1000.0, iptr.*);
+    try expect(math.isPositiveZero(pz_frac));
+    try expectEqual(1000.0, iptr.*);
 }
 
 fn nan(_: [*:0]const c_char) callconv(.c) f64 {
@@ -272,35 +275,35 @@ fn rint(x: f64) callconv(.c) f64 {
 
 test "rint" {
     // Positive numbers round correctly
-    try std.testing.expectEqual(@as(f64, 42.0), rint(42.2));
-    try std.testing.expectEqual(@as(f64, 42.0), rint(41.8));
+    try expectEqual(@as(f64, 42.0), rint(42.2));
+    try expectEqual(@as(f64, 42.0), rint(41.8));
 
     // Negative numbers round correctly
-    try std.testing.expectEqual(@as(f64, -6.0), rint(-5.9));
-    try std.testing.expectEqual(@as(f64, -6.0), rint(-6.1));
+    try expectEqual(@as(f64, -6.0), rint(-5.9));
+    try expectEqual(@as(f64, -6.0), rint(-6.1));
 
     // No rounding needed test
-    try std.testing.expectEqual(@as(f64, 5.0), rint(5.0));
-    try std.testing.expectEqual(@as(f64, -10.0), rint(-10.0));
-    try std.testing.expectEqual(@as(f64, 0.0), rint(0.0));
+    try expectEqual(@as(f64, 5.0), rint(5.0));
+    try expectEqual(@as(f64, -10.0), rint(-10.0));
+    try expectEqual(@as(f64, 0.0), rint(0.0));
 
     // Very large numbers return unchanged
     const large: f64 = 9007199254740992.0; // 2^53
-    try std.testing.expectEqual(large, rint(large));
-    try std.testing.expectEqual(-large, rint(-large));
+    try expectEqual(large, rint(large));
+    try expectEqual(-large, rint(-large));
 
     // Small positive numbers round to zero
     const pos_result = rint(0.3);
-    try std.testing.expectEqual(@as(f64, 0.0), pos_result);
-    try std.testing.expect(@as(u64, @bitCast(pos_result)) == 0);
+    try expectEqual(@as(f64, 0.0), pos_result);
+    try expect(@as(u64, @bitCast(pos_result)) == 0);
 
     // Small negative numbers round to negative zero
     const neg_result = rint(-0.3);
-    try std.testing.expectEqual(@as(f64, 0.0), neg_result);
+    try expectEqual(@as(f64, 0.0), neg_result);
     const bits: u64 = @bitCast(neg_result);
-    try std.testing.expect((bits >> 63) == 1);
+    try expect((bits >> 63) == 1);
 
     // Exact half rounds to nearest even (banker's rounding)
-    try std.testing.expectEqual(@as(f64, 2.0), rint(2.5));
-    try std.testing.expectEqual(@as(f64, 4.0), rint(3.5));
+    try expectEqual(@as(f64, 2.0), rint(2.5));
+    try expectEqual(@as(f64, 4.0), rint(3.5));
 }
