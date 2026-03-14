@@ -104,7 +104,7 @@ Enter-VsDevShell -VsInstallPath "C:\Program Files (x86)\Microsoft Visual Studio\
 CheckLastExitCode
 
 Write-Output "Build and run behavior tests with msvc..."
-cl /I..\lib /W3 /Z7 behavior-x86_64-windows-msvc.c compiler_rt-x86_64-windows-msvc.c /link /nologo /debug /subsystem:console kernel32.lib ntdll.lib libcmt.lib ws2_32.lib
+cl /I..\lib /W3 /Z7 behavior-x86_64-windows-msvc.c compiler_rt-x86_64-windows-msvc.c /link /nologo /debug /subsystem:console kernel32.lib ntdll.lib libcmt.lib
 CheckLastExitCode
 
 .\behavior-x86_64-windows-msvc
