@@ -619,7 +619,6 @@ const mingw32_generic_src = [_][]const u8{
     "math" ++ path.sep_str ++ "lgamma.c",
     "math" ++ path.sep_str ++ "lgammaf.c",
     "math" ++ path.sep_str ++ "lgammal.c",
-    "math" ++ path.sep_str ++ "modfl.c",
     "math" ++ path.sep_str ++ "powi.c",
     "math" ++ path.sep_str ++ "powif.c",
     "math" ++ path.sep_str ++ "powil.c",

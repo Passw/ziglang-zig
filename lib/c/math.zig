@@ -39,6 +39,7 @@ comptime {
         symbol(&hypotf, "hypotf");
         symbol(&hypotl, "hypotl");
         symbol(&modff, "modff");
+        symbol(&modfl, "modfl");
         symbol(&nan, "nan");
         symbol(&nanf, "nanf");
         symbol(&nanl, "nanl");
@@ -201,11 +202,16 @@ fn modff(x: f32, iptr: *f32) callconv(.c) f32 {
     return modfGeneric(f32, x, iptr);
 }
 
+fn modfl(x: c_longdouble, iptr: *c_longdouble) callconv(.c) c_longdouble {
+    return modfGeneric(c_longdouble, x, iptr);
+}
+
 fn testModf(comptime T: type) !void {
     // Choose the appropriate `modf` impl to test based on type
     const f = switch (T) {
-        f64 => modf,
         f32 => modff,
+        f64 => modf,
+        c_longdouble => modfl,
         else => @compileError("modf not implemented for " ++ @typeName(T)),
     };
 
@@ -248,8 +254,9 @@ fn testModf(comptime T: type) !void {
 }
 
 test "modf" {
-    try testModf(f64);
     try testModf(f32);
+    try testModf(f64);
+    try testModf(c_longdouble);
 }
 
 fn nan(_: [*:0]const c_char) callconv(.c) f64 {
