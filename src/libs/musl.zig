@@ -934,7 +934,6 @@ const src_files = [_][]const u8{
     "musl/src/math/__math_uflowf.c",
     "musl/src/math/__math_xflow.c",
     "musl/src/math/__math_xflowf.c",
-    "musl/src/math/modff.c",
     "musl/src/math/modfl.c",
     "musl/src/math/nearbyint.c",
     "musl/src/math/nearbyintf.c",
