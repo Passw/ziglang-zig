@@ -63,6 +63,7 @@ comptime {
         symbol(&pow, "pow");
         symbol(&pow10, "pow10");
         symbol(&pow10f, "pow10f");
+        symbol(&tanh, "tanh");
     }
 
     if (builtin.target.isMuslLibC()) {
@@ -337,4 +338,8 @@ test "rint" {
     // Exact half rounds to nearest even (banker's rounding)
     try expectEqual(@as(f64, 2.0), rint(2.5));
     try expectEqual(@as(f64, 4.0), rint(3.5));
+}
+
+fn tanh(x: f64) callconv(.c) f64 {
+    return math.tanh(x);
 }
