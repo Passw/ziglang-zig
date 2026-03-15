@@ -43,6 +43,7 @@ comptime {
         symbol(&nan, "nan");
         symbol(&nanf, "nanf");
         symbol(&nanl, "nanl");
+        symbol(&tanhf, "tanhf");
     }
 
     if (builtin.target.isMuslLibC() or builtin.target.isWasiLibC()) {
@@ -341,5 +342,9 @@ test "rint" {
 }
 
 fn tanh(x: f64) callconv(.c) f64 {
+    return math.tanh(x);
+}
+
+fn tanhf(x: f32) callconv(.c) f32 {
     return math.tanh(x);
 }

@@ -978,7 +978,6 @@ const mingw32_x86_32_src = [_][]const u8{
     // ucrtbase
     "math" ++ path.sep_str ++ "powf.c",
     "math" ++ path.sep_str ++ "sinhf.c",
-    "math" ++ path.sep_str ++ "tanhf.c",
     "math" ++ path.sep_str ++ "x86" ++ path.sep_str ++ "acosf.c",
     "math" ++ path.sep_str ++ "x86" ++ path.sep_str ++ "asinf.c",
     "math" ++ path.sep_str ++ "x86" ++ path.sep_str ++ "atan2f.c",
