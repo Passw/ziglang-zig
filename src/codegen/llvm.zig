@@ -10833,9 +10833,8 @@ pub const FuncGen = struct {
         comptime assert(@intFromEnum(std.builtin.PrefetchOptions.Rw.read) == 0);
         comptime assert(@intFromEnum(std.builtin.PrefetchOptions.Rw.write) == 1);
 
-        // TODO these two asserts should be able to be comptime because the type is a u2
-        assert(prefetch.locality >= 0);
-        assert(prefetch.locality <= 3);
+        comptime assert(prefetch.locality >= 0);
+        comptime assert(prefetch.locality <= 3);
 
         comptime assert(@intFromEnum(std.builtin.PrefetchOptions.Cache.instruction) == 0);
         comptime assert(@intFromEnum(std.builtin.PrefetchOptions.Cache.data) == 1);
