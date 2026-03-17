@@ -1625,13 +1625,7 @@ pub const Object = struct {
             .pt = pt,
             .err_msg = null,
         };
-        ng.genDecl() catch |err| switch (err) {
-            error.CodegenFail => switch (pt.zcu.codegenFailMsg(nav_index, ng.err_msg.?)) {
-                error.CodegenFail => return,
-                error.OutOfMemory => |e| return e,
-            },
-            else => |e| return e,
-        };
+        try ng.genDecl();
         try self.flushTypePool(pt);
     }
 
@@ -1713,10 +1707,7 @@ pub const Object = struct {
             const global_index = variable_index.ptrConst(&o.builder).global;
             gop.value_ptr.* = global_index;
             // This line invalidates `gop`.
-            const init_val = o.lowerValue(pt, exported_value) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                error.CodegenFail => return error.AnalysisFail,
-            };
+            const init_val = try o.lowerValue(pt, exported_value);
             try variable_index.setInitializer(init_val, &o.builder);
             break :i global_index;
         };
@@ -1834,6 +1825,9 @@ pub const Object = struct {
 
     pub fn updateContainerType(o: *Object, pt: Zcu.PerThread, ty: InternPool.Index, success: bool) Allocator.Error!void {
         try o.type_pool.updateContainerType(pt, .{ .llvm = o }, ty, success);
+        if (o.named_enum_map.get(ty)) |function_index| {
+            try o.updateIsNamedEnumValueFunction(pt, .fromInterned(ty), function_index);
+        }
     }
 
     /// Should only be called by the `link.ConstPool` implementation.
@@ -2907,7 +2901,7 @@ pub const Object = struct {
         uav: InternPool.Index,
         llvm_addr_space: Builder.AddrSpace,
         alignment: InternPool.Alignment,
-    ) Error!Builder.Variable.Index {
+    ) Allocator.Error!Builder.Variable.Index {
         assert(alignment != .none);
         // TODO: Add address space to the anon_decl_map
         const gop = try o.uav_map.getOrPut(o.gpa, uav);
@@ -3506,7 +3500,7 @@ pub const Object = struct {
         );
     }
 
-    fn lowerValue(o: *Object, pt: Zcu.PerThread, arg_val: InternPool.Index) Error!Builder.Constant {
+    fn lowerValue(o: *Object, pt: Zcu.PerThread, arg_val: InternPool.Index) Allocator.Error!Builder.Constant {
         const zcu = pt.zcu;
         const ip = &zcu.intern_pool;
         const target = zcu.getTarget();
@@ -4019,7 +4013,7 @@ pub const Object = struct {
         pt: Zcu.PerThread,
         ptr_val: InternPool.Index,
         prev_offset: u64,
-    ) Error!Builder.Constant {
+    ) Allocator.Error!Builder.Constant {
         const zcu = pt.zcu;
         const ptr = zcu.intern_pool.indexToKey(ptr_val).ptr;
         const offset: u64 = prev_offset + ptr.byte_offset;
@@ -4086,7 +4080,7 @@ pub const Object = struct {
         o: *Object,
         pt: Zcu.PerThread,
         uav: InternPool.Key.Ptr.BaseAddr.Uav,
-    ) Error!Builder.Constant {
+    ) Allocator.Error!Builder.Constant {
         const zcu = pt.zcu;
         const ip = &zcu.intern_pool;
         const uav_val = uav.val;
@@ -4362,6 +4356,58 @@ pub const Object = struct {
     fn lazyAbiAlignment(o: *Object, pt: Zcu.PerThread, ty: Type) Allocator.Error!Builder.Alignment.Lazy {
         const index = try o.type_pool.get(pt, .{ .llvm = o }, ty.toIntern());
         return o.lazy_abi_aligns.items[@intFromEnum(index)];
+    }
+
+    fn updateIsNamedEnumValueFunction(
+        o: *Object,
+        pt: Zcu.PerThread,
+        enum_ty: Type,
+        function_index: Builder.Function.Index,
+    ) Allocator.Error!void {
+        const zcu = pt.zcu;
+        const builder = &o.builder;
+        const loaded_enum = zcu.intern_pool.loadEnumType(enum_ty.toIntern());
+        function_index.ptrConst(builder).global.ptr(builder).type = try builder.fnType(
+            .i1,
+            &.{try o.lowerType(pt, .fromInterned(loaded_enum.int_tag_type))},
+            .normal,
+        );
+
+        var attributes: Builder.FunctionAttributes.Wip = .{};
+        defer attributes.deinit(builder);
+        try o.addCommonFnAttributes(&attributes, zcu.root_mod, zcu.root_mod.omit_frame_pointer);
+
+        function_index.setLinkage(.internal, builder);
+        function_index.setCallConv(.fastcc, builder);
+        function_index.setAttributes(try attributes.finish(builder), builder);
+
+        var wip: Builder.WipFunction = try .init(builder, .{
+            .function = function_index,
+            .strip = true,
+        });
+        defer wip.deinit();
+        wip.cursor = .{ .block = try wip.block(0, "Entry") };
+
+        const named_block = try wip.block(@intCast(loaded_enum.field_names.len), "Named");
+        const unnamed_block = try wip.block(1, "Unnamed");
+        const tag_int_value = wip.arg(0);
+        var wip_switch = try wip.@"switch"(tag_int_value, unnamed_block, @intCast(loaded_enum.field_names.len), .none);
+        defer wip_switch.finish(&wip);
+
+        for (0..loaded_enum.field_names.len) |field_index| {
+            const this_tag_int_value = try o.lowerValue(
+                pt,
+                (try pt.enumValueFieldIndex(enum_ty, @intCast(field_index))).toIntern(),
+            );
+            try wip_switch.addCase(this_tag_int_value, named_block, &wip);
+        }
+        wip.cursor = .{ .block = named_block };
+        _ = try wip.ret(.true);
+
+        wip.cursor = .{ .block = unnamed_block };
+        _ = try wip.ret(.false);
+
+        try wip.finish();
     }
 };
 
@@ -10106,56 +10152,19 @@ pub const FuncGen = struct {
         const pt = self.ng.pt;
         const zcu = pt.zcu;
         const ip = &zcu.intern_pool;
-        const enum_type = ip.loadEnumType(enum_ty.toIntern());
 
-        // TODO: detect when the type changes (`updateContainerType` will be called) and re-emit this function
         const gop = try o.named_enum_map.getOrPut(o.gpa, enum_ty.toIntern());
         if (gop.found_existing) return gop.value_ptr.*;
         errdefer assert(o.named_enum_map.remove(enum_ty.toIntern()));
-
-        const target = &zcu.root_mod.resolved_target.result;
         const function_index = try o.builder.addFunction(
-            try o.builder.fnType(.i1, &.{try o.lowerType(pt, Type.fromInterned(enum_type.int_tag_type))}, .normal),
-            try o.builder.strtabStringFmt("__zig_is_named_enum_value_{f}", .{enum_type.name.fmt(ip)}),
-            toLlvmAddressSpace(.generic, target),
+            // Dummy function type; `updateIsNamedEnumValue` will replace it with the correct type.
+            // TODO: change the builder API so we don't need to do this.
+            try o.builder.fnType(.void, &.{}, .normal),
+            try o.builder.strtabStringFmt("__zig_is_named_enum_value_{f}", .{enum_ty.containerTypeName(ip).fmt(ip)}),
+            toLlvmAddressSpace(.generic, zcu.getTarget()),
         );
-
-        var attributes: Builder.FunctionAttributes.Wip = .{};
-        defer attributes.deinit(&o.builder);
-        try o.addCommonFnAttributes(&attributes, zcu.root_mod, zcu.root_mod.omit_frame_pointer);
-
-        function_index.setLinkage(.internal, &o.builder);
-        function_index.setCallConv(.fastcc, &o.builder);
-        function_index.setAttributes(try attributes.finish(&o.builder), &o.builder);
         gop.value_ptr.* = function_index;
-
-        var wip = try Builder.WipFunction.init(&o.builder, .{
-            .function = function_index,
-            .strip = true,
-        });
-        defer wip.deinit();
-        wip.cursor = .{ .block = try wip.block(0, "Entry") };
-
-        const named_block = try wip.block(@intCast(enum_type.field_names.len), "Named");
-        const unnamed_block = try wip.block(1, "Unnamed");
-        const tag_int_value = wip.arg(0);
-        var wip_switch = try wip.@"switch"(tag_int_value, unnamed_block, @intCast(enum_type.field_names.len), .none);
-        defer wip_switch.finish(&wip);
-
-        for (0..enum_type.field_names.len) |field_index| {
-            const this_tag_int_value = try o.lowerValue(
-                pt,
-                (try pt.enumValueFieldIndex(enum_ty, @intCast(field_index))).toIntern(),
-            );
-            try wip_switch.addCase(this_tag_int_value, named_block, &wip);
-        }
-        wip.cursor = .{ .block = named_block };
-        _ = try wip.ret(.true);
-
-        wip.cursor = .{ .block = unnamed_block };
-        _ = try wip.ret(.false);
-
-        try wip.finish();
+        try o.updateIsNamedEnumValueFunction(pt, enum_ty, function_index);
         return function_index;
     }
 
