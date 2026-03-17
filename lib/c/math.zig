@@ -182,7 +182,6 @@ fn modfGeneric(comptime T: type, x: T, iptr: *T) T {
         return 0.0;
     }
 
-    // Avoids raising the INVALID flag on qemu-riscv
     if (math.isNan(x)) {
         iptr.* = math.nan(T);
         return math.nan(T);
