@@ -36,6 +36,7 @@ comptime {
 
     if (builtin.target.isMinGW() or builtin.target.isMuslLibC() or builtin.target.isWasiLibC()) {
         symbol(&coshf, "coshf");
+        symbol(&frexpf, "frexpf");
         symbol(&hypotf, "hypotf");
         symbol(&hypotl, "hypotl");
         symbol(&modff, "modff");
@@ -162,7 +163,7 @@ fn fdim(x: f64, y: f64) callconv(.c) f64 {
     return 0;
 }
 
-fn frexp(x: f64, e: *c_int) callconv(.c) f64 {
+fn frexpGeneric(comptime T: type, x: T, e: *c_int) T {
     // libc expects `*e` to be unspecified in this case; an unspecified C value
     // should be a valid value of the relevant type, yet Zig's std
     // implementation sets it to `undefined` -- which can even be nonsense
@@ -170,7 +171,7 @@ fn frexp(x: f64, e: *c_int) callconv(.c) f64 {
     // int value in Zig -- a zero.
     //
     // This mirrors the handling of infinities, where libc also expects
-    // unspecified for the value `*e` and Zig std sets it to a zero.
+    // unspecified for the value of `*e` and Zig std sets it to a zero.
     if (math.isNan(x)) {
         e.* = 0;
         return x;
@@ -179,6 +180,14 @@ fn frexp(x: f64, e: *c_int) callconv(.c) f64 {
     const r = math.frexp(x);
     e.* = r.exponent;
     return r.significand;
+}
+
+fn frexp(x: f64, e: *c_int) callconv(.c) f64 {
+    return frexpGeneric(f64, x, e);
+}
+
+fn frexpf(x: f32, e: *c_int) callconv(.c) f32 {
+    return frexpGeneric(f32, x, e);
 }
 
 fn hypot(x: f64, y: f64) callconv(.c) f64 {
