@@ -1459,3 +1459,33 @@ test "switch on nested packed containers" {
         .p = .{ .a = 2, .b = 17 },
     });
 }
+
+test "switch on large types" {
+    const S = struct {
+        fn doTheTest(a: u128, b: i500) !void {
+            switch (a) {
+                0x0,
+                0x3...0xFFFF_FFFF_FFFF_FFFF_FFFF_ABCD,
+                0xFFFF_FFFF_FFFF_FFFF_FFFF_EF00,
+                => return error.TestFailed,
+                0xFFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_0000...0xFFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFF0,
+                => |val| {
+                    try expect(val == 0xFFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_1234);
+                },
+                else => return error.TestFailed,
+            }
+            switch (b) {
+                0xFFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_0000...0xFFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_1234,
+                => return error.TestFailed,
+                0xFFFF_1234,
+                0xFFFF_FFFF_FFFF_FFFF_FFFF_0123...0xFFFF_FFFF_FFFF_FFFF_FFFF_4567,
+                => |val| {
+                    try expect(val == 0xFFFF_1234);
+                },
+                else => return error.TestFailed,
+            }
+        }
+    };
+    try S.doTheTest(0xFFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_1234, 0xFFFF_1234);
+    try comptime S.doTheTest(0xFFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_1234, 0xFFFF_1234);
+}
