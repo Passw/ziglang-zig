@@ -1406,8 +1406,6 @@ test "switch on packed union" {
 }
 
 test "switch on nested packed containers" {
-    if (builtin.object_format == .c) return error.SkipZigTest; // https://codeberg.org/ziglang/zig/issues/31467
-
     const P = packed struct {
         iu: u17,
         is: i31,
