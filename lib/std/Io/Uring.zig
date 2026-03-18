@@ -593,7 +593,10 @@ const CachedFd = struct {
                     @atomicStore(Once, &cached_fd.once, .uninitialized, .monotonic);
                     futexWake(ev, @ptrCast(&cached_fd.once), 1);
                 }
-                const fd = try ev.openat(cancel_region, linux.AT.FDCWD, path, flags, 0);
+                const fd = ev.openat(cancel_region, linux.AT.FDCWD, path, flags, 0) catch |err| switch (err) {
+                    error.OperationUnsupported => return error.Unexpected, // Not expecting O_TMPFILE flag
+                    else => |e| return e,
+                };
                 @atomicStore(Once, &cached_fd.once, .fromFd(fd), .monotonic);
                 futexWake(ev, @ptrCast(&cached_fd.once), std.math.maxInt(u32));
                 return fd;
@@ -2725,9 +2728,8 @@ fn dirOpenDir(
             error.DeviceBusy => return errnoBug(.BUSY), // O_EXCL not passed
             error.FileBusy => return errnoBug(.TXTBSY),
             error.PathAlreadyExists => return errnoBug(.EXIST), // Not creating.
-            error.PipeBusy => return error.Unexpected, // Not opening a pipe.
-            error.AntivirusInterference => unreachable, // Windows-only
             error.FileLocksUnsupported => return errnoBug(.OPNOTSUPP), // Not asking for locks.
+            error.OperationUnsupported => return errnoBug(.OPNOTSUPP), // Not asking for O_TMPFILE.
             else => |e| return e,
         },
     };
@@ -2810,13 +2812,16 @@ fn dirCreateFile(
 
     var maybe_sync: CancelRegion.Sync.Maybe = .{ .cancel_region = .init() };
     defer maybe_sync.deinit(ev);
-    const fd = try ev.openat(&maybe_sync.cancel_region, dir.handle, sub_path_posix, .{
+    const fd = ev.openat(&maybe_sync.cancel_region, dir.handle, sub_path_posix, .{
         .ACCMODE = if (flags.read) .RDWR else .WRONLY,
         .CREAT = true,
         .TRUNC = flags.truncate,
         .EXCL = flags.exclusive,
         .CLOEXEC = true,
-    }, flags.permissions.toMode());
+    }, flags.permissions.toMode()) catch |err| switch (err) {
+        error.OperationUnsupported => return error.Unexpected, // TMPFILE bit not set.
+        else => |e| return e,
+    };
     errdefer ev.closeAsync(fd);
 
     switch (flags.lock) {
@@ -2892,7 +2897,7 @@ fn dirCreateFileAtomic(
                     flags,
                     options.permissions.toMode(),
                 ) catch |err| switch (err) {
-                    error.IsDir, error.FileNotFound => {
+                    error.IsDir, error.FileNotFound, error.OperationUnsupported => {
                         // Ambiguous error code. It might mean the file system
                         // does not support O_TMPFILE. Therefore, we must fall
                         // back to not using O_TMPFILE.
@@ -2901,8 +2906,6 @@ fn dirCreateFileAtomic(
                     error.FileTooBig => return errnoBug(.FBIG),
                     error.DeviceBusy => return errnoBug(.BUSY), // O_EXCL not passed
                     error.PathAlreadyExists => return errnoBug(.EXIST), // Not creating.
-                    error.PipeBusy => return error.Unexpected, // Not opening a pipe.
-                    error.AntivirusInterference => unreachable, // Windows-only
                     error.FileLocksUnsupported => return errnoBug(.OPNOTSUPP), // Not asking for locks.
                     else => |e| return e,
                 },
@@ -2994,7 +2997,7 @@ fn dirOpenFile(
 
     var maybe_sync: CancelRegion.Sync.Maybe = .{ .cancel_region = .init() };
     defer maybe_sync.deinit(ev);
-    const fd = try ev.openat(&maybe_sync.cancel_region, dir.handle, sub_path_posix, .{
+    const fd = ev.openat(&maybe_sync.cancel_region, dir.handle, sub_path_posix, .{
         .ACCMODE = switch (flags.mode) {
             .read_only => .RDONLY,
             .write_only => .WRONLY,
@@ -3004,7 +3007,10 @@ fn dirOpenFile(
         .NOFOLLOW = !flags.follow_symlinks,
         .CLOEXEC = true,
         .PATH = flags.path_only,
-    }, 0);
+    }, 0) catch |err| switch (err) {
+        error.OperationUnsupported => return error.Unexpected, // TMPFILE bit not set.
+        else => |e| return e,
+    };
     errdefer ev.closeAsync(fd);
 
     if (!flags.allow_directory) {
@@ -5609,6 +5615,27 @@ fn lseek(
     }
 }
 
+const OpenError = error{
+    AccessDenied,
+    FileTooBig,
+    IsDir,
+    SymLinkLoop,
+    ProcessFdQuotaExceeded,
+    SystemFdQuotaExceeded,
+    NoDevice,
+    FileNotFound,
+    SystemResources,
+    NoSpaceLeft,
+    NotDir,
+    PermissionDenied,
+    PathAlreadyExists,
+    DeviceBusy,
+    OperationUnsupported,
+    FileLocksUnsupported,
+    WouldBlock,
+    FileBusy,
+} || Dir.PathNameError || Io.Cancelable || Io.UnexpectedError;
+
 fn openat(
     ev: *Evented,
     cancel_region: *CancelRegion,
@@ -5616,7 +5643,7 @@ fn openat(
     path: [*:0]const u8,
     flags: linux.O,
     mode: linux.mode_t,
-) File.OpenError!fd_t {
+) OpenError!fd_t {
     var mut_flags = flags;
     if (@hasField(linux.O, "LARGEFILE")) mut_flags.LARGEFILE = true;
     while (true) {
@@ -5662,7 +5689,8 @@ fn openat(
             .PERM => return error.PermissionDenied,
             .EXIST => return error.PathAlreadyExists,
             .BUSY => return error.DeviceBusy,
-            .OPNOTSUPP => return error.FileLocksUnsupported,
+            // File locking and TMPFILE are mutually exclusive
+            .OPNOTSUPP => return if (flags.TMPFILE) error.OperationUnsupported else error.FileLocksUnsupported,
             .AGAIN => return error.WouldBlock,
             .TXTBSY => return error.FileBusy,
             .NXIO => return error.NoDevice,
