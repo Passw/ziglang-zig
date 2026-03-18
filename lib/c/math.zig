@@ -60,6 +60,7 @@ comptime {
         symbol(&exp10, "exp10");
         symbol(&exp10f, "exp10f");
         symbol(&fdim, "fdim");
+        symbol(&frexp, "frexp");
         symbol(&hypot, "hypot");
         symbol(&modf, "modf");
         symbol(&pow, "pow");
@@ -159,6 +160,25 @@ fn fdim(x: f64, y: f64) callconv(.c) f64 {
         return x - y;
     }
     return 0;
+}
+
+fn frexp(x: f64, e: *c_int) callconv(.c) f64 {
+    // libc expects `*e` to be unspecified in this case; an unspecified C value
+    // should be a valid value of the relevant type, yet Zig's std
+    // implementation sets it to `undefined` -- which can even be nonsense
+    // according to the type (int). Therefore, we're setting it to a valid
+    // int value in Zig -- a zero.
+    //
+    // This mirrors the handling of infinities, where libc also expects
+    // unspecified for the value `*e` and Zig std sets it to a zero.
+    if (math.isNan(x)) {
+        e.* = 0;
+        return x;
+    }
+
+    const r = math.frexp(x);
+    e.* = r.exponent;
+    return r.significand;
 }
 
 fn hypot(x: f64, y: f64) callconv(.c) f64 {
