@@ -992,7 +992,6 @@ const src_files = [_][]const u8{
     "musl/src/math/significand.c",
     "musl/src/math/significandf.c",
     "musl/src/math/__sin.c",
-    "musl/src/math/sincosl.c",
     "musl/src/math/__sindf.c",
     "musl/src/math/sinh.c",
     "musl/src/math/sinhf.c",

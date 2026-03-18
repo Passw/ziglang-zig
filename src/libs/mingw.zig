@@ -987,7 +987,6 @@ const mingw32_x86_32_src = [_][]const u8{
 const mingw32_arm_src = [_][]const u8{
     // mingwex
     "math" ++ path.sep_str ++ "arm-common" ++ path.sep_str ++ "ldexpl.c",
-    "math" ++ path.sep_str ++ "arm-common" ++ path.sep_str ++ "sincosl.c",
 };
 
 const mingw32_arm32_src = [_][]const u8{
