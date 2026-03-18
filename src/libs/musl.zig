@@ -839,7 +839,6 @@ const src_files = [_][]const u8{
     "musl/src/math/__fpclassify.c",
     "musl/src/math/__fpclassifyf.c",
     "musl/src/math/__fpclassifyl.c",
-    "musl/src/math/frexpl.c",
     "musl/src/math/i386/acosl.s",
     "musl/src/math/i386/asinf.s",
     "musl/src/math/i386/asinl.s",

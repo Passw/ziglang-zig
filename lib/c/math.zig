@@ -37,6 +37,7 @@ comptime {
     if (builtin.target.isMinGW() or builtin.target.isMuslLibC() or builtin.target.isWasiLibC()) {
         symbol(&coshf, "coshf");
         symbol(&frexpf, "frexpf");
+        symbol(&frexpl, "frexpl");
         symbol(&hypotf, "hypotf");
         symbol(&hypotl, "hypotl");
         symbol(&modff, "modff");
@@ -188,6 +189,10 @@ fn frexp(x: f64, e: *c_int) callconv(.c) f64 {
 
 fn frexpf(x: f32, e: *c_int) callconv(.c) f32 {
     return frexpGeneric(f32, x, e);
+}
+
+fn frexpl(x: c_longdouble, e: *c_int) callconv(.c) c_longdouble {
+    return frexpGeneric(c_longdouble, x, e);
 }
 
 fn hypot(x: f64, y: f64) callconv(.c) f64 {
