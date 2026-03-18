@@ -49,8 +49,6 @@ test "switch arbitrary int size" {
     if (builtin.zig_backend == .stage2_spirv) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_riscv64) return error.SkipZigTest; // TODO
 
-    if (builtin.zig_backend == .stage2_c and builtin.os.tag == .windows) return error.SkipZigTest; // TODO
-
     try expect(testSwitchArbInt(u64, 0) == 0);
     try expect(testSwitchArbInt(u64, 12) == 1);
     try expect(testSwitchArbInt(u64, maxInt(u64)) == 2);
