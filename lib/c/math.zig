@@ -48,6 +48,10 @@ comptime {
         symbol(&tanhf, "tanhf");
     }
 
+    if (builtin.target.isMinGW() or builtin.target.isMuslLibC()) {
+        symbol(&rintf, "rintf");
+    }
+
     if (builtin.target.isMuslLibC() or builtin.target.isWasiLibC()) {
         symbol(&acos, "acos");
         symbol(&acosf, "acosf");
@@ -348,7 +352,7 @@ fn pow10f(x: f32) callconv(.c) f32 {
 }
 
 fn rint(x: f64) callconv(.c) f64 {
-    const toint: f64 = 1.0 / @as(f64, math.floatEps(f64));
+    const toint: f64 = 1.0 / math.floatEps(f64);
     const a: u64 = @bitCast(x);
     const e = a >> 52 & 0x7ff;
     const s = a >> 63;
@@ -368,39 +372,70 @@ fn rint(x: f64) callconv(.c) f64 {
     return y;
 }
 
-test "rint" {
+fn rintf(x: f32) callconv(.c) f32 {
+    const toint: f32 = 1.0 / math.floatEps(f32);
+    const a: u32 = @bitCast(x);
+    const e = a >> 23 & 0xff;
+    const s = a >> 31;
+    var y: f32 = undefined;
+
+    if (e >= 0x7f + 23) {
+        return x;
+    }
+
+    if (s == 1) {
+        y = x - toint + toint;
+    } else {
+        y = x + toint - toint;
+    }
+
+    if (y == 0) {
+        return if (s == 1) -0.0 else 0;
+    }
+    return y;
+}
+
+fn testRint(comptime T: type) !void {
+    const f = switch (T) {
+        f32 => rintf,
+        f64 => rint,
+        else => @compileError("rint not implemented for" ++ @typeName(T)),
+    };
+
     // Positive numbers round correctly
-    try expectEqual(@as(f64, 42.0), rint(42.2));
-    try expectEqual(@as(f64, 42.0), rint(41.8));
+    try expectEqual(@as(T, 42.0), f(42.2));
+    try expectEqual(@as(T, 42.0), f(41.8));
 
     // Negative numbers round correctly
-    try expectEqual(@as(f64, -6.0), rint(-5.9));
-    try expectEqual(@as(f64, -6.0), rint(-6.1));
+    try expectEqual(@as(T, -6.0), f(-5.9));
+    try expectEqual(@as(T, -6.0), f(-6.1));
 
     // No rounding needed test
-    try expectEqual(@as(f64, 5.0), rint(5.0));
-    try expectEqual(@as(f64, -10.0), rint(-10.0));
-    try expectEqual(@as(f64, 0.0), rint(0.0));
+    try expectEqual(@as(T, 5.0), f(5.0));
+    try expectEqual(@as(T, -10.0), f(-10.0));
+    try expectEqual(@as(T, 0.0), f(0.0));
 
     // Very large numbers return unchanged
-    const large: f64 = 9007199254740992.0; // 2^53
-    try expectEqual(large, rint(large));
-    try expectEqual(-large, rint(-large));
+    const large: T = 9007199254740992.0; // 2^53
+    try expectEqual(large, f(large));
+    try expectEqual(-large, f(-large));
 
     // Small positive numbers round to zero
-    const pos_result = rint(0.3);
-    try expectEqual(@as(f64, 0.0), pos_result);
-    try expect(@as(u64, @bitCast(pos_result)) == 0);
+    const pos_result = f(0.3);
+    try expect(math.isPositiveZero(pos_result));
 
     // Small negative numbers round to negative zero
-    const neg_result = rint(-0.3);
-    try expectEqual(@as(f64, 0.0), neg_result);
-    const bits: u64 = @bitCast(neg_result);
-    try expect((bits >> 63) == 1);
+    const neg_result = f(-0.3);
+    try expect(math.isNegativeZero(neg_result));
 
     // Exact half rounds to nearest even (banker's rounding)
-    try expectEqual(@as(f64, 2.0), rint(2.5));
-    try expectEqual(@as(f64, 4.0), rint(3.5));
+    try expectEqual(@as(T, 2.0), f(2.5));
+    try expectEqual(@as(T, 4.0), f(3.5));
+}
+
+test "rint" {
+    try testRint(f32);
+    try testRint(f64);
 }
 
 fn tanh(x: f64) callconv(.c) f64 {

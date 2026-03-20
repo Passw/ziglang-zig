@@ -996,7 +996,6 @@ const mingw32_arm32_src = [_][]const u8{
 const mingw32_arm64_src = [_][]const u8{
     // mingwex
     "math" ++ path.sep_str ++ "arm64" ++ path.sep_str ++ "rint.c",
-    "math" ++ path.sep_str ++ "arm64" ++ path.sep_str ++ "rintf.c",
     "math" ++ path.sep_str ++ "arm64" ++ path.sep_str ++ "sincos.S",
 };
 
