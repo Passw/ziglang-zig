@@ -66,6 +66,7 @@ comptime {
         symbol(&finitef, "finitef");
         symbol(&frexp, "frexp");
         symbol(&hypot, "hypot");
+        symbol(&lrint, "lrint");
         symbol(&modf, "modf");
         symbol(&pow, "pow");
         symbol(&pow10, "pow10");
@@ -227,6 +228,10 @@ fn isnanf(x: f32) callconv(.c) c_int {
 
 fn isnanl(x: c_longdouble) callconv(.c) c_int {
     return if (math.isNan(x)) 1 else 0;
+}
+
+fn lrint(x: f64) callconv(.c) c_long {
+    return @intFromFloat(rint(x));
 }
 
 fn modfGeneric(comptime T: type, x: T, iptr: *T) T {
