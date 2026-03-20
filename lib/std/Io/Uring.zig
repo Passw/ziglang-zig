@@ -594,7 +594,7 @@ const CachedFd = struct {
                     futexWake(ev, @ptrCast(&cached_fd.once), 1);
                 }
                 const fd = ev.openat(cancel_region, linux.AT.FDCWD, path, flags, 0) catch |err| switch (err) {
-                    error.OperationUnsupported => return error.Unexpected, // Not expecting O_TMPFILE flag
+                    error.OperationUnsupported => return error.Unexpected, // TMPFILE unset.
                     else => |e| return e,
                 };
                 @atomicStore(Once, &cached_fd.once, .fromFd(fd), .monotonic);
@@ -2725,11 +2725,10 @@ fn dirOpenDir(
             error.WouldBlock => return errnoBug(.AGAIN),
             error.FileTooBig => return errnoBug(.FBIG),
             error.NoSpaceLeft => return errnoBug(.NOSPC),
-            error.DeviceBusy => return errnoBug(.BUSY), // O_EXCL not passed
+            error.DeviceBusy => return errnoBug(.BUSY), // EXCL unset.
             error.FileBusy => return errnoBug(.TXTBSY),
             error.PathAlreadyExists => return errnoBug(.EXIST), // Not creating.
-            error.FileLocksUnsupported => return errnoBug(.OPNOTSUPP), // Not asking for locks.
-            error.OperationUnsupported => return errnoBug(.OPNOTSUPP), // Not asking for O_TMPFILE.
+            error.OperationUnsupported => return errnoBug(.OPNOTSUPP), // No TMPFILE, no locks.
             else => |e| return e,
         },
     };
@@ -2819,7 +2818,7 @@ fn dirCreateFile(
         .EXCL = flags.exclusive,
         .CLOEXEC = true,
     }, flags.permissions.toMode()) catch |err| switch (err) {
-        error.OperationUnsupported => return error.Unexpected, // TMPFILE bit not set.
+        error.OperationUnsupported => return error.Unexpected, // TMPFILE unset.
         else => |e| return e,
     };
     errdefer ev.closeAsync(fd);
@@ -2906,7 +2905,6 @@ fn dirCreateFileAtomic(
                     error.FileTooBig => return errnoBug(.FBIG),
                     error.DeviceBusy => return errnoBug(.BUSY), // O_EXCL not passed
                     error.PathAlreadyExists => return errnoBug(.EXIST), // Not creating.
-                    error.FileLocksUnsupported => return errnoBug(.OPNOTSUPP), // Not asking for locks.
                     else => |e| return e,
                 },
                 .flags = .{ .nonblocking = false },
@@ -3008,7 +3006,7 @@ fn dirOpenFile(
         .CLOEXEC = true,
         .PATH = flags.path_only,
     }, 0) catch |err| switch (err) {
-        error.OperationUnsupported => return error.Unexpected, // TMPFILE bit not set.
+        error.OperationUnsupported => return error.Unexpected, // TMPFILE unset.
         else => |e| return e,
     };
     errdefer ev.closeAsync(fd);
@@ -3155,7 +3153,7 @@ fn dirRealPathFile(
         .PATH = true,
     }, 0) catch |err| switch (err) {
         error.WouldBlock => return errnoBug(.AGAIN),
-        error.FileLocksUnsupported => return errnoBug(.OPNOTSUPP), // Not asking for locks.
+        error.OperationUnsupported => return errnoBug(.OPNOTSUPP), // Not asking for locks.
         else => |e| return e,
     };
     defer ev.closeAsync(fd);
@@ -5615,27 +5613,6 @@ fn lseek(
     }
 }
 
-const OpenError = error{
-    AccessDenied,
-    FileTooBig,
-    IsDir,
-    SymLinkLoop,
-    ProcessFdQuotaExceeded,
-    SystemFdQuotaExceeded,
-    NoDevice,
-    FileNotFound,
-    SystemResources,
-    NoSpaceLeft,
-    NotDir,
-    PermissionDenied,
-    PathAlreadyExists,
-    DeviceBusy,
-    OperationUnsupported,
-    FileLocksUnsupported,
-    WouldBlock,
-    FileBusy,
-} || Dir.PathNameError || Io.Cancelable || Io.UnexpectedError;
-
 fn openat(
     ev: *Evented,
     cancel_region: *CancelRegion,
@@ -5643,7 +5620,7 @@ fn openat(
     path: [*:0]const u8,
     flags: linux.O,
     mode: linux.mode_t,
-) OpenError!fd_t {
+) !fd_t {
     var mut_flags = flags;
     if (@hasField(linux.O, "LARGEFILE")) mut_flags.LARGEFILE = true;
     while (true) {
@@ -5689,8 +5666,9 @@ fn openat(
             .PERM => return error.PermissionDenied,
             .EXIST => return error.PathAlreadyExists,
             .BUSY => return error.DeviceBusy,
-            // File locking and TMPFILE are mutually exclusive
-            .OPNOTSUPP => return if (flags.TMPFILE) error.OperationUnsupported else error.FileLocksUnsupported,
+            // This can be triggered by file locking and TMPFILE, but those
+            // flags are mutually exclusive.
+            .OPNOTSUPP => return error.OperationUnsupported,
             .AGAIN => return error.WouldBlock,
             .TXTBSY => return error.FileBusy,
             .NXIO => return error.NoDevice,
