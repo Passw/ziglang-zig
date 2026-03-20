@@ -9795,14 +9795,14 @@ fn floatRoundOp(
         const operand = try expr(gz, scope, .{ .rl = .{ .coerced_ty = operand_ty_inst } }, operand_node);
 
         try emitDbgStmt(gz, cursor);
-        const cast_tag: Zir.Inst.Extended = switch (float_tag) {
-            .round => .round_cast,
-            .floor => .floor_cast,
-            .ceil => .ceil_cast,
-            .trunc => .trunc_cast,
+        const round_op: Zir.Inst.RoundOp = switch (float_tag) {
+            .round => .round,
+            .floor => .floor,
+            .ceil => .ceil,
+            .trunc => .trunc,
             else => unreachable,
         };
-        const result = try gz.addExtendedPayload(cast_tag, Zir.Inst.BinNode{
+        const result = try gz.addExtendedPayloadSmall(.round_op, @intFromEnum(round_op), Zir.Inst.BinNode{
             .node = gz.nodeIndexToRelative(node),
             .lhs = dest_type,
             .rhs = operand,

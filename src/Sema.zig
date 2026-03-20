@@ -1405,10 +1405,7 @@ fn analyzeBodyInner(
                     .@"asm"             => try sema.zirAsm(               block, extended, false),
                     .asm_expr           => try sema.zirAsm(               block, extended, true),
                     .typeof_peer        => try sema.zirTypeofPeer(        block, extended, inst),
-                    .round_cast         => try sema.zirRoundCast(         block, extended, .round),
-                    .floor_cast         => try sema.zirRoundCast(         block, extended, .floor),
-                    .ceil_cast          => try sema.zirRoundCast(         block, extended, .ceil),
-                    .trunc_cast         => try sema.zirRoundCast(         block, extended, .truncate),
+                    .round_op           => try sema.zirRoundCast(         block, extended),
                     .round_op_ty        => try sema.zirRoundOpType(       block, extended),
                     .compile_log        => try sema.zirCompileLog(        block, extended),
                     .min_multi          => try sema.zirMinMaxMulti(       block, extended, .min),
@@ -20854,7 +20851,6 @@ fn zirRoundCast(
     sema: *Sema,
     block: *Block,
     extended: Zir.Inst.Extended.InstData,
-    mode: IntFromFloatMode,
 ) CompileError!Air.Inst.Ref {
     const pt = sema.pt;
     const zcu = pt.zcu;
@@ -20863,6 +20859,14 @@ fn zirRoundCast(
     const operand_src = block.builtinCallArgSrc(extra.node, 0);
 
     const operand = sema.resolveInst(extra.rhs);
+
+    const round_op: Zir.Inst.RoundOp = @enumFromInt(extended.small);
+    const mode: IntFromFloatMode = switch (round_op) {
+        .round => .round,
+        .floor => .floor,
+        .ceil => .ceil,
+        .trunc => .truncate,
+    };
 
     const dest_ty = (try sema.resolveTypeOrPoison(block, src, extra.lhs) orelse switch (mode) {
         // zig fmt: off

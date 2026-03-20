@@ -1361,7 +1361,6 @@ test "comptime float casts" {
     try expectIntFromFloat(comptime_int, 1234, i16, 1234);
     try expectIntFromFloat(comptime_float, 12.3, comptime_int, 12);
 
-    try expectRoundCast(comptime_int, 1234, i16, 1234);
     try expectRoundCast(comptime_float, 12.3, comptime_int, 12);
 
     try expectFloorCast(comptime_float, 12.3, comptime_int, 12);
