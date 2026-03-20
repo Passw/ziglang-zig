@@ -20881,33 +20881,41 @@ fn zirRoundCast(
     const dest_scalar_ty = dest_ty.scalarType(zcu);
     const operand_scalar_ty = operand_ty.scalarType(zcu);
 
-    if (dest_scalar_ty.zigTypeTag(zcu) == .float or dest_scalar_ty.zigTypeTag(zcu) == .comptime_float) {
-        const coerced_operand = try sema.coerce(block, dest_ty, operand, operand_src);
-
-        const result_ref = switch (mode) {
-            .round => try sema.maybeConstantUnaryMath(coerced_operand, dest_ty, Value.round),
-            .floor => try sema.maybeConstantUnaryMath(coerced_operand, dest_ty, Value.floor),
-            .ceil => try sema.maybeConstantUnaryMath(coerced_operand, dest_ty, Value.ceil),
-            .truncate => try sema.maybeConstantUnaryMath(coerced_operand, dest_ty, Value.trunc),
-            else => unreachable,
-        };
-
-        if (result_ref) |ref| return ref;
-
-        const air_tag: Air.Inst.Tag = switch (mode) {
-            .round => .round,
-            .floor => .floor,
-            .ceil => .ceil,
-            .truncate => .trunc_float,
-            else => unreachable,
-        };
-
-        try sema.requireRuntimeBlock(block, operand_src, null);
-        return block.addUnOp(air_tag, coerced_operand);
-    }
-
-    _ = try sema.checkIntType(block, src, dest_scalar_ty);
     try sema.checkFloatType(block, operand_src, operand_scalar_ty);
+
+    switch (dest_scalar_ty.zigTypeTag(zcu)) {
+        .float, .comptime_float => {
+            const coerced_operand = try sema.coerce(block, dest_ty, operand, operand_src);
+
+            const result_ref = switch (mode) {
+                .round => try sema.maybeConstantUnaryMath(coerced_operand, dest_ty, Value.round),
+                .floor => try sema.maybeConstantUnaryMath(coerced_operand, dest_ty, Value.floor),
+                .ceil => try sema.maybeConstantUnaryMath(coerced_operand, dest_ty, Value.ceil),
+                .truncate => try sema.maybeConstantUnaryMath(coerced_operand, dest_ty, Value.trunc),
+                .exact => unreachable,
+            };
+
+            if (result_ref) |ref| return ref;
+
+            const air_tag: Air.Inst.Tag = switch (mode) {
+                .round => .round,
+                .floor => .floor,
+                .ceil => .ceil,
+                .truncate => .trunc_float,
+                .exact => unreachable,
+            };
+
+            try sema.requireRuntimeBlock(block, operand_src, null);
+            return block.addUnOp(air_tag, coerced_operand);
+        },
+        .int, .comptime_int => {},
+        else => return sema.fail(
+            block,
+            src,
+            "expected integer, float, or vector of either integers or floats, found '{f}'",
+            .{dest_ty.fmt(pt)},
+        ),
+    }
 
     if (sema.resolveValue(operand)) |operand_val| {
         const result_val = try sema.intFromFloat(block, operand_src, operand_val, operand_ty, dest_ty, mode);
@@ -20948,7 +20956,7 @@ fn zirRoundCast(
             .round => .round,
             .floor => .floor,
             .ceil => .ceil,
-            else => unreachable,
+            .truncate, .exact => unreachable,
         };
         const rounded_op = try block.addUnOp(op_tag, operand);
 
