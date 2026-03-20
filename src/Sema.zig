@@ -20927,7 +20927,7 @@ fn zirRoundCast(
 
     if (sema.resolveValue(operand)) |operand_val| {
         const result_val = try sema.intFromFloat(block, operand_src, operand_val, operand_ty, dest_ty, mode);
-        return Air.internedToRef(result_val.toIntern());
+        return .fromValue(result_val);
     } else if (dest_scalar_ty.zigTypeTag(zcu) == .comptime_int) {
         return sema.failWithNeededComptime(block, operand_src, .{ .simple = .casted_to_comptime_int });
     }
@@ -20948,32 +20948,23 @@ fn zirRoundCast(
     }
 
     const safe = block.wantSafety();
-    const optimized = block.float_mode == .optimized;
 
     if (safe) {
         try sema.preparePanicId(src, .integer_part_out_of_bounds);
     }
 
-    if (mode == .truncate) {
-        const air_tag: Air.Inst.Tag = if (safe)
-            if (optimized) .int_from_float_optimized_safe else .int_from_float_safe
-        else if (optimized) .int_from_float_optimized else .int_from_float;
-        return block.addTyOp(air_tag, dest_ty, operand);
-    } else {
-        const op_tag: Air.Inst.Tag = switch (mode) {
-            .round => .round,
-            .floor => .floor,
-            .ceil => .ceil,
-            .truncate, .exact => unreachable,
-        };
-        const rounded_op = try block.addUnOp(op_tag, operand);
-
-        const air_tag: Air.Inst.Tag = if (safe)
-            if (optimized) .int_from_float_optimized_safe else .int_from_float_safe
-        else if (optimized) .int_from_float_optimized else .int_from_float;
-
-        return block.addTyOp(air_tag, dest_ty, rounded_op);
-    }
+    const uncasted_result: Air.Inst.Ref = switch (mode) {
+        .truncate => operand,
+        .round => try block.addUnOp(.round, operand),
+        .floor => try block.addUnOp(.floor, operand),
+        .ceil => try block.addUnOp(.ceil, operand),
+        .exact => unreachable,
+    };
+    const air_cast_tag: Air.Inst.Tag = switch (block.float_mode) {
+        .optimized => if (safe) .int_from_float_optimized_safe else .int_from_float_safe,
+        .strict => if (safe) .int_from_float_safe else .int_from_float,
+    };
+    return block.addTyOp(air_cast_tag, dest_ty, uncasted_result);
 }
 
 fn zirFloatFromInt(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.Inst.Ref {
