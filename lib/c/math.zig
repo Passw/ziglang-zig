@@ -49,6 +49,7 @@ comptime {
     }
 
     if (builtin.target.isMinGW() or builtin.target.isMuslLibC()) {
+        symbol(&rint, "rint");
         symbol(&rintf, "rintf");
     }
 
@@ -81,7 +82,6 @@ comptime {
     if (builtin.target.isMuslLibC()) {
         symbol(&copysign, "copysign");
         symbol(&copysignf, "copysignf");
-        symbol(&rint, "rint");
     }
 
     symbol(&copysignl, "copysignl");
