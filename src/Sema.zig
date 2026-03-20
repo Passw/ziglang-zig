@@ -25144,11 +25144,11 @@ fn zirRoundOpType(sema: *Sema, block: *Block, extended: Zir.Inst.Extended.InstDa
     const extra = sema.code.extraData(Zir.Inst.UnNode, extended.operand).data;
     const operand_src = block.builtinCallArgSrc(extra.node, 0);
 
-    const dest_ty_or_poison = try sema.resolveTypeOrPoison(block, operand_src, extra.operand) orelse Type.generic_poison;
+    const dest_ty = try sema.resolveTypeOrPoison(block, operand_src, extra.operand) orelse {
+        return .generic_poison_type;
+    };
 
-    if (dest_ty_or_poison.isGenericPoison()) return .generic_poison_type;
-
-    const float_ty = dest_ty_or_poison.optEuBaseType(zcu);
+    const float_ty = dest_ty.optEuBaseType(zcu);
     switch (float_ty.scalarType(zcu).zigTypeTag(zcu)) {
         .float, .comptime_float => return .fromType(float_ty),
         else => return .comptime_float_type,
