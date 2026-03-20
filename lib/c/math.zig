@@ -62,6 +62,8 @@ comptime {
         symbol(&exp10, "exp10");
         symbol(&exp10f, "exp10f");
         symbol(&fdim, "fdim");
+        symbol(&finite, "finite");
+        symbol(&finitef, "finitef");
         symbol(&frexp, "frexp");
         symbol(&hypot, "hypot");
         symbol(&modf, "modf");
@@ -162,6 +164,14 @@ fn fdim(x: f64, y: f64) callconv(.c) f64 {
         return x - y;
     }
     return 0;
+}
+
+fn finite(x: f64) callconv(.c) c_int {
+    return if (math.isFinite(x)) 1 else 0;
+}
+
+fn finitef(x: f32) callconv(.c) c_int {
+    return if (math.isFinite(x)) 1 else 0;
 }
 
 fn frexpGeneric(comptime T: type, x: T, e: *c_int) T {
