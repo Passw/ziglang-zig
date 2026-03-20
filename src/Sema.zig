@@ -20881,7 +20881,15 @@ fn zirRoundCast(
     const dest_scalar_ty = dest_ty.scalarType(zcu);
     const operand_scalar_ty = operand_ty.scalarType(zcu);
 
-    try sema.checkFloatType(block, operand_src, operand_scalar_ty);
+    switch (operand_scalar_ty.zigTypeTag(zcu)) {
+        .comptime_float, .float => {},
+        else => return sema.fail(
+            block,
+            operand_src,
+            "expected float or vector type, found '{f}'",
+            .{operand_ty.fmt(pt)},
+        ),
+    }
 
     switch (dest_scalar_ty.zigTypeTag(zcu)) {
         .float, .comptime_float => {
