@@ -19623,21 +19623,16 @@ fn maybeConstantUnaryMath(
     return null;
 }
 
-fn zirUnaryMath(
+fn unaryMath(
     sema: *Sema,
     block: *Block,
-    inst: Zir.Inst.Index,
+    operand_src: LazySrcLoc,
+    operand: Air.Inst.Ref,
     air_tag: Air.Inst.Tag,
     comptime eval: fn (Value, Type, Allocator, Zcu.PerThread) Allocator.Error!Value,
 ) CompileError!Air.Inst.Ref {
-    const tracy = trace(@src());
-    defer tracy.end();
-
     const pt = sema.pt;
     const zcu = pt.zcu;
-    const inst_data = sema.code.instructions.items(.data)[@intFromEnum(inst)].un_node;
-    const operand = sema.resolveInst(inst_data.operand);
-    const operand_src = block.builtinCallArgSrc(inst_data.src_node, 0);
     const operand_ty = sema.typeOf(operand);
     const scalar_ty = operand_ty.scalarType(zcu);
 
@@ -19655,6 +19650,23 @@ fn zirUnaryMath(
         try sema.requireRuntimeBlock(block, operand_src, null);
         return block.addUnOp(air_tag, operand);
     };
+}
+
+fn zirUnaryMath(
+    sema: *Sema,
+    block: *Block,
+    inst: Zir.Inst.Index,
+    air_tag: Air.Inst.Tag,
+    comptime eval: fn (Value, Type, Allocator, Zcu.PerThread) Allocator.Error!Value,
+) CompileError!Air.Inst.Ref {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    const inst_data = sema.code.instructions.items(.data)[@intFromEnum(inst)].un_node;
+    const operand = sema.resolveInst(inst_data.operand);
+    const operand_src = block.builtinCallArgSrc(inst_data.src_node, 0);
+
+    return sema.unaryMath(block, operand_src, operand, air_tag, eval);
 }
 
 fn zirTagName(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.Inst.Ref {
@@ -20850,36 +20862,33 @@ fn zirRoundCast(
     const src = block.nodeOffset(extra.node);
     const operand_src = block.builtinCallArgSrc(extra.node, 0);
 
-    const dest_ty_or_poison = try sema.resolveTypeOrPoison(block, src, extra.lhs) orelse Type.generic_poison;
-    var dest_ty = dest_ty_or_poison;
-    if (!dest_ty.isGenericPoison()) {
-        if (dest_ty.zigTypeTag(zcu) == .error_union) {
-            dest_ty = dest_ty.errorUnionPayload(zcu);
-        }
-        if (dest_ty.zigTypeTag(zcu) == .optional) {
-            dest_ty = dest_ty.childType(zcu);
-        }
-    }
-
     const operand = sema.resolveInst(extra.rhs);
+
+    const dest_ty = (try sema.resolveTypeOrPoison(block, src, extra.lhs) orelse switch (mode) {
+        // zig fmt: off
+        .round    => return sema.unaryMath(block, operand_src, operand, .round,       Value.round),
+        .floor    => return sema.unaryMath(block, operand_src, operand, .floor,       Value.floor),
+        .ceil     => return sema.unaryMath(block, operand_src, operand, .ceil,        Value.ceil),
+        .truncate => return sema.unaryMath(block, operand_src, operand, .trunc_float, Value.trunc),
+        // zig fmt: on
+        .exact => unreachable,
+    }).optEuBaseType(zcu);
+
     const operand_ty = sema.typeOf(operand);
 
-    const is_poison = dest_ty.isGenericPoison();
-    if (!is_poison) {
-        try sema.checkVectorizableBinaryOperands(block, operand_src, dest_ty, operand_ty, src, operand_src);
-    }
-    const dest_scalar_ty = if (is_poison) dest_ty else dest_ty.scalarType(zcu);
+    try sema.checkVectorizableBinaryOperands(block, operand_src, dest_ty, operand_ty, src, operand_src);
+
+    const dest_scalar_ty = dest_ty.scalarType(zcu);
     const operand_scalar_ty = operand_ty.scalarType(zcu);
 
-    if (is_poison or dest_scalar_ty.zigTypeTag(zcu) == .float or dest_scalar_ty.zigTypeTag(zcu) == .comptime_float) {
+    if (dest_scalar_ty.zigTypeTag(zcu) == .float or dest_scalar_ty.zigTypeTag(zcu) == .comptime_float) {
         const coerced_operand = try sema.coerce(block, dest_ty, operand, operand_src);
-        const math_ty = if (is_poison) operand_ty else dest_ty;
 
         const result_ref = switch (mode) {
-            .round => try sema.maybeConstantUnaryMath(coerced_operand, math_ty, Value.round),
-            .floor => try sema.maybeConstantUnaryMath(coerced_operand, math_ty, Value.floor),
-            .ceil => try sema.maybeConstantUnaryMath(coerced_operand, math_ty, Value.ceil),
-            .truncate => try sema.maybeConstantUnaryMath(coerced_operand, math_ty, Value.trunc),
+            .round => try sema.maybeConstantUnaryMath(coerced_operand, dest_ty, Value.round),
+            .floor => try sema.maybeConstantUnaryMath(coerced_operand, dest_ty, Value.floor),
+            .ceil => try sema.maybeConstantUnaryMath(coerced_operand, dest_ty, Value.ceil),
+            .truncate => try sema.maybeConstantUnaryMath(coerced_operand, dest_ty, Value.trunc),
             else => unreachable,
         };
 
