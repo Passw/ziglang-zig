@@ -616,7 +616,9 @@ pub const Os = struct {
 
                 .psp => .{
                     .semver = .{
-                        .min = .{ .major = 1, .minor = 0, .patch = 0 },
+                        // https://www.psdevwiki.com/psp/Official_Firmware_(OFW)#1.XX_Kernel
+                        // It appears that the kernel started with semver for 1.XX before later changing to MAJ.MINPATCH in later releases (e.g. 3.60, 6.61)
+                        .min = .{ .major = 1, .minor = 0, .patch = 3 },
                         .max = .{ .major = 6, .minor = 61, .patch = 0 },
                     },
                 },
@@ -2034,7 +2036,7 @@ pub const Cpu = struct {
                 .loongarch64 => &loongarch.cpu.la64v1_0,
                 .m68k => &m68k.cpu.M68000,
                 .mips, .mipsel => switch (os.tag) {
-                    .psp => &mips.cpu.mips2, // mips2 with some custom instructions, no trap instructions
+                    .psp => &mips.cpu.allegrex,
                     else => &mips.cpu.mips32r2,
                 },
                 .mips64, .mips64el => &mips.cpu.mips64r2,
