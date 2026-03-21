@@ -1,5 +1,6 @@
 const std = @import("../std.zig");
-const File = std.Io.File;
+const Io = std.Io;
+const File = Io.File;
 const Allocator = std.mem.Allocator;
 const pdb = std.pdb;
 const assert = std.debug.assert;
@@ -10,7 +11,7 @@ file_reader: *File.Reader,
 msf: Msf,
 allocator: Allocator,
 string_table: ?*MsfStream,
-dbi: ?*MsfStream,
+ipi: ?[]u8,
 modules: []Module,
 sect_contribs: []pdb.SectionContribEntry,
 guid: [16]u8,
@@ -41,7 +42,7 @@ pub fn init(gpa: Allocator, file_reader: *File.Reader) !Pdb {
         .file_reader = file_reader,
         .allocator = gpa,
         .string_table = null,
-        .dbi = null,
+        .ipi = null,
         .msf = try Msf.init(gpa, file_reader),
         .modules = &.{},
         .sect_contribs = &.{},
@@ -53,6 +54,7 @@ pub fn init(gpa: Allocator, file_reader: *File.Reader) !Pdb {
 pub fn deinit(self: *Pdb) void {
     const gpa = self.allocator;
     self.msf.deinit(gpa);
+    if (self.ipi) |ipi| gpa.free(ipi);
     for (self.modules) |*module| {
         module.deinit(gpa);
     }
@@ -67,7 +69,7 @@ pub fn parseDbiStream(self: *Pdb) !void {
     const gpa = self.allocator;
     const reader = &stream.interface;
 
-    const header = try reader.takeStruct(std.pdb.DbiStreamHeader, .little);
+    const header = try reader.takeStruct(pdb.DbiStreamHeader, .little);
     if (header.version_header != 19990903) // V70, only value observed by LLVM team
         return error.UnknownPDBVersion;
     // if (header.Age != age)
@@ -85,14 +87,14 @@ pub fn parseDbiStream(self: *Pdb) !void {
         const mod_info = try reader.takeStruct(pdb.ModInfo, .little);
         var this_record_len: usize = @sizeOf(pdb.ModInfo);
 
-        var module_name: std.Io.Writer.Allocating = .init(gpa);
+        var module_name: Io.Writer.Allocating = .init(gpa);
         defer module_name.deinit();
         this_record_len += try reader.streamDelimiterLimit(&module_name.writer, 0, .limited(1024));
         assert(reader.buffered()[0] == 0); // TODO change streamDelimiterLimit API
         reader.toss(1);
         this_record_len += 1;
 
-        var obj_file_name: std.Io.Writer.Allocating = .init(gpa);
+        var obj_file_name: Io.Writer.Allocating = .init(gpa);
         defer obj_file_name.deinit();
         this_record_len += try reader.streamDelimiterLimit(&obj_file_name.writer, 0, .limited(1024));
         assert(reader.buffered()[0] == 0); // TODO change streamDelimiterLimit API
@@ -128,7 +130,7 @@ pub fn parseDbiStream(self: *Pdb) !void {
 
     var sect_cont_offset: usize = 0;
     if (section_contrib_size != 0) {
-        const version = reader.takeEnum(std.pdb.SectionContrSubstreamVersion, .little) catch |err| switch (err) {
+        const version = reader.takeEnum(pdb.SectionContrSubstreamVersion, .little) catch |err| switch (err) {
             error.InvalidEnumTag, error.EndOfStream => return error.InvalidDebugInfo,
             error.ReadFailed => return error.ReadFailed,
         };
@@ -146,6 +148,15 @@ pub fn parseDbiStream(self: *Pdb) !void {
 
     self.modules = try modules.toOwnedSlice();
     self.sect_contribs = try sect_contribs.toOwnedSlice();
+}
+
+pub fn parseIpiStream(self: *Pdb) !void {
+    const gpa = self.allocator;
+    const stream = self.getStream(.ipi) orelse return;
+    const header = try stream.interface.peekStruct(pdb.IpiStreamHeader, .little);
+    if (header.version != .v80) // only value observed by LLVM team
+        return error.UnknownPDBVersion;
+    self.ipi = try stream.interface.readAlloc(gpa, @sizeOf(pdb.IpiStreamHeader) + header.type_record_bytes);
 }
 
 pub fn parseInfoStream(self: *Pdb) !void {
@@ -212,8 +223,9 @@ pub fn parseInfoStream(self: *Pdb) !void {
         return error.MissingDebugInfo;
 }
 
-pub fn getSymbolName(self: *Pdb, module: *Module, address: u64) ?[]const u8 {
+pub fn getProcSym(self: *Pdb, module: *Module, address: u64) ?*align(1) pdb.ProcSym {
     _ = self;
+
     std.debug.assert(module.populated);
 
     var symbol_i: usize = 0;
@@ -223,9 +235,9 @@ pub fn getSymbolName(self: *Pdb, module: *Module, address: u64) ?[]const u8 {
             return null;
         switch (prefix.record_kind) {
             .lproc32, .gproc32 => {
-                const proc_sym: *align(1) pdb.ProcSym = @ptrCast(&module.symbols[symbol_i + @sizeOf(pdb.RecordPrefix)]);
+                const proc_sym: *align(1) pdb.ProcSym = @ptrCast(prefix);
                 if (address >= proc_sym.code_offset and address < proc_sym.code_offset + proc_sym.code_size) {
-                    return std.mem.sliceTo(@as([*:0]u8, @ptrCast(&proc_sym.name[0])), 0);
+                    return proc_sym;
                 }
             },
             else => {},
@@ -234,6 +246,433 @@ pub fn getSymbolName(self: *Pdb, module: *Module, address: u64) ?[]const u8 {
     }
 
     return null;
+}
+
+pub const InlineSiteSymIterator = struct {
+    module_index: usize,
+    offset: usize,
+    end: usize,
+
+    pub const empty: InlineSiteSymIterator = .{
+        .module_index = 0,
+        .offset = 0,
+        .end = 0,
+    };
+
+    pub fn next(iter: *InlineSiteSymIterator, module: *Module) ?*align(1) pdb.InlineSiteSym {
+        while (iter.offset < iter.end) {
+            const inline_prefix: *align(1) pdb.RecordPrefix = @ptrCast(&module.symbols[iter.offset]);
+            if (inline_prefix.record_len < 2)
+                return null;
+            const end = iter.offset + inline_prefix.record_len + @sizeOf(u16);
+            defer iter.offset = end;
+            switch (inline_prefix.record_kind) {
+                // Skip nested procedures
+                .lproc32,
+                .lproc32_st,
+                .gproc32,
+                .gproc32_st,
+                .lproc32_id,
+                .gproc32_id,
+                .lproc32_dpc,
+                .lproc32_dpc_id,
+                => {
+                    const skip: *align(1) pdb.ProcSym = @ptrCast(inline_prefix);
+                    iter.offset = skip.end;
+                },
+                .inlinesite,
+                .inlinesite2,
+                => return @ptrCast(inline_prefix),
+                else => {}
+            }
+        }
+
+        return null;
+    }
+};
+
+pub const BinaryAnnotation = union(enum) {
+    code_offset: u32,
+    change_code_offset_base: u32,
+    change_code_offset: u32,
+    change_code_length: u32,
+    change_file: u32,
+    change_line_offset: i32,
+    change_line_end_delta: u32,
+    change_range_kind: RangeKind,
+    change_column_start: u32,
+    change_column_end_delta: i32,
+    change_code_offset_and_line_offset: struct { code_delta: u32, line_delta: i32 },
+    change_code_length_and_code_offset: struct { length: u32, delta: u32 },
+    change_column_end: u32,
+
+    pub const RangeKind = enum(u32) { expression = 0, statement = 1 };
+
+    /// A virtual machine that processed binary annotations.
+    pub const RangeIterator = struct {
+        annotations: Iterator,
+        curr: PartialRange,
+        /// The previous range is tracked as the code length is sometimes implied by the subsequent
+        /// range.
+        prev: ?PartialRange,
+
+        const PartialRange = struct {
+            line_offset: u32,
+            file_offset: u32,
+            code_offset: u32,
+            code_length: ?u32,
+        };
+
+        pub fn init(annotations: Iterator) RangeIterator {
+            return .{
+                .annotations = annotations,
+                .curr = .{
+                    .line_offset = 0,
+                    .file_offset = 0,
+                    .code_offset = 0,
+                    .code_length = null,
+                },
+                .prev = null,
+            };
+        }
+
+        pub const Range = struct {
+            line_offset: u32,
+            file_offset: u32,
+            code_offset: u32,
+            code_length: u32,
+
+            pub fn contains(self: Range, offset_in_func: usize) bool {
+                return self.code_offset <= offset_in_func and
+                    offset_in_func < self.code_offset + self.code_length;
+            }
+        };
+
+        pub fn next(self: *RangeIterator) error{InvalidDebugInfo}!?Range {
+            while (try self.annotations.next()) |annotation| {
+                switch (annotation) {
+                    .change_code_offset => |delta| {
+                        self.curr.code_offset += delta;
+                    },
+                    .change_code_length => |length| {
+                        if (self.prev) |*prev| prev.code_length = prev.code_length orelse length;
+                        self.curr.code_offset += length;
+                    },
+                    .change_file => @panic("unimplemented"),
+                    // LLVM never emits this opcode, but it's clear enough how to interpret it so we may as
+                    // well in case they use it in the future
+                    .change_code_length_and_code_offset => |info| {
+                        self.curr.code_length = info.length;
+                        self.curr.code_offset += info.delta;
+                    },
+                    .change_line_offset => |delta| {
+                        self.curr.line_offset +%= @bitCast(delta);
+                    },
+                    .change_code_offset_and_line_offset => |info| {
+                        self.curr.code_offset += info.code_delta;
+                        self.curr.line_offset +%= @bitCast(info.line_delta);
+                    },
+
+                    // Not emitted by LLVM at the time of writing, but if we get it from elsewhere it should
+                    // be safe to ignore since we don't use this info. Theoretically we could use column
+                    // info if it was present, but it's not easy to test since LLVM doesn't output it.
+                    .change_line_end_delta,
+                    .change_column_start,
+                    .change_column_end_delta,
+                    .change_column_end,
+                     => {},
+
+                     // Not emitted by LLVM at the time of writing. Various sources conflict on how these
+                     // instructions should be interpreted, so we make no attempt to handle them.
+                    .code_offset,
+                    .change_code_offset_base,
+                    .change_range_kind,
+                    => @panic("unimplemented"),
+                }
+
+                switch (annotation) {
+                    .change_code_offset,
+                    .change_code_offset_and_line_offset,
+                    .change_code_length_and_code_offset,
+                    => {},
+                    else => continue,
+                }
+
+                if (self.prev) |*prev| {
+                    if (prev.code_length == null) {
+                        prev.code_length = self.curr.code_offset - prev.code_offset;
+                    }
+                }
+
+                defer self.prev = .{
+                    .code_offset = self.curr.code_offset,
+                    .code_length = self.curr.code_length,
+                    .line_offset = self.curr.line_offset,
+                    .file_offset = self.curr.file_offset,
+                };
+                const prev = self.prev orelse continue;
+                const prev_code_length = prev.code_length orelse continue;
+                return .{
+                    .code_offset = prev.code_offset,
+                    .code_length = prev_code_length,
+                    .line_offset = prev.line_offset,
+                    .file_offset = prev.file_offset,
+                };
+            }
+
+            const prev = self.prev orelse return null;
+            defer self.prev = null;
+            const prev_code_length = prev.code_length orelse return null;
+            return .{
+                .code_offset = prev.code_offset,
+                .code_length = prev_code_length,
+                .line_offset = prev.line_offset,
+                .file_offset = prev.file_offset,
+            };
+        }
+    };
+
+    pub const Iterator = struct {
+        reader: Io.Reader,
+
+        pub fn next(self: *Iterator) error{InvalidDebugInfo}!?BinaryAnnotation {
+            return take(&self.reader) catch |err| switch (err) {
+                error.ReadFailed => return error.InvalidDebugInfo,
+                error.EndOfStream => return null,
+            };
+        }
+    };
+
+    pub fn take(reader: *Io.Reader) Io.Reader.Error!BinaryAnnotation {
+        const op = std.enums.fromInt(
+            pdb.BinaryAnnotationOpcode,
+            try takePackedU32(reader),
+        ) orelse return error.ReadFailed;
+        switch (op) {
+            .invalid => return error.EndOfStream,
+            .code_offset => return .{
+                .code_offset = try expect(takePackedU32(reader)),
+            },
+            .change_code_offset_base => return .{
+                .change_code_offset_base = try expect(takePackedU32(reader)),
+            },
+            .change_code_offset => return .{
+                .change_code_offset = try expect(takePackedU32(reader)),
+            },
+            .change_code_length => return .{
+                .change_code_length = try expect(takePackedU32(reader)),
+            },
+            .change_file => return .{
+                .change_file = try expect(takePackedU32(reader)),
+            },
+            .change_line_offset => return .{
+                .change_line_offset = try expect(takePackedI32(reader)),
+            },
+            .change_line_end_delta => return .{
+                .change_line_end_delta = try expect(takePackedU32(reader)),
+            },
+            .change_range_kind => return .{
+                .change_range_kind = std.enums.fromInt(
+                    RangeKind,
+                    try expect(takePackedU32(reader)),
+                ) orelse return error.ReadFailed,
+            },
+            .change_column_start => return .{
+                .change_column_start = try expect(takePackedU32(reader)),
+            },
+            .change_column_end_delta => return .{
+                .change_column_end_delta = try expect(takePackedI32(reader)),
+            },
+            .change_code_offset_and_line_offset => {
+                const EncodedArgs = packed struct(u32) {
+                    code_delta: u4,
+                    encoded_line_delta: u28,
+                };
+                const args: EncodedArgs = @bitCast(try expect(takePackedU32(reader)));
+                return .{
+                    .change_code_offset_and_line_offset = .{
+                        .code_delta = args.code_delta,
+                        .line_delta = decodeI32(args.encoded_line_delta),
+                    },
+                };
+            },
+            .change_code_length_and_code_offset => return .{
+                .change_code_length_and_code_offset = .{
+                    .length = try expect(takePackedU32(reader)),
+                    .delta = try expect(takePackedU32(reader)),
+                },
+            },
+            .change_column_end => return .{
+                .change_column_end = try expect(takePackedU32(reader)),
+            },
+        }
+    }
+
+    // Adapated from:
+    // https://github.com/microsoft/microsoft-pdb/blob/805655a28bd8198004be2ac27e6e0290121a5e89/include/cvinfo.h#L4942
+    pub fn takePackedU32(reader: *Io.Reader) Io.Reader.Error!u32 {
+        const b0: u32 = try reader.takeByte();
+        if (b0 & 0x80 == 0x00) return b0;
+
+        const b1: u32 = try reader.takeByte();
+        if (b0 & 0xC0 == 0x80) return ((b0 & 0x3F) << 8) | b1;
+
+        const b2: u32 = try reader.takeByte();
+        const b3: u32 = try reader.takeByte();
+        if (b0 & 0xE0 == 0xC0) return ((b0 & 0x1f) << 24) | (b1 << 16) | (b2 << 8) | b3;
+
+        return error.ReadFailed;
+    }
+
+    pub fn takePackedI32(reader: *Io.Reader) Io.Reader.Error!i32 {
+        return decodeI32(try takePackedU32(reader));
+    }
+
+    pub fn decodeI32(u: u32) i32 {
+        const i: i32 = @bitCast(u);
+        if (i & 1 != 0) {
+            return -(i >> 1);
+        } else {
+            return i >> 1;
+        }
+    }
+
+    fn expect(value: anytype) error { ReadFailed }!@typeInfo(@TypeOf(value)).error_union.payload {
+        comptime assert(@typeInfo(@TypeOf(value)).error_union.error_set == Io.Reader.Error);
+        return value catch error.ReadFailed;
+    }
+};
+
+pub fn findInlineeName(self: *const Pdb, inlinee: u32) ?[]const u8 {
+    var reader: Io.Reader = .fixed(self.ipi orelse return null);
+    const header = reader.takeStructPointer(pdb.IpiStreamHeader) catch return null;
+    for (header.type_index_begin..header.type_index_end) |type_index| {
+        const prefix = reader.takeStructPointer(pdb.LfRecordPrefix) catch return null;
+        reader.discardAll(prefix.len - @sizeOf(@FieldType(pdb.LfRecordPrefix, "len"))) catch return null;
+
+        if (type_index == inlinee) {
+            switch (prefix.kind) {
+                .func_id => {
+                    const func: *align(1) pdb.LfFuncId = @ptrCast(prefix);
+                    return std.mem.sliceTo(@as([*:0]const u8, @ptrCast(&func.name[0])), 0);
+                },
+                .mfunc_id => {
+                    const func: *align(1) pdb.LfMFuncId = @ptrCast(prefix);
+                    return std.mem.sliceTo(@as([*:0]const u8, @ptrCast(&func.name[0])), 0);
+                },
+                else => return null,
+            }
+        }
+    }
+    return null;
+}
+
+pub fn getInlinees(self: *Pdb, module: *Module, proc_sym: *align(1) const pdb.ProcSym) InlineSiteSymIterator {
+    const module_index = module - self.modules.ptr;
+    const offset = @intFromPtr(proc_sym) -
+        @intFromPtr(module.symbols.ptr) +
+        proc_sym.record_len +
+        @sizeOf(@FieldType(pdb.ProcSym, "record_len"));
+    return .{
+        .module_index = module_index,
+        .offset = offset,
+        .end = proc_sym.end,
+    };
+}
+
+pub fn getBinaryAnnotations(self: *Pdb, site: *align(1) const pdb.InlineSiteSym) BinaryAnnotation.Iterator {
+    _ = self;
+    var start: usize = @intFromPtr(site) + @sizeOf(pdb.InlineSiteSym);
+    var end = start + site.record_len + @sizeOf(@FieldType(pdb.InlineSiteSym, "record_len")) - @sizeOf(pdb.InlineSiteSym);
+    switch (site.record_kind) {
+        .inlinesite => {},
+        .inlinesite2 => start += @sizeOf(pdb.InlineSiteSym2) - @sizeOf(pdb.InlineSiteSym),
+        else => end = start,
+    }
+    const ptr: [*]const u8 = @ptrFromInt(start);
+    const slice = ptr[0..end - start];
+    return .{ .reader = Io.Reader.fixed(slice) };
+}
+
+pub fn calculateOffset(
+    self: *Pdb,
+    site: *align(1) const pdb.InlineSiteSym,
+    loc: std.debug.SourceLocation,
+    offset_in_func: usize,
+) error{InvalidDebugInfo, MissingDebugInfo, ReadFailed}!?std.debug.SourceLocation {
+    var ranges: BinaryAnnotation.RangeIterator = .init(self.getBinaryAnnotations(site));
+    while (try ranges.next()) |range| {
+        if (range.contains(offset_in_func)) {
+            var result: std.debug.SourceLocation = loc;
+            result.line += range.line_offset;
+            return result;
+        }
+    }
+    return null;
+}
+
+pub fn getSymbolName(self: *Pdb, proc_sym: *align(1) const pdb.ProcSym) []const u8 {
+    _ = self;
+    return std.mem.sliceTo(@as([*:0]const u8, @ptrCast(&proc_sym.name[0])), 0);
+}
+
+pub fn getInlineeInfo(self: *Pdb, mod: *Module, inlinee: u32) !std.debug.SourceLocation {
+    const gpa = self.allocator;
+    var sect_offset: usize = 0;
+    var skip_len: usize = undefined;
+    while (sect_offset < mod.subsect_info.len) : (sect_offset += skip_len) {
+        const subsect_hdr: *align(1) pdb.DebugSubsectionHeader = @ptrCast(&mod.subsect_info[sect_offset]);
+        skip_len = subsect_hdr.length;
+        sect_offset += @sizeOf(pdb.DebugSubsectionHeader);
+
+        if (subsect_hdr.kind == .inlinee_lines) {
+            var offset = sect_offset;
+            const signature: *const align(1) pdb.InlineeSourceLineSignature = @ptrCast(&mod.subsect_info[offset]);
+            offset += @sizeOf(pdb.InlineeSourceLineSignature);
+
+            const has_extra_files = switch (signature.*) {
+                .normal => false,
+                .ex => true,
+                else => continue,
+            };
+
+            while (offset < sect_offset + subsect_hdr.length) {
+                const entry: *const align(1) pdb.InlineeSourceLine = @ptrCast(&mod.subsect_info[offset]);
+                offset += @sizeOf(pdb.InlineeSourceLine);
+
+                if (has_extra_files) {
+                    const file_count: *const align(1) u32 = @ptrCast(&mod.subsect_info[offset]);
+                    offset += @sizeOf(u32);
+                    offset += file_count.* * @sizeOf(u32);
+                }
+
+                if (entry.inlinee == inlinee) {
+                    const source_file_name = s: {
+                        const checksum_offset = mod.checksum_offset orelse return error.MissingDebugInfo;
+                        const subsect_index = checksum_offset + entry.file_id;
+                        const chksum_hdr: *align(1) pdb.FileChecksumEntryHeader = @ptrCast(&mod.subsect_info[subsect_index]);
+                        const strtab_offset = @sizeOf(pdb.StringTableHeader) + chksum_hdr.file_name_offset;
+                        try self.string_table.?.seekTo(strtab_offset);
+                        const string_reader = &self.string_table.?.interface;
+                        var source_file_name: Io.Writer.Allocating = .init(gpa);
+                        defer source_file_name.deinit();
+                        _ = try string_reader.streamDelimiterLimit(&source_file_name.writer, 0, .limited(1024));
+                        assert(string_reader.buffered()[0] == 0); // TODO change streamDelimiterLimit API
+                        string_reader.toss(1);
+                        break :s try source_file_name.toOwnedSlice();
+                    };
+                    errdefer gpa.free(source_file_name);
+
+                    return .{
+                        .line = entry.source_line_num,
+                        .column = 0,
+                        .file_name = source_file_name,
+                    };
+                }
+            }
+        }
+    }
+    return error.MissingDebugInfo;
 }
 
 pub fn getLineNumberInfo(self: *Pdb, module: *Module, address: u64) !std.debug.SourceLocation {
@@ -296,7 +735,7 @@ pub fn getLineNumberInfo(self: *Pdb, module: *Module, address: u64) !std.debug.S
                             try self.string_table.?.seekTo(strtab_offset);
                             const source_file_name = s: {
                                 const string_reader = &self.string_table.?.interface;
-                                var source_file_name: std.Io.Writer.Allocating = .init(gpa);
+                                var source_file_name: Io.Writer.Allocating = .init(gpa);
                                 defer source_file_name.deinit();
                                 _ = try string_reader.streamDelimiterLimit(&source_file_name.writer, 0, .limited(1024));
                                 assert(string_reader.buffered()[0] == 0); // TODO change streamDelimiterLimit API
@@ -497,7 +936,7 @@ const MsfStream = struct {
     next_read_pos: u64,
     blocks: []u32,
     block_size: u32,
-    interface: std.Io.Reader,
+    interface: Io.Reader,
     err: ?Error,
 
     const Error = File.Reader.SeekError;
@@ -527,7 +966,7 @@ const MsfStream = struct {
         };
     }
 
-    fn stream(r: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
+    fn stream(r: *Io.Reader, w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!usize {
         const ms: *MsfStream = @alignCast(@fieldParentPtr("interface", r));
 
         var block_id: usize = @intCast(ms.next_read_pos / ms.block_size);
@@ -595,7 +1034,7 @@ const MsfStream = struct {
     }
 };
 
-fn readSparseBitVector(reader: *std.Io.Reader, allocator: Allocator) ![]u32 {
+fn readSparseBitVector(reader: *Io.Reader, allocator: Allocator) ![]u32 {
     const num_words = try reader.takeInt(u32, .little);
     var list = std.array_list.Managed(u32).init(allocator);
     errdefer list.deinit();

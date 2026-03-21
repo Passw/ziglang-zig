@@ -1,10 +1,10 @@
-mutex: Io.Mutex,
+lock: Io.RwLock,
 ntdll_handle: ?if (load_dll_notification_procs) *anyopaque else noreturn,
 notification_cookie: ?LDR.DLL_NOTIFICATION.COOKIE,
 modules: std.ArrayList(Module),
 
 pub const init: SelfInfo = .{
-    .mutex = .init,
+    .lock = .init,
     .ntdll_handle = null,
     .notification_cookie = null,
     .modules = .empty,
@@ -25,18 +25,117 @@ pub fn deinit(si: *SelfInfo, io: Io) void {
     si.modules.deinit(gpa);
 }
 
-pub fn getSymbol(si: *SelfInfo, io: Io, address: usize) Error!std.debug.Symbol {
+pub const SymbolIterator = struct {
+    err: Error!void = {},
+    lock: ?*Io.RwLock,
+    module: *Module,
+    symbols: Module.DebugInfo.Symbols,
+
+    pub fn deinit(self: *SymbolIterator, io: Io) void {
+        if (self.lock) |lock| lock.unlockShared(io);
+        self.* = undefined;
+    }
+
+    fn failing(err: Error) SymbolIterator {
+        return .{
+            .err = err,
+            .lock = null,
+            .module = undefined,
+            .symbols = .none,
+        };
+    }
+
+    pub fn next(self: *SymbolIterator) ?Error!std.debug.Symbol {
+        // Check for errors
+        self.err catch |err| {
+            self.err = {};
+            self.symbols = .none;
+            return err;
+        };
+
+        // Return the next symbol for the debug info type
+        switch (self.symbols) {
+            .pdb => |*info| {
+                // The failure cases are unreachable because we only set the pdb field if these are
+                // set
+                const di = if (self.module.di.?) |*di| di else |_| unreachable;
+                const pdb = if (di.pdb) |*pdb| pdb else unreachable;
+
+                // Get the next inlinee if it exists
+                if (info.inlinees.next(info.module)) |site| {
+                    if (pdb.getInlineeInfo(info.module, site.inlinee) catch null) |loc| {
+                        if (info.proc_sym) |proc_sym| {
+                            const offset_in_func = info.addr - proc_sym.code_offset;
+                            if (try pdb.calculateOffset(site, loc, offset_in_func)) |offset| {
+                                return .{
+                                    .name = pdb.findInlineeName(site.inlinee),
+                                    .compile_unit_name = null,
+                                    .source_location = offset,
+                                };
+                            }
+                        }
+                    }
+                }
+
+                // Return the main symbol and end the iterator
+                defer self.symbols = .none;
+                return .{
+                    .name = if (info.proc_sym) |proc_sym|
+                        pdb.getSymbolName(proc_sym)
+                    else
+                        null,
+                    .compile_unit_name = fs.path.basename(info.module.obj_file_name),
+                    .source_location = pdb.getLineNumberInfo(
+                        info.module,
+                        info.addr,
+                    ) catch null,
+                };
+            },
+            .dwarf => |info| {
+                // The failure cases are unreachable because we only set the dwarf field if these
+                // are set
+                const di = if (self.module.di.?) |*di| di else |_| unreachable;
+                const dwarf = if (di.dwarf) |*dwarf| dwarf else unreachable;
+
+                // Return the main symbol and then return the iterator
+                defer self.symbols = .none;
+                const gpa = std.debug.getDebugInfoAllocator();
+                return dwarf.getSymbol(gpa, native_endian, info.addr) catch |err| switch (err) {
+                    error.MissingDebugInfo => return null,
+
+                    error.InvalidDebugInfo,
+                    error.OutOfMemory,
+                    => |e| return e,
+
+                    error.ReadFailed,
+                    error.EndOfStream,
+                    error.Overflow,
+                    error.StreamTooLong,
+                    => return error.InvalidDebugInfo,
+                };
+            },
+            .none => return null,
+        }
+    }
+};
+
+pub fn getSymbols(si: *SelfInfo, io: Io, address: usize) SymbolIterator {
     const gpa = std.debug.getDebugInfoAllocator();
-    try si.mutex.lock(io);
-    defer si.mutex.unlock(io);
-    const module = try si.findModule(gpa, address);
-    const di = try module.getDebugInfo(gpa, io);
-    return di.getSymbol(gpa, address - @intFromPtr(module.entry.DllBase));
+    si.lock.lockShared(io) catch |err| return .failing(err);
+    errdefer si.lock.unlockShared(io);
+    const module = si.findModule(gpa, address) catch |err| return .failing(err);
+    const di = module.getDebugInfo(gpa, io) catch |err| return .failing(err);
+    const symbols = di.getSymbols(address - @intFromPtr(module.entry.DllBase)) catch |err| return .failing(err);
+    return .{
+        .lock = &si.lock,
+        .module = module,
+        .symbols = symbols,
+    };
 }
 pub fn getModuleName(si: *SelfInfo, io: Io, address: usize) Error![]const u8 {
     const gpa = std.debug.getDebugInfoAllocator();
-    try si.mutex.lock(io);
-    defer si.mutex.unlock(io);
+    try si.lock.lockShared(io);
+    defer si.lock.unlockShared(io);
     const module = try si.findModule(gpa, address);
     return module.name orelse {
         const name = try std.unicode.wtf16LeToWtf8Alloc(gpa, module.entry.BaseDllName.slice());
@@ -46,8 +145,8 @@ pub fn getModuleName(si: *SelfInfo, io: Io, address: usize) Error![]const u8 {
 }
 pub fn getModuleSlide(si: *SelfInfo, io: Io, address: usize) Error!usize {
     const gpa = std.debug.getDebugInfoAllocator();
-    try si.mutex.lock(io);
-    defer si.mutex.unlock(io);
+    try si.lock.lockShared(io);
+    defer si.lock.unlockShared(io);
     const module = try si.findModule(gpa, address);
     return module.base_address;
 }
@@ -240,7 +339,19 @@ const Module = struct {
             arena.deinit();
         }
 
-        fn getSymbol(di: *DebugInfo, gpa: Allocator, vaddr: usize) Error!std.debug.Symbol {
+        pub const Symbols = union(enum) {
+            pdb: struct {
+                module: *Pdb.Module,
+                proc_sym: ?*align(1) const std.pdb.ProcSym,
+                addr: usize,
+                inlinees: Pdb.InlineSiteSymIterator,
+            },
+            dwarf: struct {
+                addr: usize,
+            },
+            none: void,
+        };
+        fn getSymbols(di: *DebugInfo, vaddr: usize) Error!Symbols {
             pdb: {
                 const pdb = &(di.pdb orelse break :pdb);
                 var coff_section: *align(1) const coff.SectionHeader = undefined;
@@ -270,32 +381,30 @@ const Module = struct {
                 } orelse {
                     return error.InvalidDebugInfo; // bad module index
                 };
-                return .{
-                    .name = pdb.getSymbolName(module, vaddr - coff_section.virtual_address),
-                    .compile_unit_name = fs.path.basename(module.obj_file_name),
-                    .source_location = pdb.getLineNumberInfo(
-                        module,
-                        vaddr - coff_section.virtual_address,
-                    ) catch null,
-                };
+
+                const addr = vaddr - coff_section.virtual_address;
+                const proc_sym = pdb.getProcSym(module, addr);
+                const inlinees: Pdb.InlineSiteSymIterator = if (proc_sym) |sym|
+                    pdb.getInlinees(module, sym)
+                else
+                    .empty;
+                return .{ .pdb = .{
+                    .module = module,
+                    .proc_sym = proc_sym,
+                    .addr = addr,
+                    .inlinees = inlinees,
+                } };
             }
+
+            // Dwarf
             dwarf: {
-                const dwarf = &(di.dwarf orelse break :dwarf);
-                const dwarf_address = vaddr + di.coff_image_base;
-                return dwarf.getSymbol(gpa, native_endian, dwarf_address) catch |err| switch (err) {
-                    error.MissingDebugInfo => break :dwarf,
-
-                    error.InvalidDebugInfo,
-                    error.OutOfMemory,
-                    => |e| return e,
-
-                    error.ReadFailed,
-                    error.EndOfStream,
-                    error.Overflow,
-                    error.StreamTooLong,
-                    => return error.InvalidDebugInfo,
-                };
+                if (di.dwarf == null) break :dwarf;
+                const addr = vaddr + di.coff_image_base;
+                return .{ .dwarf = .{
+                    .addr = addr,
+                } };
             }
+
             return error.MissingDebugInfo;
         }
     };
@@ -505,6 +614,16 @@ const Module = struct {
                 error.ReadFailed,
                 => |e| return e,
             };
+            pdb.parseIpiStream() catch |err| switch (err) {
+                error.UnknownPDBVersion => return error.UnsupportedDebugInfo,
+
+                error.EndOfStream,
+                => return error.InvalidDebugInfo,
+
+                error.OutOfMemory,
+                error.ReadFailed,
+                => |e| return e,
+            };
 
             if (!std.mem.eql(u8, &coff_obj.guid, &pdb.guid) or coff_obj.age != pdb.age)
                 return error.InvalidDebugInfo;
@@ -531,7 +650,7 @@ const Module = struct {
     }
 };
 
-/// Assumes we already hold `si.mutex`.
+/// Assumes we already hold `si.lock`.
 fn findModule(si: *SelfInfo, gpa: Allocator, address: usize) error{ MissingDebugInfo, OutOfMemory, Unexpected }!*Module {
     for (si.modules.items) |*mod| {
         const base = @intFromPtr(mod.entry.DllBase);
@@ -601,8 +720,8 @@ fn dllNotification(
         .LOADED => {},
         .UNLOADED => {
             const io = std.Options.debug_io;
-            si.mutex.lockUncancelable(io);
-            defer si.mutex.unlock(io);
+            si.lock.lockUncancelable(io);
+            defer si.lock.unlock(io);
             for (si.modules.items, 0..) |*mod, mod_index| {
                 if (mod.entry.DllBase != data.Unloaded.DllBase) continue;
                 mod.deinit(std.debug.getDebugInfoAllocator(), io);

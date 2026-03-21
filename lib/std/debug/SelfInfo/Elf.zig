@@ -30,51 +30,67 @@ pub fn deinit(si: *SelfInfo, io: Io) void {
     if (si.unwind_cache) |cache| gpa.free(cache);
 }
 
-pub fn getSymbol(si: *SelfInfo, io: Io, address: usize) Error!std.debug.Symbol {
+pub const SymbolIterator = struct {
+    curr: ?Error!std.debug.Symbol,
+
+    pub fn deinit(self: *SymbolIterator, _: Io) void {
+        self.* = undefined;
+    }
+
+    pub fn next(self: *SymbolIterator) ?Error!std.debug.Symbol {
+        const result = self.curr;
+        self.curr = null;
+        return result;
+    }
+};
+
+pub fn getSymbols(si: *SelfInfo, io: Io, address: usize) SymbolIterator {
     const gpa = std.debug.getDebugInfoAllocator();
-    const module = try si.findModule(gpa, io, address, .exclusive);
+    const module = si.findModule(gpa, io, address, .exclusive) catch |err| return .{ .curr = err };
     defer si.rwlock.unlock(io);
 
     const vaddr = address - module.load_offset;
 
-    const loaded_elf = try module.getLoadedElf(gpa, io);
+    const loaded_elf = module.getLoadedElf(gpa, io) catch |err| return .{ .curr = err };
     if (loaded_elf.file.dwarf) |*dwarf| {
         if (!loaded_elf.scanned_dwarf) {
             dwarf.open(gpa, native_endian) catch |err| switch (err) {
                 error.InvalidDebugInfo,
                 error.MissingDebugInfo,
                 error.OutOfMemory,
-                => |e| return e,
+                => |e| return .{ .curr = e },
                 error.EndOfStream,
                 error.Overflow,
                 error.ReadFailed,
                 error.StreamTooLong,
-                => return error.InvalidDebugInfo,
+                => return .{ .curr = error.InvalidDebugInfo },
             };
             loaded_elf.scanned_dwarf = true;
         }
         if (dwarf.getSymbol(gpa, native_endian, vaddr)) |sym| {
-            return sym;
+            return .{ .curr = sym };
         } else |err| switch (err) {
             error.MissingDebugInfo => {},
 
             error.InvalidDebugInfo,
             error.OutOfMemory,
-            => |e| return e,
+            => |e| return .{ .curr = e },
 
             error.ReadFailed,
             error.EndOfStream,
             error.Overflow,
             error.StreamTooLong,
-            => return error.InvalidDebugInfo,
+            => return .{ .curr = error.InvalidDebugInfo },
         }
     }
     // When DWARF is unavailable, fall back to searching the symtab.
-    return loaded_elf.file.searchSymtab(gpa, vaddr) catch |err| switch (err) {
-        error.NoSymtab, error.NoStrtab => return error.MissingDebugInfo,
-        error.BadSymtab => return error.InvalidDebugInfo,
-        error.OutOfMemory => |e| return e,
+    const symbol = loaded_elf.file.searchSymtab(gpa, vaddr) catch |err| switch (err) {
+        error.NoSymtab, error.NoStrtab => return .{ .curr = error.MissingDebugInfo },
+        error.BadSymtab => return .{ .curr = error.InvalidDebugInfo },
+        error.OutOfMemory => |e| return .{ .curr = e },
     };
+
+    return .{ .curr = symbol };
 }
 pub fn getModuleName(si: *SelfInfo, io: Io, address: usize) Error![]const u8 {
     const gpa = std.debug.getDebugInfoAllocator();

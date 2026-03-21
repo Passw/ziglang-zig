@@ -39,8 +39,8 @@ pub const cpu_context = @import("debug/cpu_context.zig");
 /// pub const init: SelfInfo;
 /// pub fn deinit(si: *SelfInfo, io: Io) void;
 ///
-/// /// Returns the symbol and source location of the instruction at `address`.
-/// pub fn getSymbol(si: *SelfInfo, io: Io, address: usize) SelfInfoError!Symbol;
+/// /// Returns an iterator over the symbols and source locations of the instruction at `address`.
+/// pub fn getSymbols(si: *SelfInfo, io: Io, address: usize) SelfInfo.SymbolIterator;
 /// /// Returns a name for the "module" (e.g. shared library or executable image) containing `address`.
 /// pub fn getModuleName(si: *SelfInfo, io: Io, address: usize) SelfInfoError![]const u8;
 /// pub fn getModuleSlide(si: *SelfInfo, io: Io, address: usize) SelfInfoError!usize;
@@ -61,6 +61,11 @@ pub const cpu_context = @import("debug/cpu_context.zig");
 /// /// Only required if `can_unwind == true`. Unwinds a single stack frame, returning the frame's
 /// /// return address, or 0 if the end of the stack has been reached.
 /// pub fn unwindFrame(si: *SelfInfo, io: Io, context: *UnwindContext) SelfInfoError!usize;
+/// /// Iterates symbols found at an address.
+/// pub const SymbolIterator = struct {
+///     pub fn deinit(Self: *SymbolIterator, io: Io) void;
+///     pub fn next(self: *SymbolIterator) ?SelfInfoError!Symbol;
+/// };
 /// ```
 pub const SelfInfo = if (@hasDecl(root, "debug") and @hasDecl(root.debug, "SelfInfo"))
     root.debug.SelfInfo
@@ -1107,33 +1112,37 @@ pub inline fn stripInstructionPtrAuthCode(ptr: usize) usize {
 }
 
 fn printSourceAtAddress(io: Io, debug_info: *SelfInfo, t: Io.Terminal, address: usize) Writer.Error!void {
-    const symbol: Symbol = debug_info.getSymbol(io, address) catch |err| switch (err) {
-        error.MissingDebugInfo,
-        error.UnsupportedDebugInfo,
-        error.InvalidDebugInfo,
-        => .unknown,
-        error.ReadFailed, error.Unexpected, error.Canceled => s: {
-            t.setColor(.dim) catch {};
-            try t.writer.print("Failed to read debug info from filesystem, trace may be incomplete\n\n", .{});
-            t.setColor(.reset) catch {};
-            break :s .unknown;
-        },
-        error.OutOfMemory => s: {
-            t.setColor(.dim) catch {};
-            try t.writer.print("Ran out of memory loading debug info, trace may be incomplete\n\n", .{});
-            t.setColor(.reset) catch {};
-            break :s .unknown;
-        },
-    };
-    defer if (symbol.source_location) |sl| getDebugInfoAllocator().free(sl.file_name);
-    return printLineInfo(
-        io,
-        t,
-        symbol.source_location,
-        address,
-        symbol.name orelse "???",
-        symbol.compile_unit_name orelse debug_info.getModuleName(io, address) catch "???",
-    );
+    var symbols: SelfInfo.SymbolIterator = debug_info.getSymbols(io, address);
+    defer symbols.deinit(io);
+    while (symbols.next()) |curr| {
+        const symbol: Symbol = curr catch |err| switch (err) {
+            error.MissingDebugInfo,
+            error.UnsupportedDebugInfo,
+            error.InvalidDebugInfo,
+            => .unknown,
+            error.ReadFailed, error.Unexpected, error.Canceled => s: {
+                t.setColor(.dim) catch {};
+                try t.writer.print("Failed to read debug info from filesystem, trace may be incomplete\n\n", .{});
+                t.setColor(.reset) catch {};
+                break :s .unknown;
+            },
+            error.OutOfMemory => s: {
+                t.setColor(.dim) catch {};
+                try t.writer.print("Ran out of memory loading debug info, trace may be incomplete\n\n", .{});
+                t.setColor(.reset) catch {};
+                break :s .unknown;
+            },
+        };
+        defer if (symbol.source_location) |sl| getDebugInfoAllocator().free(sl.file_name);
+        try printLineInfo(
+            io,
+            t,
+            symbol.source_location,
+            address,
+            symbol.name orelse "???",
+            symbol.compile_unit_name orelse debug_info.getModuleName(io, address) catch "???",
+        );
+    }
 }
 fn printLineInfo(
     io: Io,
