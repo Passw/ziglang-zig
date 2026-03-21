@@ -53,6 +53,7 @@ pub const Os = struct {
         ps3,
         ps4,
         ps5,
+        psp,
         vita,
 
         emscripten,
@@ -194,6 +195,7 @@ pub const Os = struct {
 
                 .@"3ds",
 
+                .psp,
                 .vita,
 
                 .wasi,
@@ -612,6 +614,13 @@ pub const Os = struct {
                     },
                 },
 
+                .psp => .{
+                    .semver = .{
+                        .min = .{ .major = 1, .minor = 0, .patch = 0 },
+                        .max = .{ .major = 6, .minor = 61, .patch = 0 },
+                    },
+                },
+
                 .vita => .{
                     .semver = .{
                         // 1.3 is the first public release
@@ -919,6 +928,7 @@ pub const Abi = enum {
             .tvos,
             .visionos,
             .watchos,
+            .psp,
             .ps3,
             .ps4,
             .ps5,
@@ -2023,7 +2033,10 @@ pub const Cpu = struct {
                 .lanai => &lanai.cpu.v11, // clang does not have a generic lanai model.
                 .loongarch64 => &loongarch.cpu.la64v1_0,
                 .m68k => &m68k.cpu.M68000,
-                .mips, .mipsel => &mips.cpu.mips32r2,
+                .mips, .mipsel => switch (os.tag) {
+                    .psp => &mips.cpu.mips2, // mips2 with some custom instructions, no trap instructions
+                    else => &mips.cpu.mips32r2,
+                },
                 .mips64, .mips64el => &mips.cpu.mips64r2,
                 .msp430 => &msp430.cpu.msp430,
                 .nvptx, .nvptx64 => &nvptx.cpu.sm_52,
@@ -2204,6 +2217,7 @@ pub fn requiresLibC(target: *const Target) bool {
         .amdhsa,
         .ps4,
         .ps5,
+        .psp,
         .vita,
         .mesa3d,
         .contiki,
@@ -2379,6 +2393,7 @@ pub const DynamicLinker = struct {
             .ps3,
             .ps4,
             .ps5,
+            .psp,
             .vita,
             => .none,
         };
@@ -2783,6 +2798,7 @@ pub const DynamicLinker = struct {
 
             .@"3ds",
 
+            .psp,
             .vita,
 
             .emscripten,
@@ -3338,7 +3354,7 @@ pub fn cTypeBitSize(target: *const Target, c_type: CType) u16 {
             .longlong, .ulonglong, .double => return 64,
             .longdouble => return 80,
         },
-        .vita => switch (c_type) {
+        .psp, .vita => switch (c_type) {
             .char => return 8,
             .short, .ushort => return 16,
             .int, .uint, .float => return 32,
