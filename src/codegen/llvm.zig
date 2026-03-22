@@ -578,23 +578,8 @@ pub const Object = struct {
     /// Memoizes a null `?usize` value.
     null_opt_usize: Builder.Constant,
 
-    /// When an LLVM struct type is created, an entry is inserted into this
-    /// table for every zig source field of the struct that has a corresponding
-    /// LLVM struct field. comptime fields are not included. Zero-bit fields are
-    /// mapped to a field at the correct byte, which may be a padding field, or
-    /// are not mapped, in which case they are semantically at the end of the
-    /// struct.
-    /// The value is the LLVM struct field index.
-    /// This is denormalized data.
-    struct_field_map: std.AutoHashMapUnmanaged(ZigStructField, c_uint),
-
     /// Values for `@llvm.used`.
     used: std.ArrayList(Builder.Constant),
-
-    const ZigStructField = struct {
-        struct_ty: InternPool.Index,
-        field_index: u32,
-    };
 
     pub const Ptr = if (dev.env.supports(.llvm_backend)) *Object else noreturn;
 
@@ -688,7 +673,6 @@ pub const Object = struct {
             .type_map = .empty,
             .error_name_table = .none,
             .null_opt_usize = .no_init,
-            .struct_field_map = .empty,
             .used = .empty,
         };
         return obj;
@@ -708,7 +692,6 @@ pub const Object = struct {
         self.named_enum_map.deinit(gpa);
         self.type_map.deinit(gpa);
         self.builder.deinit();
-        self.struct_field_map.deinit(gpa);
         self.* = undefined;
     }
 
@@ -3311,7 +3294,6 @@ pub const Object = struct {
                     // Although we can estimate how much capacity to add, these cannot be
                     // relied upon because of the recursive calls to lowerType below.
                     try llvm_field_types.ensureUnusedCapacity(o.gpa, struct_type.field_types.len);
-                    try o.struct_field_map.ensureUnusedCapacity(o.gpa, struct_type.field_types.len);
 
                     comptime assert(struct_layout_version == 2);
                     var offset: u64 = 0;
@@ -3336,23 +3318,8 @@ pub const Object = struct {
                             try o.builder.arrayType(padding_len, .i8),
                         );
 
-                        if (!field_ty.hasRuntimeBits(zcu)) {
-                            // This is a zero-bit field. If there are runtime bits after this field,
-                            // map to the next LLVM field (which we know exists): otherwise, don't
-                            // map the field, indicating it's at the end of the struct.
-                            if (offset != struct_type.size) {
-                                try o.struct_field_map.put(o.gpa, .{
-                                    .struct_ty = t.toIntern(),
-                                    .field_index = field_index,
-                                }, @intCast(llvm_field_types.items.len));
-                            }
-                            continue;
-                        }
+                        if (!field_ty.hasRuntimeBits(zcu)) continue;
 
-                        try o.struct_field_map.put(o.gpa, .{
-                            .struct_ty = t.toIntern(),
-                            .field_index = field_index,
-                        }, @intCast(llvm_field_types.items.len));
                         try llvm_field_types.append(o.gpa, try o.lowerType(pt, field_ty));
 
                         offset += field_ty.abiSize(zcu);
@@ -3385,19 +3352,15 @@ pub const Object = struct {
                     // Although we can estimate how much capacity to add, these cannot be
                     // relied upon because of the recursive calls to lowerType below.
                     try llvm_field_types.ensureUnusedCapacity(o.gpa, tuple_type.types.len);
-                    try o.struct_field_map.ensureUnusedCapacity(o.gpa, tuple_type.types.len);
 
                     comptime assert(struct_layout_version == 2);
                     var offset: u64 = 0;
                     var big_align: InternPool.Alignment = .none;
 
-                    const struct_size = t.abiSize(zcu);
-
                     for (
                         tuple_type.types.get(ip),
                         tuple_type.values.get(ip),
-                        0..,
-                    ) |field_ty, field_val, field_index| {
+                    ) |field_ty, field_val| {
                         if (field_val != .none) continue;
 
                         const field_align = Type.fromInterned(field_ty).abiAlignment(zcu);
@@ -3411,21 +3374,8 @@ pub const Object = struct {
                             try o.builder.arrayType(padding_len, .i8),
                         );
                         if (!Type.fromInterned(field_ty).hasRuntimeBits(zcu)) {
-                            // This is a zero-bit field. If there are runtime bits after this field,
-                            // map to the next LLVM field (which we know exists): otherwise, don't
-                            // map the field, indicating it's at the end of the struct.
-                            if (offset != struct_size) {
-                                try o.struct_field_map.put(o.gpa, .{
-                                    .struct_ty = t.toIntern(),
-                                    .field_index = @intCast(field_index),
-                                }, @intCast(llvm_field_types.items.len));
-                            }
                             continue;
                         }
-                        try o.struct_field_map.put(o.gpa, .{
-                            .struct_ty = t.toIntern(),
-                            .field_index = @intCast(field_index),
-                        }, @intCast(llvm_field_types.items.len));
                         try llvm_field_types.append(o.gpa, try o.lowerType(pt, Type.fromInterned(field_ty)));
 
                         offset += Type.fromInterned(field_ty).abiSize(zcu);
@@ -4336,13 +4286,6 @@ pub const Object = struct {
         try attributes.addParamAttr(llvm_arg_i, .readonly, &o.builder);
         try attributes.addParamAttr(llvm_arg_i, .{ .@"align" = .wrap(alignment) }, &o.builder);
         if (byval) try attributes.addParamAttr(llvm_arg_i, .{ .byval = param_llvm_ty }, &o.builder);
-    }
-
-    pub fn llvmFieldIndex(o: *Object, struct_ty: Type, field_index: usize) ?c_uint {
-        return o.struct_field_map.get(.{
-            .struct_ty = struct_ty.toIntern(),
-            .field_index = @intCast(field_index),
-        });
     }
 
     /// MLUGG TODO: this is super dumb
