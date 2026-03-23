@@ -549,7 +549,7 @@ pub const Object = struct {
     /// type from the global error set.
     debug_anyerror_fwd_ref: Builder.Metadata.Optional,
 
-    target: *const std.Target,
+    zcu: *Zcu,
     /// Ideally we would use `llvm_module.getNamedFunction` to go from *Decl to LLVM function,
     /// but that has some downsides:
     /// * we have to compute the fully qualified name every time we want to do the lookup
@@ -574,9 +574,12 @@ pub const Object = struct {
     /// Note that the values are not added until `emit`, when all errors in
     /// the compilation are known.
     error_name_table: Builder.Variable.Index,
-
-    /// Memoizes a null `?usize` value.
-    null_opt_usize: Builder.Constant,
+    /// Constant variable whose value is the number of errors in the Zcu.
+    ///
+    /// Initially `.none`---populated lazily by `getErrorsLen`.
+    ///
+    /// If this is not `.none`, the variable's initializer is set in `emit`.
+    errors_len_variable: Builder.Variable.Index,
 
     /// Values for `@llvm.used`.
     used: std.ArrayList(Builder.Constant),
@@ -585,10 +588,11 @@ pub const Object = struct {
 
     const TypeMap = std.AutoHashMapUnmanaged(InternPool.Index, Builder.Type);
 
-    pub fn create(arena: Allocator, comp: *Compilation) !Ptr {
+    pub fn create(arena: Allocator, zcu: *Zcu) !Ptr {
         dev.check(.llvm_backend);
+        const comp = zcu.comp;
         const gpa = comp.gpa;
-        const target = &comp.root_mod.resolved_target.result;
+        const target = zcu.getTarget();
         const llvm_target_triple = try targetTriple(arena, target);
 
         var builder = try Builder.init(.{
@@ -616,10 +620,7 @@ pub const Object = struct {
                 // way already, but here we throw all that sweet information
                 // into the garbage can by converting into absolute paths. What
                 // a terrible tragedy.
-                const compile_unit_dir = blk: {
-                    const zcu = comp.zcu orelse break :blk comp.dirs.cwd;
-                    break :blk try zcu.main_mod.root.toAbsolute(comp.dirs, arena);
-                };
+                const compile_unit_dir = try zcu.main_mod.root.toAbsolute(comp.dirs, arena);
 
                 const debug_file = try builder.debugFile(
                     try builder.metadataString(comp.root_name),
@@ -665,14 +666,14 @@ pub const Object = struct {
             .debug_file_map = .empty,
             .debug_types = .empty,
             .debug_anyerror_fwd_ref = .none,
-            .target = target,
+            .zcu = zcu,
             .nav_map = .empty,
             .uav_map = .empty,
             .enum_tag_name_map = .empty,
             .named_enum_map = .empty,
             .type_map = .empty,
             .error_name_table = .none,
-            .null_opt_usize = .no_init,
+            .errors_len_variable = .none,
             .used = .empty,
         };
         return obj;
@@ -722,7 +723,7 @@ pub const Object = struct {
             name_variable_index.setLinkage(.private, &o.builder);
             name_variable_index.setMutability(.constant, &o.builder);
             name_variable_index.setUnnamedAddr(.unnamed_addr, &o.builder);
-            name_variable_index.setAlignment(comptime Builder.Alignment.fromByteUnits(1), &o.builder);
+            name_variable_index.setAlignment(comptime .fromByteUnits(1), &o.builder);
 
             llvm_error.* = try o.builder.structConst(llvm_slice_ty, &.{
                 name_variable_index.toConst(&o.builder),
@@ -730,52 +731,17 @@ pub const Object = struct {
             });
         }
 
-        const table_variable_index = try o.builder.addVariable(.empty, llvm_table_ty, .default);
-        try table_variable_index.setInitializer(
+        try o.error_name_table.setInitializer(
             try o.builder.arrayConst(llvm_table_ty, llvm_errors),
             &o.builder,
         );
-        table_variable_index.setLinkage(.private, &o.builder);
-        table_variable_index.setMutability(.constant, &o.builder);
-        table_variable_index.setUnnamedAddr(.unnamed_addr, &o.builder);
-        table_variable_index.setAlignment(
-            slice_ty.abiAlignment(zcu).toLlvm(),
-            &o.builder,
-        );
-
-        try o.error_name_table.setInitializer(table_variable_index.toConst(&o.builder), &o.builder);
     }
 
-    fn genCmpLtErrorsLenFunction(o: *Object, pt: Zcu.PerThread) !void {
-        // If there is no such function in the module, it means the source code does not need it.
-        const name = o.builder.strtabStringIfExists(lt_errors_fn_name) orelse return;
-        const llvm_fn = o.builder.getGlobal(name) orelse return;
-        const errors_len = pt.zcu.intern_pool.global_error_set.getNamesFromMainThread().len;
-
-        var wip = try Builder.WipFunction.init(&o.builder, .{
-            .function = llvm_fn.ptrConst(&o.builder).kind.function,
-            .strip = true,
-        });
-        defer wip.deinit();
-        wip.cursor = .{ .block = try wip.block(0, "Entry") };
-
-        // Example source of the following LLVM IR:
-        // fn __zig_lt_errors_len(index: u16) bool {
-        //     return index <= total_errors_len;
-        // }
-
-        const lhs = wip.arg(0);
-        const rhs = try o.builder.intValue(try o.errorIntType(pt), errors_len);
-        const is_lt = try wip.icmp(.ule, lhs, rhs, "");
-        _ = try wip.ret(is_lt);
-        try wip.finish();
-    }
-
-    fn genModuleLevelAssembly(object: *Object, pt: Zcu.PerThread) Allocator.Error!void {
+    fn genModuleLevelAssembly(object: *Object) Allocator.Error!void {
         const b = &object.builder;
         const gpa = b.gpa;
         b.module_asm.clearRetainingCapacity();
-        for (pt.zcu.global_assembly.values()) |assembly| {
+        for (object.zcu.global_assembly.values()) |assembly| {
             try b.module_asm.ensureUnusedCapacity(gpa, assembly.len + 1);
             b.module_asm.appendSliceAssumeCapacity(assembly);
             b.module_asm.appendAssumeCapacity('\n');
@@ -808,9 +774,13 @@ pub const Object = struct {
         const diags = &comp.link_diags;
 
         {
+            if (o.errors_len_variable != .none) {
+                const errors_len = zcu.intern_pool.global_error_set.getNamesFromMainThread().len;
+                const init_val = try o.builder.intConst(try o.errorIntType(), errors_len);
+                try o.errors_len_variable.setInitializer(init_val, &o.builder);
+            }
             try o.genErrorNameTable(pt);
-            try o.genCmpLtErrorsLenFunction(pt);
-            try o.genModuleLevelAssembly(pt);
+            try o.genModuleLevelAssembly();
 
             if (o.used.items.len > 0) {
                 const array_llvm_ty = try o.builder.arrayType(o.used.items.len, .ptr);
@@ -827,7 +797,7 @@ pub const Object = struct {
 
             if (!o.builder.strip) {
                 if (o.debug_anyerror_fwd_ref.unwrap()) |fwd_ref| {
-                    const debug_anyerror_type = try o.lowerDebugAnyerrorType(pt);
+                    const debug_anyerror_type = try o.lowerDebugAnyerrorType();
                     o.builder.resolveDebugForwardReference(fwd_ref, debug_anyerror_type);
                 }
 
@@ -1454,7 +1424,7 @@ pub const Object = struct {
         }
 
         const file, const subprogram = if (!wip.strip) debug_info: {
-            const file = try o.getDebugFile(pt, file_scope);
+            const file = try o.getDebugFile(file_scope);
 
             const line_number = zcu.navSrcLine(func.owner_nav) + 1;
             const is_internal_linkage = ip.indexToKey(nav.resolved.?.value) != .@"extern";
@@ -1658,7 +1628,7 @@ pub const Object = struct {
             const line_number = zcu.navSrcLine(nav_index) + 1;
 
             if (!mod.strip) {
-                const debug_file = try o.getDebugFile(pt, file_scope);
+                const debug_file = try o.getDebugFile(file_scope);
 
                 const debug_global_var = try o.builder.debugGlobalVar(
                     try o.builder.metadataString(nav.name.toSlice(ip)), // Name
@@ -1796,7 +1766,7 @@ pub const Object = struct {
                 try global_index.rename(main_exp_name, &o.builder);
                 break :i global_index;
             }
-            const llvm_addr_space = toLlvmAddressSpace(.generic, o.target);
+            const llvm_addr_space = toLlvmAddressSpace(.generic, zcu.getTarget());
             const variable_index = try o.builder.addVariable(
                 main_exp_name,
                 try o.lowerType(pt, Type.fromInterned(ip.typeOf(exported_value))),
@@ -2002,13 +1972,13 @@ pub const Object = struct {
         }
     }
 
-    pub fn getDebugFile(o: *Object, pt: Zcu.PerThread, file_index: Zcu.File.Index) Allocator.Error!Builder.Metadata {
+    pub fn getDebugFile(o: *Object, file_index: Zcu.File.Index) Allocator.Error!Builder.Metadata {
         const gpa = o.gpa;
         const gop = try o.debug_file_map.getOrPut(gpa, file_index);
         errdefer assert(o.debug_file_map.remove(file_index));
         if (gop.found_existing) return gop.value_ptr.*;
-        const path = pt.zcu.fileByIndex(file_index).path;
-        const abs_path = try path.toAbsolute(pt.zcu.comp.dirs, gpa);
+        const path = o.zcu.fileByIndex(file_index).path;
+        const abs_path = try path.toAbsolute(o.zcu.comp.dirs, gpa);
         defer gpa.free(abs_path);
 
         gop.value_ptr.* = try o.builder.debugFile(
@@ -2035,8 +2005,8 @@ pub const Object = struct {
         assert(!o.builder.strip);
 
         const gpa = o.gpa;
-        const target = o.target;
         const zcu = pt.zcu;
+        const target = zcu.getTarget();
         const ip = &zcu.intern_pool;
 
         const name = try o.builder.metadataStringFmt("{f}", .{ty.fmt(pt)});
@@ -2386,7 +2356,7 @@ pub const Object = struct {
 
                 const struct_type = zcu.typeToStruct(ty).?;
 
-                const file = try o.getDebugFile(pt, struct_type.zir_index.resolveFile(ip));
+                const file = try o.getDebugFile(struct_type.zir_index.resolveFile(ip));
                 const scope = if (ty.getParentNamespace(zcu).unwrap()) |parent_namespace|
                     try o.namespaceToDebugScope(pt, parent_namespace)
                 else
@@ -2453,7 +2423,7 @@ pub const Object = struct {
             .@"union" => {
                 const union_type = ip.loadUnionType(ty.toIntern());
 
-                const file = try o.getDebugFile(pt, union_type.zir_index.resolveFile(ip));
+                const file = try o.getDebugFile(union_type.zir_index.resolveFile(ip));
                 const scope = if (ty.getParentNamespace(zcu).unwrap()) |parent_namespace|
                     try o.namespaceToDebugScope(pt, parent_namespace)
                 else
@@ -2611,7 +2581,7 @@ pub const Object = struct {
                 );
             },
             .@"enum" => {
-                const file = try o.getDebugFile(pt, ty.typeDeclInstAllowGeneratedTag(zcu).?.resolveFile(ip));
+                const file = try o.getDebugFile(ty.typeDeclInstAllowGeneratedTag(zcu).?.resolveFile(ip));
                 const scope = if (ty.getParentNamespace(zcu).unwrap()) |parent_namespace|
                     try o.namespaceToDebugScope(pt, parent_namespace)
                 else
@@ -2672,7 +2642,7 @@ pub const Object = struct {
                     return o.builder.debugSignedType(name, 0);
                 }
 
-                const file = try o.getDebugFile(pt, ty.typeDeclInstAllowGeneratedTag(zcu).?.resolveFile(ip));
+                const file = try o.getDebugFile(ty.typeDeclInstAllowGeneratedTag(zcu).?.resolveFile(ip));
                 const scope = if (ty.getParentNamespace(zcu).unwrap()) |parent_namespace|
                     try o.namespaceToDebugScope(pt, parent_namespace)
                 else
@@ -2697,8 +2667,8 @@ pub const Object = struct {
     }
 
     /// Called in `emit` so that the global error set is fully populated.
-    fn lowerDebugAnyerrorType(o: *Object, pt: Zcu.PerThread) Allocator.Error!Builder.Metadata {
-        const zcu = pt.zcu;
+    fn lowerDebugAnyerrorType(o: *Object) Allocator.Error!Builder.Metadata {
+        const zcu = o.zcu;
         const ip = &zcu.intern_pool;
         const gpa = zcu.comp.gpa;
 
@@ -2732,7 +2702,7 @@ pub const Object = struct {
             null, // file
             o.debug_compile_unit.unwrap().?, // scope
             0, // line
-            try o.getDebugType(pt, try pt.intType(.unsigned, error_set_bits)),
+            try o.builder.debugUnsignedType(null, error_set_bits),
             Type.anyerror.abiSize(zcu) * 8,
             Type.anyerror.abiAlignment(zcu).toByteUnits().? * 8,
             try o.builder.metadataTuple(enumerators),
@@ -2744,7 +2714,7 @@ pub const Object = struct {
     fn namespaceToDebugScope(o: *Object, pt: Zcu.PerThread, namespace_index: InternPool.NamespaceIndex) !Builder.Metadata {
         const zcu = pt.zcu;
         const namespace = zcu.namespacePtr(namespace_index);
-        if (namespace.parent == .none) return try o.getDebugFile(pt, namespace.file_scope);
+        if (namespace.parent == .none) return try o.getDebugFile(namespace.file_scope);
         return o.getDebugType(pt, .fromInterned(namespace.owner_type));
     }
 
@@ -3086,8 +3056,8 @@ pub const Object = struct {
         return variable_index;
     }
 
-    pub fn errorIntType(o: *Object, pt: Zcu.PerThread) Allocator.Error!Builder.Type {
-        return o.builder.intType(pt.zcu.errorSetBits());
+    pub fn errorIntType(o: *Object) Allocator.Error!Builder.Type {
+        return o.builder.intType(o.zcu.errorSetBits());
     }
 
     pub fn lowerType(o: *Object, pt: Zcu.PerThread, t: Type) Allocator.Error!Builder.Type {
@@ -3146,7 +3116,7 @@ pub const Object = struct {
             .bool_type => .i1,
             .void_type => .void,
             .type_type => unreachable,
-            .anyerror_type => try o.errorIntType(pt),
+            .anyerror_type => try o.errorIntType(),
             .comptime_int_type,
             .comptime_float_type,
             .noreturn_type,
@@ -3168,7 +3138,7 @@ pub const Object = struct {
             .optional_noreturn_type => unreachable,
             .anyerror_void_error_union_type,
             .adhoc_inferred_error_set_type,
-            => try o.errorIntType(pt),
+            => try o.errorIntType(),
             .generic_poison_type,
             .empty_tuple_type,
             => unreachable,
@@ -3241,7 +3211,7 @@ pub const Object = struct {
                 .error_union_type => |error_union_type| {
                     // Must stay in sync with `codegen.errUnionPayloadOffset`.
                     // See logic in `lowerPtr`.
-                    const error_type = try o.errorIntType(pt);
+                    const error_type = try o.errorIntType();
                     if (!Type.fromInterned(error_union_type.payload_type).hasRuntimeBits(zcu))
                         return error_type;
                     const payload_type = try o.lowerType(pt, Type.fromInterned(error_union_type.payload_type));
@@ -3474,7 +3444,7 @@ pub const Object = struct {
                 },
                 .enum_type => try o.lowerType(pt, t.intTagType(zcu)),
                 .func_type => |func_type| try o.lowerFnType(pt, func_type),
-                .error_set_type, .inferred_error_set_type => try o.errorIntType(pt),
+                .error_set_type, .inferred_error_set_type => try o.errorIntType(),
                 // values, not types
                 .undef,
                 .simple_value,
@@ -3624,7 +3594,7 @@ pub const Object = struct {
             },
             .err => |err| {
                 const int = try pt.getErrorValue(err.name);
-                const llvm_int = try o.builder.intConst(try o.errorIntType(pt), int);
+                const llvm_int = try o.builder.intConst(try o.errorIntType(), int);
                 return llvm_int;
             },
             .error_union => |error_union| {
@@ -4288,29 +4258,40 @@ pub const Object = struct {
         if (byval) try attributes.addParamAttr(llvm_arg_i, .{ .byval = param_llvm_ty }, &o.builder);
     }
 
-    /// MLUGG TODO: this is super dumb
-    pub fn getCmpLtErrorsLenFunction(o: *Object, pt: Zcu.PerThread) !Builder.Function.Index {
-        const name = try o.builder.strtabString(lt_errors_fn_name);
-        if (o.builder.getGlobal(name)) |llvm_fn| return llvm_fn.ptrConst(&o.builder).kind.function;
+    pub fn getErrorNameTable(o: *Object) Allocator.Error!Builder.Variable.Index {
+        if (o.error_name_table != .none) return o.error_name_table;
 
-        const zcu = pt.zcu;
-        const target = &zcu.root_mod.resolved_target.result;
-        const function_index = try o.builder.addFunction(
-            try o.builder.fnType(.i1, &.{try o.errorIntType(pt)}, .normal),
-            name,
-            toLlvmAddressSpace(.generic, target),
+        const name = try o.builder.strtabString("__zig_error_name_table");
+        // TODO: Address space
+        const variable_index = try o.builder.addVariable(name, .ptr, .default);
+        variable_index.setLinkage(.private, &o.builder);
+        variable_index.setMutability(.constant, &o.builder);
+        variable_index.setUnnamedAddr(.unnamed_addr, &o.builder);
+        variable_index.setAlignment(
+            Type.slice_const_u8_sentinel_0.abiAlignment(o.zcu).toLlvm(),
+            &o.builder,
         );
 
-        var attributes: Builder.FunctionAttributes.Wip = .{};
-        defer attributes.deinit(&o.builder);
-        try o.addCommonFnAttributes(&attributes, zcu.root_mod, zcu.root_mod.omit_frame_pointer);
-
-        function_index.setLinkage(if (o.builder.strip) .private else .internal, &o.builder);
-        function_index.setCallConv(.fastcc, &o.builder);
-        function_index.setAttributes(try attributes.finish(&o.builder), &o.builder);
-        return function_index;
+        o.error_name_table = variable_index;
+        return variable_index;
     }
 
+    pub fn getErrorsLen(o: *Object) Allocator.Error!Builder.Variable.Index {
+        const builder = &o.builder;
+        if (o.errors_len_variable == .none) {
+            const llvm_err_int_ty = try o.errorIntType();
+            const name = try builder.strtabString("__zig_errors_len");
+            const variable_index = try builder.addVariable(name, llvm_err_int_ty, .default);
+            variable_index.setLinkage(.private, builder);
+            variable_index.setMutability(.constant, builder);
+            variable_index.setUnnamedAddr(.unnamed_addr, builder);
+            variable_index.setAlignment(Type.errorAbiAlignment(o.zcu).toLlvm(), builder);
+            o.errors_len_variable = variable_index;
+        }
+        return o.errors_len_variable;
+    }
+
+    /// MLUGG TODO: this also needs incremental updates dumbass
     pub fn getEnumTagNameFunction(o: *Object, pt: Zcu.PerThread, enum_ty: Type) !Builder.Function.Index {
         const zcu = pt.zcu;
         const ip = &zcu.intern_pool;
@@ -4394,7 +4375,25 @@ pub const Object = struct {
         return o.lazy_abi_aligns.items[@intFromEnum(index)];
     }
 
-    pub fn updateIsNamedEnumValueFunction(
+    pub fn getIsNamedEnumValueFunction(o: *Object, pt: Zcu.PerThread, enum_ty: Type) !Builder.Function.Index {
+        const zcu = pt.zcu;
+        const ip = &zcu.intern_pool;
+
+        const gop = try o.named_enum_map.getOrPut(o.gpa, enum_ty.toIntern());
+        if (gop.found_existing) return gop.value_ptr.*;
+        errdefer assert(o.named_enum_map.remove(enum_ty.toIntern()));
+        const function_index = try o.builder.addFunction(
+            // Dummy function type; `updateIsNamedEnumValue` will replace it with the correct type.
+            // TODO: change the builder API so we don't need to do this.
+            try o.builder.fnType(.void, &.{}, .normal),
+            try o.builder.strtabStringFmt("__zig_is_named_enum_value_{f}", .{enum_ty.containerTypeName(ip).fmt(ip)}),
+            toLlvmAddressSpace(.generic, zcu.getTarget()),
+        );
+        gop.value_ptr.* = function_index;
+        try o.updateIsNamedEnumValueFunction(pt, enum_ty, function_index);
+        return function_index;
+    }
+    fn updateIsNamedEnumValueFunction(
         o: *Object,
         pt: Zcu.PerThread,
         enum_ty: Type,
@@ -4444,6 +4443,24 @@ pub const Object = struct {
         _ = try wip.ret(.false);
 
         try wip.finish();
+    }
+
+    pub fn getLibcFunction(
+        o: *Object,
+        fn_name: Builder.StrtabString,
+        param_types: []const Builder.Type,
+        return_type: Builder.Type,
+    ) Allocator.Error!Builder.Function.Index {
+        if (o.builder.getGlobal(fn_name)) |global| return switch (global.ptrConst(&o.builder).kind) {
+            .alias => |alias| alias.getAliasee(&o.builder).ptrConst(&o.builder).kind.function,
+            .function => |function| function,
+            .variable, .replaced => unreachable,
+        };
+        return o.builder.addFunction(
+            try o.builder.fnType(return_type, param_types, .normal),
+            fn_name,
+            toLlvmAddressSpace(.generic, o.zcu.getTarget()),
+        );
     }
 };
 
@@ -4795,8 +4812,6 @@ const struct_layout_version = 2;
 // TODO: Restore the non_null field to i1 once
 //       https://github.com/llvm/llvm-project/issues/56585/ is fixed
 pub const optional_layout_version = 3;
-
-const lt_errors_fn_name = "__zig_lt_errors_len";
 
 pub fn initializeLLVMTarget(arch: std.Target.Cpu.Arch) void {
     switch (arch) {

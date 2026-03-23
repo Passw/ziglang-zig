@@ -1,7 +1,5 @@
 const FuncGen = @This();
 
-pub const Error = Zcu.CodegenFailError;
-
 object: *Object,
 nav_index: InternPool.Nav.Index,
 pt: Zcu.PerThread,
@@ -63,7 +61,17 @@ disable_intrinsics: bool,
 /// Have we seen loads or stores involving `allowzero` pointers?
 allowzero_access: bool,
 
-fn todo(fg: *FuncGen, comptime format: []const u8, args: anytype) Error {
+/// In general, codegen should never emit errors; we cannot report useful source locations for them
+/// and they don't really play nicely with incremental compilation. The LLVM backend mostly obeys
+/// this rule. Where it does not, it calls `todo` to emit an error, and results in this error set
+/// being used for the function
+///
+/// Please avoid using this error set in new code. Ideally, every fallible function in this file
+/// should have the error set `Allocator.Error`.
+const TodoError = Zcu.CodegenFailError;
+
+/// Avoid introducing new calls to this function---see documentation comment on `TodoError`.
+fn todo(fg: *FuncGen, comptime format: []const u8, args: anytype) TodoError {
     @branchHint(.cold);
     return fg.pt.zcu.codegenFail(
         fg.nav_index,
@@ -167,7 +175,11 @@ fn resolveValue(self: *FuncGen, val: Value) Allocator.Error!Builder.Constant {
     }
 }
 
-pub fn genBody(self: *FuncGen, body: []const Air.Inst.Index, coverage_point: Air.CoveragePoint) Error!void {
+fn lowerType(fg: *const FuncGen, ty: Type) Allocator.Error!Builder.Type {
+    return fg.object.lowerType(fg.pt, ty);
+}
+
+pub fn genBody(self: *FuncGen, body: []const Air.Inst.Index, coverage_point: Air.CoveragePoint) TodoError!void {
     const o = self.object;
     const zcu = self.pt.zcu;
     const ip = &zcu.intern_pool;
@@ -443,13 +455,16 @@ pub fn genBody(self: *FuncGen, body: []const Air.Inst.Index, coverage_point: Air
 
             // Instructions which may be `noreturn`.
             .block => res: {
-                const res = try self.airBlock(inst);
-                if (self.typeOfIndex(inst).isNoReturn(zcu)) return;
+                const block = self.air.unwrapBlock(inst);
+                const res = try self.lowerBlock(inst, null, block.body);
+                if (block.ty.isNoReturn(zcu)) return;
                 break :res res;
             },
             .dbg_inline_block => res: {
-                const res = try self.airDbgInlineBlock(inst);
-                if (self.typeOfIndex(inst).isNoReturn(zcu)) return;
+                const block = self.air.unwrapDbgBlock(inst);
+                self.arg_inline_index = 0;
+                const res = try self.lowerBlock(inst, block.func, block.body);
+                if (block.ty.isNoReturn(zcu)) return;
                 break :res res;
             },
             .call, .call_always_tail, .call_never_tail, .call_never_inline => |tag| res: {
@@ -479,7 +494,7 @@ fn genBodyDebugScope(
     maybe_inline_func: ?InternPool.Index,
     body: []const Air.Inst.Index,
     coverage_point: Air.CoveragePoint,
-) Error!void {
+) TodoError!void {
     const o = self.object;
 
     if (self.wip.strip) return self.genBody(body, coverage_point);
@@ -508,7 +523,7 @@ fn genBodyDebugScope(
         const file_scope = zcu.navFileScopeIndex(func.owner_nav);
         const mod = zcu.fileByIndex(file_scope).mod.?;
 
-        self.file = try o.getDebugFile(pt, file_scope);
+        self.file = try o.getDebugFile(file_scope);
 
         self.base_line = zcu.navSrcLine(func.owner_nav);
         const line_number = self.base_line + 1;
@@ -562,7 +577,7 @@ const CallAttr = enum {
     AlwaysInline,
 };
 
-fn airCall(self: *FuncGen, inst: Air.Inst.Index, modifier: std.builtin.CallModifier) !Builder.Value {
+fn airCall(self: *FuncGen, inst: Air.Inst.Index, modifier: std.builtin.CallModifier) Allocator.Error!Builder.Value {
     const air_call = self.air.unwrapCall(inst);
     const args = air_call.args;
     const o = self.object;
@@ -598,7 +613,7 @@ fn airCall(self: *FuncGen, inst: Air.Inst.Index, modifier: std.builtin.CallModif
     }
 
     const ret_ptr = if (!sret) null else blk: {
-        const llvm_ret_ty = try o.lowerType(pt, return_type);
+        const llvm_ret_ty = try self.lowerType(return_type);
         try attributes.addParamAttr(0, .{ .sret = llvm_ret_ty }, &o.builder);
 
         const alignment = return_type.abiAlignment(zcu).toLlvm();
@@ -620,7 +635,7 @@ fn airCall(self: *FuncGen, inst: Air.Inst.Index, modifier: std.builtin.CallModif
             const arg = args[it.zig_index - 1];
             const param_ty = self.typeOf(arg);
             const llvm_arg = try self.resolveInst(arg);
-            const llvm_param_ty = try o.lowerType(pt, param_ty);
+            const llvm_param_ty = try self.lowerType(param_ty);
             if (isByRef(param_ty, zcu)) {
                 const alignment = param_ty.abiAlignment(zcu).toLlvm();
                 const loaded = try self.wip.load(.normal, llvm_param_ty, llvm_arg, alignment, "");
@@ -649,7 +664,7 @@ fn airCall(self: *FuncGen, inst: Air.Inst.Index, modifier: std.builtin.CallModif
             const llvm_arg = try self.resolveInst(arg);
 
             const alignment = param_ty.abiAlignment(zcu).toLlvm();
-            const param_llvm_ty = try o.lowerType(pt, param_ty);
+            const param_llvm_ty = try self.lowerType(param_ty);
             const arg_ptr = try self.buildAlloca(param_llvm_ty, alignment);
             if (isByRef(param_ty, zcu)) {
                 const loaded = try self.wip.load(.normal, param_llvm_ty, llvm_arg, alignment, "");
@@ -719,7 +734,7 @@ fn airCall(self: *FuncGen, inst: Air.Inst.Index, modifier: std.builtin.CallModif
                 llvm_arg = ptr;
             }
 
-            const float_ty = try o.lowerType(pt, aarch64_c_abi.getFloatArrayType(arg_ty, zcu).?);
+            const float_ty = try self.lowerType(aarch64_c_abi.getFloatArrayType(arg_ty, zcu).?);
             const array_ty = try o.builder.arrayType(count, float_ty);
 
             const loaded = try self.wip.load(.normal, array_ty, llvm_arg, alignment, "");
@@ -760,7 +775,7 @@ fn airCall(self: *FuncGen, inst: Air.Inst.Index, modifier: std.builtin.CallModif
             .byref => {
                 const param_index = it.zig_index - 1;
                 const param_ty = Type.fromInterned(fn_info.param_types.get(ip)[param_index]);
-                const param_llvm_ty = try o.lowerType(pt, param_ty);
+                const param_llvm_ty = try self.lowerType(param_ty);
                 const alignment = param_ty.abiAlignment(zcu).toLlvm();
                 try o.addByRefParamAttrs(&attributes, it.llvm_index - 1, alignment, it.byval_attr, param_llvm_ty);
             },
@@ -812,7 +827,7 @@ fn airCall(self: *FuncGen, inst: Air.Inst.Index, modifier: std.builtin.CallModif
         },
         toLlvmCallConvTag(fn_info.cc, target).?,
         try attributes.finish(&o.builder),
-        try o.lowerType(pt, zig_fn_ty),
+        try self.lowerType(zig_fn_ty),
         llvm_fn,
         llvm_args.items,
         "",
@@ -826,7 +841,7 @@ fn airCall(self: *FuncGen, inst: Air.Inst.Index, modifier: std.builtin.CallModif
         return .none;
     }
 
-    const llvm_ret_ty = try o.lowerType(pt, return_type);
+    const llvm_ret_ty = try self.lowerType(return_type);
     if (ret_ptr) |rp| {
         if (isByRef(return_type, zcu)) {
             return rp;
@@ -864,7 +879,7 @@ fn airCall(self: *FuncGen, inst: Air.Inst.Index, modifier: std.builtin.CallModif
     }
 }
 
-fn buildSimplePanic(fg: *FuncGen, panic_id: Zcu.SimplePanicId) !void {
+fn buildSimplePanic(fg: *FuncGen, panic_id: Zcu.SimplePanicId) Allocator.Error!void {
     const o = fg.object;
     const pt = fg.pt;
     const zcu = pt.zcu;
@@ -888,7 +903,7 @@ fn buildSimplePanic(fg: *FuncGen, panic_id: Zcu.SimplePanicId) !void {
     _ = try fg.wip.@"unreachable"();
 }
 
-fn airRet(self: *FuncGen, inst: Air.Inst.Index, safety: bool) !void {
+fn airRet(self: *FuncGen, inst: Air.Inst.Index, safety: bool) Allocator.Error!void {
     const o = self.object;
     const pt = self.pt;
     const zcu = pt.zcu;
@@ -910,7 +925,7 @@ fn airRet(self: *FuncGen, inst: Air.Inst.Index, safety: bool) !void {
                 // https://github.com/ziglang/zig/issues/15337
                 break :undef;
             }
-            const len = try o.builder.intValue(try o.lowerType(pt, Type.usize), ret_ty.abiSize(zcu));
+            const len = try o.builder.intValue(try self.lowerType(.usize), ret_ty.abiSize(zcu));
             _ = try self.wip.callMemSet(
                 self.ret_ptr,
                 ptr_ty.ptrAlignment(zcu).toLlvm(),
@@ -946,7 +961,7 @@ fn airRet(self: *FuncGen, inst: Air.Inst.Index, safety: bool) !void {
             // Functions with an empty error set are emitted with an error code
             // return type and return zero so they can be function pointers coerced
             // to functions that return anyerror.
-            _ = try self.wip.ret(try o.builder.intValue(try o.errorIntType(pt), 0));
+            _ = try self.wip.ret(try o.builder.intValue(try o.errorIntType(), 0));
         } else {
             _ = try self.wip.retVoid();
         }
@@ -961,7 +976,7 @@ fn airRet(self: *FuncGen, inst: Air.Inst.Index, safety: bool) !void {
     if (val_is_undef and safety) {
         const llvm_ret_ty = operand.typeOfWip(&self.wip);
         const rp = try self.buildAlloca(llvm_ret_ty, alignment);
-        const len = try o.builder.intValue(try o.lowerType(pt, Type.usize), ret_ty.abiSize(zcu));
+        const len = try o.builder.intValue(try self.lowerType(Type.usize), ret_ty.abiSize(zcu));
         _ = try self.wip.callMemSet(
             rp,
             alignment,
@@ -997,7 +1012,7 @@ fn airRet(self: *FuncGen, inst: Air.Inst.Index, safety: bool) !void {
     return;
 }
 
-fn airRetLoad(self: *FuncGen, inst: Air.Inst.Index) !void {
+fn airRetLoad(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!void {
     const o = self.object;
     const pt = self.pt;
     const zcu = pt.zcu;
@@ -1011,7 +1026,7 @@ fn airRetLoad(self: *FuncGen, inst: Air.Inst.Index) !void {
             // Functions with an empty error set are emitted with an error code
             // return type and return zero so they can be function pointers coerced
             // to functions that return anyerror.
-            _ = try self.wip.ret(try o.builder.intValue(try o.errorIntType(pt), 0));
+            _ = try self.wip.ret(try o.builder.intValue(try o.errorIntType(), 0));
         } else {
             _ = try self.wip.retVoid();
         }
@@ -1028,25 +1043,22 @@ fn airRetLoad(self: *FuncGen, inst: Air.Inst.Index) !void {
     return;
 }
 
-fn airCVaArg(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
-    const o = self.object;
-    const pt = self.pt;
+fn airCVaArg(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const ty_op = self.air.instructions.items(.data)[@intFromEnum(inst)].ty_op;
     const list = try self.resolveInst(ty_op.operand);
     const arg_ty = ty_op.ty.toType();
-    const llvm_arg_ty = try o.lowerType(pt, arg_ty);
+    const llvm_arg_ty = try self.lowerType(arg_ty);
 
     return self.wip.vaArg(list, llvm_arg_ty, "");
 }
 
-fn airCVaCopy(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
-    const o = self.object;
+fn airCVaCopy(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const pt = self.pt;
     const zcu = pt.zcu;
     const ty_op = self.air.instructions.items(.data)[@intFromEnum(inst)].ty_op;
     const src_list = try self.resolveInst(ty_op.operand);
     const va_list_ty = ty_op.ty.toType();
-    const llvm_va_list_ty = try o.lowerType(pt, va_list_ty);
+    const llvm_va_list_ty = try self.lowerType(va_list_ty);
 
     const result_alignment = va_list_ty.abiAlignment(pt.zcu).toLlvm();
     const dest_list = try self.buildAlloca(llvm_va_list_ty, result_alignment);
@@ -1058,7 +1070,7 @@ fn airCVaCopy(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
         try self.wip.load(.normal, llvm_va_list_ty, dest_list, result_alignment, "");
 }
 
-fn airCVaEnd(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airCVaEnd(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const un_op = self.air.instructions.items(.data)[@intFromEnum(inst)].un_op;
     const src_list = try self.resolveInst(un_op);
 
@@ -1066,12 +1078,11 @@ fn airCVaEnd(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     return .none;
 }
 
-fn airCVaStart(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
-    const o = self.object;
+fn airCVaStart(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const pt = self.pt;
     const zcu = pt.zcu;
     const va_list_ty = self.typeOfIndex(inst);
-    const llvm_va_list_ty = try o.lowerType(pt, va_list_ty);
+    const llvm_va_list_ty = try self.lowerType(va_list_ty);
 
     const result_alignment = va_list_ty.abiAlignment(pt.zcu).toLlvm();
     const dest_list = try self.buildAlloca(llvm_va_list_ty, result_alignment);
@@ -1088,7 +1099,7 @@ fn airCmp(
     inst: Air.Inst.Index,
     op: math.CompareOperator,
     fast: Builder.FastMathKind,
-) !Builder.Value {
+) Allocator.Error!Builder.Value {
     const bin_op = self.air.instructions.items(.data)[@intFromEnum(inst)].bin_op;
     const lhs = try self.resolveInst(bin_op.lhs);
     const rhs = try self.resolveInst(bin_op.rhs);
@@ -1097,7 +1108,7 @@ fn airCmp(
     return self.cmp(fast, op, operand_ty, lhs, rhs);
 }
 
-fn airCmpVector(self: *FuncGen, inst: Air.Inst.Index, fast: Builder.FastMathKind) !Builder.Value {
+fn airCmpVector(self: *FuncGen, inst: Air.Inst.Index, fast: Builder.FastMathKind) Allocator.Error!Builder.Value {
     const ty_pl = self.air.instructions.items(.data)[@intFromEnum(inst)].ty_pl;
     const extra = self.air.extraData(Air.VectorCmp, ty_pl.payload).data;
 
@@ -1109,21 +1120,20 @@ fn airCmpVector(self: *FuncGen, inst: Air.Inst.Index, fast: Builder.FastMathKind
     return self.cmp(fast, cmp_op, vec_ty, lhs, rhs);
 }
 
-fn airCmpLtErrorsLen(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airCmpLtErrorsLen(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const o = self.object;
-    const pt = self.pt;
     const un_op = self.air.instructions.items(.data)[@intFromEnum(inst)].un_op;
     const operand = try self.resolveInst(un_op);
-    const llvm_fn = try o.getCmpLtErrorsLenFunction(pt);
-    return self.wip.call(
+    const errors_len_ptr = try o.getErrorsLen();
+    const errors_len_val = try self.wip.load(
         .normal,
-        .fastcc,
-        .none,
-        llvm_fn.typeOf(&o.builder),
-        llvm_fn.toValue(&o.builder),
-        &.{operand},
+        try o.errorIntType(),
+        errors_len_ptr.toValue(&o.builder),
+        Type.errorAbiAlignment(o.zcu).toLlvm(),
         "",
     );
+    // Despite the name, this instruction is actually lte. MLUGG TODO RENAME
+    return self.wip.icmp(.ule, operand, errors_len_val, "");
 }
 
 fn cmp(
@@ -1228,18 +1238,12 @@ fn cmp(
     return self.wip.icmp(cond, lhs, rhs, "");
 }
 
-fn airBlock(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
-    const block = self.air.unwrapBlock(inst);
-    return self.lowerBlock(inst, null, block.body);
-}
-
 fn lowerBlock(
     self: *FuncGen,
     inst: Air.Inst.Index,
     maybe_inline_func: ?InternPool.Index,
     body: []const Air.Inst.Index,
-) !Builder.Value {
-    const o = self.object;
+) TodoError!Builder.Value {
     const pt = self.pt;
     const zcu = pt.zcu;
     const inst_ty = self.typeOfIndex(inst);
@@ -1267,7 +1271,7 @@ fn lowerBlock(
 
     // Create a phi node only if the block returns a value.
     if (have_block_result) {
-        const raw_llvm_ty = try o.lowerType(pt, inst_ty);
+        const raw_llvm_ty = try self.lowerType(inst_ty);
         const llvm_ty: Builder.Type = ty: {
             // If the zig tag type is a function, this represents an actual function body; not
             // a pointer to it. LLVM IR allows the call instruction to use function bodies instead
@@ -1289,7 +1293,7 @@ fn lowerBlock(
     }
 }
 
-fn airBr(self: *FuncGen, inst: Air.Inst.Index) !void {
+fn airBr(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!void {
     const zcu = self.pt.zcu;
     const branch = self.air.instructions.items(.data)[@intFromEnum(inst)].br;
     const block = self.blocks.get(branch.block_inst).?;
@@ -1306,7 +1310,7 @@ fn airBr(self: *FuncGen, inst: Air.Inst.Index) !void {
     _ = try self.wip.br(block.parent_bb);
 }
 
-fn airRepeat(self: *FuncGen, inst: Air.Inst.Index) !void {
+fn airRepeat(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!void {
     const repeat = self.air.instructions.items(.data)[@intFromEnum(inst)].repeat;
     const loop_bb = self.loops.get(repeat.loop_inst).?;
     loop_bb.ptr(&self.wip).incoming += 1;
@@ -1318,7 +1322,7 @@ fn lowerSwitchDispatch(
     switch_inst: Air.Inst.Index,
     cond_ref: Air.Inst.Ref,
     dispatch_info: SwitchDispatchInfo,
-) !void {
+) Allocator.Error!void {
     const o = self.object;
     const pt = self.pt;
     const zcu = pt.zcu;
@@ -1384,7 +1388,7 @@ fn lowerSwitchDispatch(
         const table_index = try self.wip.conv(
             .unsigned,
             try self.wip.bin(.@"sub nuw", cond, jmp_table.min.toValue(), ""),
-            try o.lowerType(pt, .usize),
+            try self.lowerType(.usize),
             "",
         );
         const target_ptr_ptr = try self.ptraddScaled(
@@ -1409,7 +1413,7 @@ fn lowerSwitchDispatch(
     // The switch prongs will correspond to our scalar cases. Ranges will
     // be handled by conditional branches in the `else` prong.
 
-    const llvm_usize = try o.lowerType(pt, Type.usize);
+    const llvm_usize = try self.lowerType(Type.usize);
     const cond_int = if (cond.typeOfWip(&self.wip).isPointer(&o.builder))
         try self.wip.cast(.ptrtoint, cond, llvm_usize, "")
     else
@@ -1501,13 +1505,13 @@ fn lowerSwitchDispatch(
     }
 }
 
-fn airSwitchDispatch(self: *FuncGen, inst: Air.Inst.Index) !void {
+fn airSwitchDispatch(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!void {
     const br = self.air.instructions.items(.data)[@intFromEnum(inst)].br;
     const dispatch_info = self.switch_dispatch_info.get(br.block_inst).?;
     return self.lowerSwitchDispatch(br.block_inst, br.operand, dispatch_info);
 }
 
-fn airCondBr(self: *FuncGen, inst: Air.Inst.Index) !void {
+fn airCondBr(self: *FuncGen, inst: Air.Inst.Index) TodoError!void {
     const cond_br = self.air.unwrapCondBr(inst);
     const cond = try self.resolveInst(cond_br.condition);
     const then_body = cond_br.then_body;
@@ -1567,7 +1571,7 @@ fn airCondBr(self: *FuncGen, inst: Air.Inst.Index) !void {
     // No need to reset the insert cursor since this instruction is noreturn.
 }
 
-fn airTry(self: *FuncGen, inst: Air.Inst.Index, err_cold: bool) !Builder.Value {
+fn airTry(self: *FuncGen, inst: Air.Inst.Index, err_cold: bool) TodoError!Builder.Value {
     const unwrapped_try = self.air.unwrapTry(inst);
     const err_union = try self.resolveInst(unwrapped_try.error_union);
     const body = unwrapped_try.else_body;
@@ -1576,7 +1580,7 @@ fn airTry(self: *FuncGen, inst: Air.Inst.Index, err_cold: bool) !Builder.Value {
     return lowerTry(self, err_union, body, err_union_ty, false, .none, is_unused, err_cold);
 }
 
-fn airTryPtr(self: *FuncGen, inst: Air.Inst.Index, err_cold: bool) !Builder.Value {
+fn airTryPtr(self: *FuncGen, inst: Air.Inst.Index, err_cold: bool) TodoError!Builder.Value {
     const zcu = self.pt.zcu;
     const unwrapped_try = self.air.unwrapTryPtr(inst);
     const err_union_ptr = try self.resolveInst(unwrapped_try.error_union_ptr);
@@ -1599,13 +1603,13 @@ fn lowerTry(
     operand_ptr_align: InternPool.Alignment,
     is_unused: bool,
     err_cold: bool,
-) !Builder.Value {
+) TodoError!Builder.Value {
     const o = fg.object;
     const pt = fg.pt;
     const zcu = pt.zcu;
     const payload_ty = err_union_ty.errorUnionPayload(zcu);
     const payload_has_bits = payload_ty.hasRuntimeBits(zcu);
-    const error_type = try o.errorIntType(pt);
+    const error_type = try o.errorIntType();
 
     const err_set_align: InternPool.Alignment, const payload_align: InternPool.Alignment = if (operand_is_ptr) .{
         operand_ptr_align.minStrict(Type.anyerror.abiAlignment(zcu)),
@@ -1657,11 +1661,11 @@ fn lowerTry(
     } else if (isByRef(payload_ty, zcu)) {
         return fg.loadByRef(payload_ptr, payload_ty, payload_align.toLlvm(), .normal);
     } else {
-        return fg.wip.load(.normal, try o.lowerType(pt, payload_ty), payload_ptr, payload_align.toLlvm(), "");
+        return fg.wip.load(.normal, try fg.lowerType(payload_ty), payload_ptr, payload_align.toLlvm(), "");
     }
 }
 
-fn airSwitchBr(self: *FuncGen, inst: Air.Inst.Index, is_dispatch_loop: bool) !void {
+fn airSwitchBr(self: *FuncGen, inst: Air.Inst.Index, is_dispatch_loop: bool) TodoError!void {
     const o = self.object;
     const pt = self.pt;
     const zcu = pt.zcu;
@@ -1909,7 +1913,7 @@ fn switchCaseItemRange(self: *FuncGen, switch_br: Air.UnwrappedSwitch) ?[2]Value
     return .{ min.?, max.? };
 }
 
-fn airLoop(self: *FuncGen, inst: Air.Inst.Index) !void {
+fn airLoop(self: *FuncGen, inst: Air.Inst.Index) TodoError!void {
     const block = self.air.unwrapBlock(inst);
     const body = block.body;
     const loop_block = try self.wip.block(1, "Loop"); // `airRepeat` will increment incoming each time
@@ -1922,21 +1926,21 @@ fn airLoop(self: *FuncGen, inst: Air.Inst.Index) !void {
     try self.genBodyDebugScope(null, body, .none);
 }
 
-fn airArrayToSlice(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airArrayToSlice(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const o = self.object;
     const pt = self.pt;
     const zcu = pt.zcu;
     const ty_op = self.air.instructions.items(.data)[@intFromEnum(inst)].ty_op;
     const operand_ty = self.typeOf(ty_op.operand);
     const array_ty = operand_ty.childType(zcu);
-    const llvm_usize = try o.lowerType(pt, Type.usize);
+    const llvm_usize = try self.lowerType(.usize);
     const len = try o.builder.intValue(llvm_usize, array_ty.arrayLen(zcu));
-    const slice_llvm_ty = try o.lowerType(pt, self.typeOfIndex(inst));
+    const slice_llvm_ty = try self.lowerType(self.typeOfIndex(inst));
     const operand = try self.resolveInst(ty_op.operand);
     return self.wip.buildAggregate(slice_llvm_ty, &.{ operand, len }, "");
 }
 
-fn airFloatFromInt(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airFloatFromInt(self: *FuncGen, inst: Air.Inst.Index) TodoError!Builder.Value {
     const o = self.object;
     const pt = self.pt;
     const zcu = pt.zcu;
@@ -1949,7 +1953,7 @@ fn airFloatFromInt(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
 
     const dest_ty = self.typeOfIndex(inst);
     const dest_scalar_ty = dest_ty.scalarType(zcu);
-    const dest_llvm_ty = try o.lowerType(pt, dest_ty);
+    const dest_llvm_ty = try self.lowerType(dest_ty);
     const target = zcu.getTarget();
 
     if (intrinsicsAllowed(dest_scalar_ty, target)) return self.wip.conv(
@@ -1987,7 +1991,7 @@ fn airFloatFromInt(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
         extended = try self.wip.cast(.bitcast, extended, param_type, "");
     }
 
-    const libc_fn = try self.getLibcFunction(fn_name, &.{param_type}, dest_llvm_ty);
+    const libc_fn = try o.getLibcFunction(fn_name, &.{param_type}, dest_llvm_ty);
     return self.wip.call(
         .normal,
         .ccc,
@@ -2003,7 +2007,7 @@ fn airIntFromFloat(
     self: *FuncGen,
     inst: Air.Inst.Index,
     fast: Builder.FastMathKind,
-) !Builder.Value {
+) TodoError!Builder.Value {
     _ = fast;
 
     const o = self.object;
@@ -2018,7 +2022,7 @@ fn airIntFromFloat(
 
     const dest_ty = self.typeOfIndex(inst);
     const dest_scalar_ty = dest_ty.scalarType(zcu);
-    const dest_llvm_ty = try o.lowerType(pt, dest_ty);
+    const dest_llvm_ty = try self.lowerType(dest_ty);
 
     if (intrinsicsAllowed(operand_scalar_ty, target)) {
         // TODO set fast math flag
@@ -2052,8 +2056,8 @@ fn airIntFromFloat(
         compiler_rt_dest_abbrev,
     });
 
-    const operand_llvm_ty = try o.lowerType(pt, operand_ty);
-    const libc_fn = try self.getLibcFunction(fn_name, &.{operand_llvm_ty}, libc_ret_ty);
+    const operand_llvm_ty = try self.lowerType(operand_ty);
+    const libc_fn = try o.getLibcFunction(fn_name, &.{operand_llvm_ty}, libc_ret_ty);
     var result = try self.wip.call(
         .normal,
         .ccc,
@@ -2078,7 +2082,7 @@ fn sliceOrArrayLenInBytes(fg: *FuncGen, ptr: Builder.Value, ty: Type) Allocator.
     const o = fg.object;
     const pt = fg.pt;
     const zcu = pt.zcu;
-    const llvm_usize = try o.lowerType(pt, Type.usize);
+    const llvm_usize = try fg.lowerType(.usize);
     switch (ty.ptrSize(zcu)) {
         .slice => {
             const len = try fg.wip.extractValue(ptr, &.{1}, "");
@@ -2098,20 +2102,20 @@ fn sliceOrArrayLenInBytes(fg: *FuncGen, ptr: Builder.Value, ty: Type) Allocator.
     }
 }
 
-fn airSliceField(self: *FuncGen, inst: Air.Inst.Index, index: u32) !Builder.Value {
+fn airSliceField(self: *FuncGen, inst: Air.Inst.Index, index: u32) Allocator.Error!Builder.Value {
     const ty_op = self.air.instructions.items(.data)[@intFromEnum(inst)].ty_op;
     const operand = try self.resolveInst(ty_op.operand);
     return self.wip.extractValue(operand, &.{index}, "");
 }
 
-fn airPtrSliceFieldPtr(self: *FuncGen, inst: Air.Inst.Index, index: u1) !Builder.Value {
+fn airPtrSliceFieldPtr(self: *FuncGen, inst: Air.Inst.Index, index: u1) Allocator.Error!Builder.Value {
     const zcu = self.pt.zcu;
     const ty_op = self.air.instructions.items(.data)[@intFromEnum(inst)].ty_op;
     const slice_ptr = try self.resolveInst(ty_op.operand);
     return self.ptraddConst(slice_ptr, index * Type.usize.abiSize(zcu));
 }
 
-fn airSliceElemVal(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airSliceElemVal(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const pt = self.pt;
     const zcu = pt.zcu;
     const bin_op = self.air.instructions.items(.data)[@intFromEnum(inst)].bin_op;
@@ -2133,7 +2137,7 @@ fn airSliceElemVal(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     }
 }
 
-fn airSliceElemPtr(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airSliceElemPtr(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const pt = self.pt;
     const zcu = pt.zcu;
     const ty_pl = self.air.instructions.items(.data)[@intFromEnum(inst)].ty_pl;
@@ -2146,7 +2150,7 @@ fn airSliceElemPtr(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     return self.ptraddScaled(base_ptr, index, slice_ty.childType(zcu).abiSize(zcu));
 }
 
-fn airArrayElemVal(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airArrayElemVal(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const pt = self.pt;
     const zcu = pt.zcu;
 
@@ -2169,7 +2173,7 @@ fn airArrayElemVal(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     return self.wip.extractElement(array_llvm_val, rhs, "");
 }
 
-fn airPtrElemVal(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airPtrElemVal(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const pt = self.pt;
     const zcu = pt.zcu;
     const bin_op = self.air.instructions.items(.data)[@intFromEnum(inst)].bin_op;
@@ -2189,7 +2193,7 @@ fn airPtrElemVal(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     return self.load(ptr, ptr_ty);
 }
 
-fn airPtrElemPtr(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airPtrElemPtr(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const pt = self.pt;
     const zcu = pt.zcu;
     const ty_pl = self.air.instructions.items(.data)[@intFromEnum(inst)].ty_pl;
@@ -2207,7 +2211,7 @@ fn airPtrElemPtr(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     return self.ptraddScaled(base_ptr, rhs, elem_ty.abiSize(zcu));
 }
 
-fn airStructFieldPtr(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airStructFieldPtr(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const ty_pl = self.air.instructions.items(.data)[@intFromEnum(inst)].ty_pl;
     const struct_field = self.air.extraData(Air.StructField, ty_pl.payload).data;
     const struct_ptr = try self.resolveInst(struct_field.struct_operand);
@@ -2219,14 +2223,14 @@ fn airStructFieldPtrIndex(
     self: *FuncGen,
     inst: Air.Inst.Index,
     field_index: u32,
-) !Builder.Value {
+) Allocator.Error!Builder.Value {
     const ty_op = self.air.instructions.items(.data)[@intFromEnum(inst)].ty_op;
     const struct_ptr = try self.resolveInst(ty_op.operand);
     const struct_ptr_ty = self.typeOf(ty_op.operand);
     return self.fieldPtr(struct_ptr, struct_ptr_ty, field_index);
 }
 
-fn airStructFieldVal(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airStructFieldVal(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const o = self.object;
     const pt = self.pt;
     const zcu = pt.zcu;
@@ -2267,7 +2271,7 @@ fn airStructFieldVal(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
             },
             .float => {
                 // bitcast int->float
-                return self.wip.cast(.bitcast, field_int_val, try o.lowerType(pt, field_ty), "");
+                return self.wip.cast(.bitcast, field_int_val, try self.lowerType(field_ty), "");
             },
         }
     }
@@ -2292,7 +2296,7 @@ fn airStructFieldVal(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     }
 }
 
-fn airFieldParentPtr(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airFieldParentPtr(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const o = self.object;
     const pt = self.pt;
     const zcu = pt.zcu;
@@ -2305,8 +2309,8 @@ fn airFieldParentPtr(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     const field_offset = parent_ty.structFieldOffset(extra.field_index, zcu);
     if (field_offset == 0) return field_ptr;
 
-    const res_ty = try o.lowerType(pt, ty_pl.ty.toType());
-    const llvm_usize = try o.lowerType(pt, Type.usize);
+    const res_ty = try self.lowerType(ty_pl.ty.toType());
+    const llvm_usize = try self.lowerType(Type.usize);
 
     const field_ptr_int = try self.wip.cast(.ptrtoint, field_ptr, llvm_usize, "");
     const base_ptr_int = try self.wip.bin(
@@ -2318,19 +2322,19 @@ fn airFieldParentPtr(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     return self.wip.cast(.inttoptr, base_ptr_int, res_ty, "");
 }
 
-fn airNot(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airNot(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const ty_op = self.air.instructions.items(.data)[@intFromEnum(inst)].ty_op;
     const operand = try self.resolveInst(ty_op.operand);
 
     return self.wip.not(operand, "");
 }
 
-fn airUnreach(self: *FuncGen, inst: Air.Inst.Index) !void {
+fn airUnreach(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!void {
     _ = inst;
     _ = try self.wip.@"unreachable"();
 }
 
-fn airDbgStmt(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airDbgStmt(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const dbg_stmt = self.air.instructions.items(.data)[@intFromEnum(inst)].dbg_stmt;
     self.prev_dbg_line = @intCast(self.base_line + dbg_stmt.line + 1);
     self.prev_dbg_column = @intCast(dbg_stmt.column + 1);
@@ -2345,19 +2349,13 @@ fn airDbgStmt(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     return .none;
 }
 
-fn airDbgEmptyStmt(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airDbgEmptyStmt(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     _ = self;
     _ = inst;
     return .none;
 }
 
-fn airDbgInlineBlock(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
-    const block = self.air.unwrapDbgBlock(inst);
-    self.arg_inline_index = 0;
-    return self.lowerBlock(inst, block.func, block.body);
-}
-
-fn airDbgVarPtr(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airDbgVarPtr(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const o = self.object;
     const pt = self.pt;
     const zcu = pt.zcu;
@@ -2390,7 +2388,7 @@ fn airDbgVarPtr(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     return .none;
 }
 
-fn airDbgVarVal(self: *FuncGen, inst: Air.Inst.Index, is_arg: bool) !Builder.Value {
+fn airDbgVarVal(self: *FuncGen, inst: Air.Inst.Index, is_arg: bool) Allocator.Error!Builder.Value {
     const o = self.object;
     const pt = self.pt;
     const pl_op = self.air.instructions.items(.data)[@intFromEnum(inst)].pl_op;
@@ -2468,7 +2466,7 @@ fn airDbgVarVal(self: *FuncGen, inst: Air.Inst.Index, is_arg: bool) !Builder.Val
     return .none;
 }
 
-fn airAssembly(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airAssembly(self: *FuncGen, inst: Air.Inst.Index) TodoError!Builder.Value {
     // Eventually, the Zig compiler needs to be reworked to have inline
     // assembly go through the same parsing code regardless of backend, and
     // have LLVM-flavored inline assembly be *output* from that assembler.
@@ -2530,7 +2528,7 @@ fn airAssembly(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
             const output_inst = try self.resolveInst(output.operand);
             const output_ty = self.typeOf(output.operand);
             assert(output_ty.zigTypeTag(zcu) == .pointer);
-            const elem_llvm_ty = try o.lowerType(pt, output_ty.childType(zcu));
+            const elem_llvm_ty = try self.lowerType(output_ty.childType(zcu));
 
             switch (constraint[0]) {
                 '=' => {},
@@ -2568,7 +2566,7 @@ fn airAssembly(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
             llvm_ret_indirect[output.index] = false;
 
             const ret_ty = self.typeOfIndex(inst);
-            llvm_ret_types[llvm_ret_i] = try o.lowerType(pt, ret_ty);
+            llvm_ret_types[llvm_ret_i] = try self.lowerType(ret_ty);
             llvm_ret_i += 1;
         }
 
@@ -2607,7 +2605,7 @@ fn airAssembly(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
                 llvm_param_types[llvm_param_i] = arg_llvm_value.typeOfWip(&self.wip);
             } else {
                 const alignment = arg_ty.abiAlignment(zcu).toLlvm();
-                const arg_llvm_ty = try o.lowerType(pt, arg_ty);
+                const arg_llvm_ty = try self.lowerType(arg_ty);
                 const load_inst =
                     try self.wip.load(.normal, arg_llvm_ty, arg_llvm_value, alignment, "");
                 llvm_param_values[llvm_param_i] = load_inst;
@@ -2648,7 +2646,7 @@ fn airAssembly(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
         llvm_param_attrs[llvm_param_i] = if (constraint[0] == '*') blk: {
             if (!is_by_ref) self.maybeMarkAllowZeroAccess(arg_ty.ptrInfo(zcu));
 
-            break :blk try o.lowerType(pt, if (is_by_ref) arg_ty else arg_ty.childType(zcu));
+            break :blk try self.lowerType(if (is_by_ref) arg_ty else arg_ty.childType(zcu));
         } else .none;
 
         llvm_param_i += 1;
@@ -2662,7 +2660,7 @@ fn airAssembly(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
         if (constraint[0] != '+') continue;
 
         const rw_ty = self.typeOf(output.operand);
-        const llvm_elem_ty = try o.lowerType(pt, rw_ty.childType(zcu));
+        const llvm_elem_ty = try self.lowerType(rw_ty.childType(zcu));
         if (llvm_ret_indirect[output.index]) {
             llvm_param_values[llvm_param_i] = llvm_rw_vals[output.index];
             llvm_param_types[llvm_param_i] = llvm_rw_vals[output.index].typeOfWip(&self.wip);
@@ -2855,7 +2853,7 @@ fn airIsNonNull(
     inst: Air.Inst.Index,
     operand_is_ptr: bool,
     cond: Builder.IntegerCondition,
-) !Builder.Value {
+) Allocator.Error!Builder.Value {
     const o = self.object;
     const pt = self.pt;
     const zcu = pt.zcu;
@@ -2863,7 +2861,7 @@ fn airIsNonNull(
     const operand = try self.resolveInst(un_op);
     const operand_ty = self.typeOf(un_op);
     const optional_ty = if (operand_is_ptr) operand_ty.childType(zcu) else operand_ty;
-    const optional_llvm_ty = try o.lowerType(pt, optional_ty);
+    const optional_llvm_ty = try self.lowerType(optional_ty);
     const payload_ty = optional_ty.optionalChild(zcu);
 
     const access_kind: Builder.MemoryAccessKind =
@@ -2905,7 +2903,7 @@ fn airIsErr(
     inst: Air.Inst.Index,
     cond: Builder.IntegerCondition,
     operand_is_ptr: bool,
-) !Builder.Value {
+) Allocator.Error!Builder.Value {
     const o = self.object;
     const pt = self.pt;
     const zcu = pt.zcu;
@@ -2914,7 +2912,7 @@ fn airIsErr(
     const operand_ty = self.typeOf(un_op);
     const err_union_ty = if (operand_is_ptr) operand_ty.childType(zcu) else operand_ty;
     const payload_ty = err_union_ty.errorUnionPayload(zcu);
-    const error_type = try o.errorIntType(pt);
+    const error_type = try o.errorIntType();
     const zero = try o.builder.intValue(error_type, 0);
 
     const access_kind: Builder.MemoryAccessKind =
@@ -2933,7 +2931,7 @@ fn airIsErr(
 
     if (!payload_ty.hasRuntimeBits(zcu)) {
         const loaded = if (operand_is_ptr)
-            try self.wip.load(access_kind, try o.lowerType(pt, err_union_ty), operand, operand_ty.ptrAlignment(zcu).toLlvm(), "")
+            try self.wip.load(access_kind, try self.lowerType(err_union_ty), operand, operand_ty.ptrAlignment(zcu).toLlvm(), "")
         else
             operand;
         return self.wip.icmp(cond, loaded, zero, "");
@@ -2957,7 +2955,7 @@ fn airOptionalPayloadPtr(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!B
     return operand;
 }
 
-fn airOptionalPayloadPtrSet(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airOptionalPayloadPtrSet(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     comptime assert(optional_layout_version == 3);
 
     const o = self.object;
@@ -3002,7 +3000,7 @@ fn airOptionalPayloadPtrSet(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value
     return operand; // payload is at offset 0
 }
 
-fn airOptionalPayload(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airOptionalPayload(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const pt = self.pt;
     const zcu = pt.zcu;
     const ty_op = self.air.instructions.items(.data)[@intFromEnum(inst)].ty_op;
@@ -3019,8 +3017,7 @@ fn airOptionalPayload(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     return self.optPayloadHandle(operand, optional_ty, false);
 }
 
-fn airErrUnionPayload(self: *FuncGen, inst: Air.Inst.Index, operand_is_ptr: bool) !Builder.Value {
-    const o = self.object;
+fn airErrUnionPayload(self: *FuncGen, inst: Air.Inst.Index, operand_is_ptr: bool) Allocator.Error!Builder.Value {
     const pt = self.pt;
     const zcu = pt.zcu;
     const ty_op = self.air.instructions.items(.data)[@intFromEnum(inst)].ty_op;
@@ -3042,7 +3039,7 @@ fn airErrUnionPayload(self: *FuncGen, inst: Air.Inst.Index, operand_is_ptr: bool
     if (isByRef(payload_ty, zcu)) {
         return self.loadByRef(payload_ptr, payload_ty, payload_alignment, .normal);
     } else {
-        const payload_llvm_ty = try o.lowerType(pt, payload_ty);
+        const payload_llvm_ty = try self.lowerType(payload_ty);
         return self.wip.load(.normal, payload_llvm_ty, payload_ptr, payload_alignment, "");
     }
 }
@@ -3051,14 +3048,14 @@ fn airErrUnionErr(
     self: *FuncGen,
     inst: Air.Inst.Index,
     operand_is_ptr: bool,
-) !Builder.Value {
+) Allocator.Error!Builder.Value {
     const o = self.object;
     const pt = self.pt;
     const zcu = pt.zcu;
     const ty_op = self.air.instructions.items(.data)[@intFromEnum(inst)].ty_op;
     const operand = try self.resolveInst(ty_op.operand);
     const operand_ty = self.typeOf(ty_op.operand);
-    const error_type = try o.errorIntType(pt);
+    const error_type = try o.errorIntType();
     const err_union_ty = if (operand_is_ptr) operand_ty.childType(zcu) else operand_ty;
     if (err_union_ty.errorUnionSet(zcu).errorSetIsEmpty(zcu)) {
         if (operand_is_ptr) {
@@ -3094,7 +3091,7 @@ fn airErrUnionErr(
     return self.wip.load(access_kind, error_type, err_field_ptr, err_align.toLlvm(), "");
 }
 
-fn airErrUnionPayloadPtrSet(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airErrUnionPayloadPtrSet(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const o = self.object;
     const pt = self.pt;
     const zcu = pt.zcu;
@@ -3105,7 +3102,7 @@ fn airErrUnionPayloadPtrSet(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value
     const err_union_ptr_align = err_union_ptr_ty.ptrAlignment(zcu);
 
     const payload_ty = err_union_ty.errorUnionPayload(zcu);
-    const non_error_val = try o.builder.intValue(try o.errorIntType(pt), 0);
+    const non_error_val = try o.builder.intValue(try o.errorIntType(), 0);
 
     const access_kind: Builder.MemoryAccessKind =
         if (err_union_ptr_ty.isVolatilePtr(zcu)) .@"volatile" else .normal;
@@ -3124,18 +3121,18 @@ fn airErrUnionPayloadPtrSet(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value
     return self.ptraddConst(operand, codegen.errUnionPayloadOffset(payload_ty, zcu));
 }
 
-fn airErrReturnTrace(self: *FuncGen, _: Air.Inst.Index) !Builder.Value {
+fn airErrReturnTrace(self: *FuncGen, _: Air.Inst.Index) Allocator.Error!Builder.Value {
     assert(self.err_ret_trace != .none);
     return self.err_ret_trace;
 }
 
-fn airSetErrReturnTrace(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airSetErrReturnTrace(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const un_op = self.air.instructions.items(.data)[@intFromEnum(inst)].un_op;
     self.err_ret_trace = try self.resolveInst(un_op);
     return .none;
 }
 
-fn airSaveErrReturnTraceIndex(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airSaveErrReturnTraceIndex(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const pt = self.pt;
     const zcu = pt.zcu;
 
@@ -3184,7 +3181,7 @@ fn isNextRet(
     return false;
 }
 
-fn airWrapOptional(self: *FuncGen, body_tail: []const Air.Inst.Index) !Builder.Value {
+fn airWrapOptional(self: *FuncGen, body_tail: []const Air.Inst.Index) Allocator.Error!Builder.Value {
     const o = self.object;
     const pt = self.pt;
     const zcu = pt.zcu;
@@ -3198,7 +3195,7 @@ fn airWrapOptional(self: *FuncGen, body_tail: []const Air.Inst.Index) !Builder.V
     const optional_ty = self.typeOfIndex(inst);
     if (optional_ty.optionalReprIsPayload(zcu)) return operand;
     assert(isByRef(optional_ty, zcu)); // optionals with runtime bits are by-ref unless `optionalReprIsPayload`
-    const llvm_optional_ty = try o.lowerType(pt, optional_ty);
+    const llvm_optional_ty = try self.lowerType(optional_ty);
     const optional_ptr = if (self.isNextRet(body_tail))
         self.ret_ptr
     else brk: {
@@ -3216,7 +3213,7 @@ fn airWrapOptional(self: *FuncGen, body_tail: []const Air.Inst.Index) !Builder.V
     return optional_ptr;
 }
 
-fn airWrapErrUnionPayload(self: *FuncGen, body_tail: []const Air.Inst.Index) !Builder.Value {
+fn airWrapErrUnionPayload(self: *FuncGen, body_tail: []const Air.Inst.Index) Allocator.Error!Builder.Value {
     const o = self.object;
     const pt = self.pt;
     const zcu = pt.zcu;
@@ -3227,8 +3224,8 @@ fn airWrapErrUnionPayload(self: *FuncGen, body_tail: []const Air.Inst.Index) !Bu
     const payload_ty = self.typeOf(ty_op.operand);
     assert(payload_ty.hasRuntimeBits(zcu));
     assert(isByRef(err_un_ty, zcu)); // error unions with runtime bits are always by-ref
-    const ok_err_code = try o.builder.intValue(try o.errorIntType(pt), 0);
-    const err_un_llvm_ty = try o.lowerType(pt, err_un_ty);
+    const ok_err_code = try o.builder.intValue(try o.errorIntType(), 0);
+    const err_un_llvm_ty = try self.lowerType(err_un_ty);
 
     const result_ptr = if (self.isNextRet(body_tail))
         self.ret_ptr
@@ -3247,8 +3244,7 @@ fn airWrapErrUnionPayload(self: *FuncGen, body_tail: []const Air.Inst.Index) !Bu
     return result_ptr;
 }
 
-fn airWrapErrUnionErr(self: *FuncGen, body_tail: []const Air.Inst.Index) !Builder.Value {
-    const o = self.object;
+fn airWrapErrUnionErr(self: *FuncGen, body_tail: []const Air.Inst.Index) Allocator.Error!Builder.Value {
     const pt = self.pt;
     const zcu = pt.zcu;
     const inst = body_tail[0];
@@ -3258,7 +3254,7 @@ fn airWrapErrUnionErr(self: *FuncGen, body_tail: []const Air.Inst.Index) !Builde
     const operand = try self.resolveInst(ty_op.operand);
     if (!payload_ty.hasRuntimeBits(zcu)) return operand;
     assert(isByRef(err_un_ty, zcu)); // error unions with runtime bits are always by-ref
-    const err_un_llvm_ty = try o.lowerType(pt, err_un_ty);
+    const err_un_llvm_ty = try self.lowerType(err_un_ty);
 
     const result_ptr = if (self.isNextRet(body_tail))
         self.ret_ptr
@@ -3279,29 +3275,27 @@ fn airWrapErrUnionErr(self: *FuncGen, body_tail: []const Air.Inst.Index) !Builde
     return result_ptr;
 }
 
-fn airWasmMemorySize(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airWasmMemorySize(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const o = self.object;
-    const pt = self.pt;
     const pl_op = self.air.instructions.items(.data)[@intFromEnum(inst)].pl_op;
     const index = pl_op.payload;
-    const llvm_usize = try o.lowerType(pt, Type.usize);
+    const llvm_usize = try self.lowerType(Type.usize);
     return self.wip.callIntrinsic(.normal, .none, .@"wasm.memory.size", &.{llvm_usize}, &.{
         try o.builder.intValue(.i32, index),
     }, "");
 }
 
-fn airWasmMemoryGrow(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airWasmMemoryGrow(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const o = self.object;
-    const pt = self.pt;
     const pl_op = self.air.instructions.items(.data)[@intFromEnum(inst)].pl_op;
     const index = pl_op.payload;
-    const llvm_isize = try o.lowerType(pt, Type.isize);
+    const llvm_isize = try self.lowerType(Type.isize);
     return self.wip.callIntrinsic(.normal, .none, .@"wasm.memory.grow", &.{llvm_isize}, &.{
         try o.builder.intValue(.i32, index), try self.resolveInst(pl_op.operand),
     }, "");
 }
 
-fn airRuntimeNavPtr(fg: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airRuntimeNavPtr(fg: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const o = fg.object;
     const pt = fg.pt;
     const ty_nav = fg.air.instructions.items(.data)[@intFromEnum(inst)].ty_nav;
@@ -3309,8 +3303,7 @@ fn airRuntimeNavPtr(fg: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     return llvm_ptr_const.toValue();
 }
 
-fn airMin(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
-    const o = self.object;
+fn airMin(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const pt = self.pt;
     const zcu = pt.zcu;
     const bin_op = self.air.instructions.items(.data)[@intFromEnum(inst)].bin_op;
@@ -3324,14 +3317,13 @@ fn airMin(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
         .normal,
         .none,
         if (scalar_ty.isSignedInt(zcu)) .smin else .umin,
-        &.{try o.lowerType(pt, inst_ty)},
+        &.{try self.lowerType(inst_ty)},
         &.{ lhs, rhs },
         "",
     );
 }
 
-fn airMax(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
-    const o = self.object;
+fn airMax(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const pt = self.pt;
     const zcu = pt.zcu;
     const bin_op = self.air.instructions.items(.data)[@intFromEnum(inst)].bin_op;
@@ -3345,24 +3337,22 @@ fn airMax(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
         .normal,
         .none,
         if (scalar_ty.isSignedInt(zcu)) .smax else .umax,
-        &.{try o.lowerType(pt, inst_ty)},
+        &.{try self.lowerType(inst_ty)},
         &.{ lhs, rhs },
         "",
     );
 }
 
-fn airSlice(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
-    const o = self.object;
-    const pt = self.pt;
+fn airSlice(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const ty_pl = self.air.instructions.items(.data)[@intFromEnum(inst)].ty_pl;
     const bin_op = self.air.extraData(Air.Bin, ty_pl.payload).data;
     const ptr = try self.resolveInst(bin_op.lhs);
     const len = try self.resolveInst(bin_op.rhs);
     const inst_ty = self.typeOfIndex(inst);
-    return self.wip.buildAggregate(try o.lowerType(pt, inst_ty), &.{ ptr, len }, "");
+    return self.wip.buildAggregate(try self.lowerType(inst_ty), &.{ ptr, len }, "");
 }
 
-fn airAdd(self: *FuncGen, inst: Air.Inst.Index, fast: Builder.FastMathKind) !Builder.Value {
+fn airAdd(self: *FuncGen, inst: Air.Inst.Index, fast: Builder.FastMathKind) Allocator.Error!Builder.Value {
     const zcu = self.pt.zcu;
     const bin_op = self.air.instructions.items(.data)[@intFromEnum(inst)].bin_op;
     const lhs = try self.resolveInst(bin_op.lhs);
@@ -3379,7 +3369,7 @@ fn airSafeArithmetic(
     inst: Air.Inst.Index,
     signed_intrinsic: Builder.Intrinsic,
     unsigned_intrinsic: Builder.Intrinsic,
-) !Builder.Value {
+) Allocator.Error!Builder.Value {
     const o = fg.object;
     const pt = fg.pt;
     const zcu = pt.zcu;
@@ -3391,7 +3381,7 @@ fn airSafeArithmetic(
     const scalar_ty = inst_ty.scalarType(zcu);
 
     const intrinsic = if (scalar_ty.isSignedInt(zcu)) signed_intrinsic else unsigned_intrinsic;
-    const llvm_inst_ty = try o.lowerType(pt, inst_ty);
+    const llvm_inst_ty = try fg.lowerType(inst_ty);
     const results =
         try fg.wip.callIntrinsic(.normal, .none, intrinsic, &.{llvm_inst_ty}, &.{ lhs, rhs }, "");
 
@@ -3420,7 +3410,7 @@ fn airSafeArithmetic(
     return fg.wip.extractValue(results, &.{0}, "");
 }
 
-fn airAddWrap(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airAddWrap(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const bin_op = self.air.instructions.items(.data)[@intFromEnum(inst)].bin_op;
     const lhs = try self.resolveInst(bin_op.lhs);
     const rhs = try self.resolveInst(bin_op.rhs);
@@ -3428,8 +3418,7 @@ fn airAddWrap(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     return self.wip.bin(.add, lhs, rhs, "");
 }
 
-fn airAddSat(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
-    const o = self.object;
+fn airAddSat(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const pt = self.pt;
     const zcu = pt.zcu;
     const bin_op = self.air.instructions.items(.data)[@intFromEnum(inst)].bin_op;
@@ -3442,13 +3431,13 @@ fn airAddSat(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
         .normal,
         .none,
         if (scalar_ty.isSignedInt(zcu)) .@"sadd.sat" else .@"uadd.sat",
-        &.{try o.lowerType(pt, inst_ty)},
+        &.{try self.lowerType(inst_ty)},
         &.{ lhs, rhs },
         "",
     );
 }
 
-fn airSub(self: *FuncGen, inst: Air.Inst.Index, fast: Builder.FastMathKind) !Builder.Value {
+fn airSub(self: *FuncGen, inst: Air.Inst.Index, fast: Builder.FastMathKind) Allocator.Error!Builder.Value {
     const zcu = self.pt.zcu;
     const bin_op = self.air.instructions.items(.data)[@intFromEnum(inst)].bin_op;
     const lhs = try self.resolveInst(bin_op.lhs);
@@ -3460,7 +3449,7 @@ fn airSub(self: *FuncGen, inst: Air.Inst.Index, fast: Builder.FastMathKind) !Bui
     return self.wip.bin(if (scalar_ty.isSignedInt(zcu)) .@"sub nsw" else .@"sub nuw", lhs, rhs, "");
 }
 
-fn airSubWrap(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airSubWrap(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const bin_op = self.air.instructions.items(.data)[@intFromEnum(inst)].bin_op;
     const lhs = try self.resolveInst(bin_op.lhs);
     const rhs = try self.resolveInst(bin_op.rhs);
@@ -3468,8 +3457,7 @@ fn airSubWrap(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     return self.wip.bin(.sub, lhs, rhs, "");
 }
 
-fn airSubSat(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
-    const o = self.object;
+fn airSubSat(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const pt = self.pt;
     const zcu = pt.zcu;
     const bin_op = self.air.instructions.items(.data)[@intFromEnum(inst)].bin_op;
@@ -3482,13 +3470,13 @@ fn airSubSat(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
         .normal,
         .none,
         if (scalar_ty.isSignedInt(zcu)) .@"ssub.sat" else .@"usub.sat",
-        &.{try o.lowerType(pt, inst_ty)},
+        &.{try self.lowerType(inst_ty)},
         &.{ lhs, rhs },
         "",
     );
 }
 
-fn airMul(self: *FuncGen, inst: Air.Inst.Index, fast: Builder.FastMathKind) !Builder.Value {
+fn airMul(self: *FuncGen, inst: Air.Inst.Index, fast: Builder.FastMathKind) Allocator.Error!Builder.Value {
     const zcu = self.pt.zcu;
     const bin_op = self.air.instructions.items(.data)[@intFromEnum(inst)].bin_op;
     const lhs = try self.resolveInst(bin_op.lhs);
@@ -3500,7 +3488,7 @@ fn airMul(self: *FuncGen, inst: Air.Inst.Index, fast: Builder.FastMathKind) !Bui
     return self.wip.bin(if (scalar_ty.isSignedInt(zcu)) .@"mul nsw" else .@"mul nuw", lhs, rhs, "");
 }
 
-fn airMulWrap(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airMulWrap(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const bin_op = self.air.instructions.items(.data)[@intFromEnum(inst)].bin_op;
     const lhs = try self.resolveInst(bin_op.lhs);
     const rhs = try self.resolveInst(bin_op.rhs);
@@ -3508,8 +3496,7 @@ fn airMulWrap(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     return self.wip.bin(.mul, lhs, rhs, "");
 }
 
-fn airMulSat(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
-    const o = self.object;
+fn airMulSat(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const pt = self.pt;
     const zcu = pt.zcu;
     const bin_op = self.air.instructions.items(.data)[@intFromEnum(inst)].bin_op;
@@ -3522,13 +3509,13 @@ fn airMulSat(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
         .normal,
         .none,
         if (scalar_ty.isSignedInt(zcu)) .@"smul.fix.sat" else .@"umul.fix.sat",
-        &.{try o.lowerType(pt, inst_ty)},
+        &.{try self.lowerType(inst_ty)},
         &.{ lhs, rhs, .@"0" },
         "",
     );
 }
 
-fn airDivFloat(self: *FuncGen, inst: Air.Inst.Index, fast: Builder.FastMathKind) !Builder.Value {
+fn airDivFloat(self: *FuncGen, inst: Air.Inst.Index, fast: Builder.FastMathKind) Allocator.Error!Builder.Value {
     const bin_op = self.air.instructions.items(.data)[@intFromEnum(inst)].bin_op;
     const lhs = try self.resolveInst(bin_op.lhs);
     const rhs = try self.resolveInst(bin_op.rhs);
@@ -3537,7 +3524,7 @@ fn airDivFloat(self: *FuncGen, inst: Air.Inst.Index, fast: Builder.FastMathKind)
     return self.buildFloatOp(.div, fast, inst_ty, 2, .{ lhs, rhs });
 }
 
-fn airDivTrunc(self: *FuncGen, inst: Air.Inst.Index, fast: Builder.FastMathKind) !Builder.Value {
+fn airDivTrunc(self: *FuncGen, inst: Air.Inst.Index, fast: Builder.FastMathKind) Allocator.Error!Builder.Value {
     const zcu = self.pt.zcu;
     const bin_op = self.air.instructions.items(.data)[@intFromEnum(inst)].bin_op;
     const lhs = try self.resolveInst(bin_op.lhs);
@@ -3552,7 +3539,7 @@ fn airDivTrunc(self: *FuncGen, inst: Air.Inst.Index, fast: Builder.FastMathKind)
     return self.wip.bin(if (scalar_ty.isSignedInt(zcu)) .sdiv else .udiv, lhs, rhs, "");
 }
 
-fn airDivFloor(self: *FuncGen, inst: Air.Inst.Index, fast: Builder.FastMathKind) !Builder.Value {
+fn airDivFloor(self: *FuncGen, inst: Air.Inst.Index, fast: Builder.FastMathKind) Allocator.Error!Builder.Value {
     const o = self.object;
     const pt = self.pt;
     const zcu = pt.zcu;
@@ -3567,7 +3554,7 @@ fn airDivFloor(self: *FuncGen, inst: Air.Inst.Index, fast: Builder.FastMathKind)
         return self.buildFloatOp(.floor, fast, inst_ty, 1, .{result});
     }
     if (scalar_ty.isSignedInt(zcu)) {
-        const inst_llvm_ty = try o.lowerType(pt, inst_ty);
+        const inst_llvm_ty = try self.lowerType(inst_ty);
 
         const ExpectedContents = [std.math.big.int.calcTwosCompLimbCount(256)]std.math.big.Limb;
         var stack align(@max(
@@ -3603,7 +3590,7 @@ fn airDivFloor(self: *FuncGen, inst: Air.Inst.Index, fast: Builder.FastMathKind)
     return self.wip.bin(.udiv, lhs, rhs, "");
 }
 
-fn airDivExact(self: *FuncGen, inst: Air.Inst.Index, fast: Builder.FastMathKind) !Builder.Value {
+fn airDivExact(self: *FuncGen, inst: Air.Inst.Index, fast: Builder.FastMathKind) Allocator.Error!Builder.Value {
     const zcu = self.pt.zcu;
     const bin_op = self.air.instructions.items(.data)[@intFromEnum(inst)].bin_op;
     const lhs = try self.resolveInst(bin_op.lhs);
@@ -3620,7 +3607,7 @@ fn airDivExact(self: *FuncGen, inst: Air.Inst.Index, fast: Builder.FastMathKind)
     );
 }
 
-fn airRem(self: *FuncGen, inst: Air.Inst.Index, fast: Builder.FastMathKind) !Builder.Value {
+fn airRem(self: *FuncGen, inst: Air.Inst.Index, fast: Builder.FastMathKind) Allocator.Error!Builder.Value {
     const zcu = self.pt.zcu;
     const bin_op = self.air.instructions.items(.data)[@intFromEnum(inst)].bin_op;
     const lhs = try self.resolveInst(bin_op.lhs);
@@ -3636,7 +3623,7 @@ fn airRem(self: *FuncGen, inst: Air.Inst.Index, fast: Builder.FastMathKind) !Bui
         .urem, lhs, rhs, "");
 }
 
-fn airMod(self: *FuncGen, inst: Air.Inst.Index, fast: Builder.FastMathKind) !Builder.Value {
+fn airMod(self: *FuncGen, inst: Air.Inst.Index, fast: Builder.FastMathKind) Allocator.Error!Builder.Value {
     const o = self.object;
     const pt = self.pt;
     const zcu = pt.zcu;
@@ -3644,7 +3631,7 @@ fn airMod(self: *FuncGen, inst: Air.Inst.Index, fast: Builder.FastMathKind) !Bui
     const lhs = try self.resolveInst(bin_op.lhs);
     const rhs = try self.resolveInst(bin_op.rhs);
     const inst_ty = self.typeOfIndex(inst);
-    const inst_llvm_ty = try o.lowerType(pt, inst_ty);
+    const inst_llvm_ty = try self.lowerType(inst_ty);
     const scalar_ty = inst_ty.scalarType(zcu);
 
     if (scalar_ty.isRuntimeFloat()) {
@@ -3690,7 +3677,7 @@ fn airMod(self: *FuncGen, inst: Air.Inst.Index, fast: Builder.FastMathKind) !Bui
     return self.wip.bin(.urem, lhs, rhs, "");
 }
 
-fn airPtrAdd(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airPtrAdd(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const zcu = self.pt.zcu;
     const ty_pl = self.air.instructions.items(.data)[@intFromEnum(inst)].ty_pl;
     const bin_op = self.air.extraData(Air.Bin, ty_pl.payload).data;
@@ -3705,14 +3692,14 @@ fn airPtrAdd(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     return self.ptraddScaled(ptr, index, elem_ty.abiSize(zcu));
 }
 
-fn airPtrSub(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airPtrSub(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const o = self.object;
     const pt = self.pt;
     const zcu = pt.zcu;
     const ty_pl = self.air.instructions.items(.data)[@intFromEnum(inst)].ty_pl;
     const bin_op = self.air.extraData(Air.Bin, ty_pl.payload).data;
     const ptr_or_slice = try self.resolveInst(bin_op.lhs);
-    const llvm_usize_ty = try o.lowerType(pt, .usize);
+    const llvm_usize_ty = try self.lowerType(.usize);
     const ptr_ty = self.typeOf(bin_op.lhs);
     const elem_ty = ptr_ty.indexableElem(zcu);
     const ptr = switch (ptr_ty.ptrSize(zcu)) {
@@ -3722,7 +3709,7 @@ fn airPtrSub(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     const scale_val = try o.builder.intValue(llvm_usize_ty, -@as(i65, elem_ty.abiSize(zcu)));
     const positive_index = try self.resolveInst(bin_op.rhs);
     const negative_offset = try self.wip.bin(.@"mul nsw", positive_index, scale_val, "");
-    return self.ptradd(ptr, negative_offset);
+    return self.wip.gep(.inbounds, .i8, ptr, &.{negative_offset}, "");
 }
 
 fn airOverflow(
@@ -3730,8 +3717,7 @@ fn airOverflow(
     inst: Air.Inst.Index,
     signed_intrinsic: Builder.Intrinsic,
     unsigned_intrinsic: Builder.Intrinsic,
-) !Builder.Value {
-    const o = self.object;
+) Allocator.Error!Builder.Value {
     const pt = self.pt;
     const zcu = pt.zcu;
     const ty_pl = self.air.instructions.items(.data)[@intFromEnum(inst)].ty_pl;
@@ -3746,8 +3732,8 @@ fn airOverflow(
     assert(isByRef(inst_ty, zcu)); // auto structs are by-ref
 
     const intrinsic = if (scalar_ty.isSignedInt(zcu)) signed_intrinsic else unsigned_intrinsic;
-    const llvm_inst_ty = try o.lowerType(pt, inst_ty);
-    const llvm_lhs_ty = try o.lowerType(pt, lhs_ty);
+    const llvm_inst_ty = try self.lowerType(inst_ty);
+    const llvm_lhs_ty = try self.lowerType(lhs_ty);
     const results =
         try self.wip.callIntrinsic(.normal, .none, intrinsic, &.{llvm_lhs_ty}, &.{ lhs, rhs }, "");
 
@@ -3778,7 +3764,7 @@ fn buildElementwiseCall(
     args_vectors: []const Builder.Value,
     result_vector: Builder.Value,
     vector_len: usize,
-) !Builder.Value {
+) Allocator.Error!Builder.Value {
     const o = self.object;
     assert(args_vectors.len <= 3);
 
@@ -3805,25 +3791,6 @@ fn buildElementwiseCall(
     return result;
 }
 
-fn getLibcFunction(
-    self: *FuncGen,
-    fn_name: Builder.StrtabString,
-    param_types: []const Builder.Type,
-    return_type: Builder.Type,
-) Allocator.Error!Builder.Function.Index {
-    const o = self.object;
-    if (o.builder.getGlobal(fn_name)) |global| return switch (global.ptrConst(&o.builder).kind) {
-        .alias => |alias| alias.getAliasee(&o.builder).ptrConst(&o.builder).kind.function,
-        .function => |function| function,
-        .variable, .replaced => unreachable,
-    };
-    return o.builder.addFunction(
-        try o.builder.fnType(return_type, param_types, .normal),
-        fn_name,
-        toLlvmAddressSpace(.generic, self.pt.zcu.getTarget()),
-    );
-}
-
 /// Creates a floating point comparison by lowering to the appropriate
 /// hardware instruction or softfloat routine for the target
 fn buildFloatCmp(
@@ -3832,13 +3799,13 @@ fn buildFloatCmp(
     pred: math.CompareOperator,
     ty: Type,
     params: [2]Builder.Value,
-) !Builder.Value {
+) Allocator.Error!Builder.Value {
     const o = self.object;
     const pt = self.pt;
     const zcu = pt.zcu;
     const target = zcu.getTarget();
     const scalar_ty = ty.scalarType(zcu);
-    const scalar_llvm_ty = try o.lowerType(pt, scalar_ty);
+    const scalar_llvm_ty = try self.lowerType(scalar_ty);
 
     if (intrinsicsAllowed(scalar_ty, target)) {
         const cond: Builder.FloatCondition = switch (pred) {
@@ -3864,7 +3831,7 @@ fn buildFloatCmp(
     };
     const fn_name = try o.builder.strtabStringFmt("__{s}{s}f2", .{ fn_base_name, compiler_rt_float_abbrev });
 
-    const libc_fn = try self.getLibcFunction(fn_name, &.{ scalar_llvm_ty, scalar_llvm_ty }, .i32);
+    const libc_fn = try o.getLibcFunction(fn_name, &.{ scalar_llvm_ty, scalar_llvm_ty }, .i32);
 
     const int_cond: Builder.IntegerCondition = switch (pred) {
         .eq => .eq,
@@ -3939,13 +3906,13 @@ fn buildFloatOp(
     ty: Type,
     comptime params_len: usize,
     params: [params_len]Builder.Value,
-) !Builder.Value {
+) Allocator.Error!Builder.Value {
     const o = self.object;
     const pt = self.pt;
     const zcu = pt.zcu;
     const target = zcu.getTarget();
     const scalar_ty = ty.scalarType(zcu);
-    const llvm_ty = try o.lowerType(pt, ty);
+    const llvm_ty = try self.lowerType(ty);
 
     if (op != .tan and intrinsicsAllowed(scalar_ty, target)) switch (op) {
         // Some operations are dedicated LLVM instructions, not available as intrinsics
@@ -4048,7 +4015,7 @@ fn buildFloatOp(
     };
 
     const scalar_llvm_ty = llvm_ty.scalarType(&o.builder);
-    const libc_fn = try self.getLibcFunction(
+    const libc_fn = try o.getLibcFunction(
         fn_name,
         ([1]Builder.Type{scalar_llvm_ty} ** 3)[0..params.len],
         scalar_llvm_ty,
@@ -4069,7 +4036,7 @@ fn buildFloatOp(
     );
 }
 
-fn airMulAdd(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airMulAdd(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const pl_op = self.air.instructions.items(.data)[@intFromEnum(inst)].pl_op;
     const extra = self.air.extraData(Air.Bin, pl_op.payload).data;
 
@@ -4081,8 +4048,7 @@ fn airMulAdd(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     return self.buildFloatOp(.fma, .normal, ty, 3, .{ mulend1, mulend2, addend });
 }
 
-fn airShlWithOverflow(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
-    const o = self.object;
+fn airShlWithOverflow(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const pt = self.pt;
     const zcu = pt.zcu;
     const ty_pl = self.air.instructions.items(.data)[@intFromEnum(inst)].ty_pl;
@@ -4092,15 +4058,19 @@ fn airShlWithOverflow(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     const rhs = try self.resolveInst(extra.rhs);
 
     const lhs_ty = self.typeOf(extra.lhs);
-    if (lhs_ty.isVector(zcu) and !self.typeOf(extra.rhs).isVector(zcu))
-        return self.todo("implement vector shifts with scalar rhs", .{});
+    if (lhs_ty.isVector(zcu) and !self.typeOf(extra.rhs).isVector(zcu)) {
+        // `Sema` does not currently emit this pattern---instead it is specific to `Air.Legalize`
+        // features which we do not use. Therefore this branch is currently impossible.
+        unreachable;
+    }
+
     const lhs_scalar_ty = lhs_ty.scalarType(zcu);
 
     const dest_ty = self.typeOfIndex(inst);
     assert(isByRef(dest_ty, zcu)); // auto structs are by-ref
-    const llvm_dest_ty = try o.lowerType(pt, dest_ty);
+    const llvm_dest_ty = try self.lowerType(dest_ty);
 
-    const casted_rhs = try self.wip.conv(.unsigned, rhs, try o.lowerType(pt, lhs_ty), "");
+    const casted_rhs = try self.wip.conv(.unsigned, rhs, try self.lowerType(lhs_ty), "");
 
     const result = try self.wip.bin(.shl, lhs, casted_rhs, "");
     const reconstructed = try self.wip.bin(if (lhs_scalar_ty.isSignedInt(zcu))
@@ -4128,29 +4098,28 @@ fn airShlWithOverflow(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     return alloca_inst;
 }
 
-fn airAnd(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airAnd(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const bin_op = self.air.instructions.items(.data)[@intFromEnum(inst)].bin_op;
     const lhs = try self.resolveInst(bin_op.lhs);
     const rhs = try self.resolveInst(bin_op.rhs);
     return self.wip.bin(.@"and", lhs, rhs, "");
 }
 
-fn airOr(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airOr(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const bin_op = self.air.instructions.items(.data)[@intFromEnum(inst)].bin_op;
     const lhs = try self.resolveInst(bin_op.lhs);
     const rhs = try self.resolveInst(bin_op.rhs);
     return self.wip.bin(.@"or", lhs, rhs, "");
 }
 
-fn airXor(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airXor(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const bin_op = self.air.instructions.items(.data)[@intFromEnum(inst)].bin_op;
     const lhs = try self.resolveInst(bin_op.lhs);
     const rhs = try self.resolveInst(bin_op.rhs);
     return self.wip.bin(.xor, lhs, rhs, "");
 }
 
-fn airShlExact(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
-    const o = self.object;
+fn airShlExact(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const pt = self.pt;
     const zcu = pt.zcu;
     const bin_op = self.air.instructions.items(.data)[@intFromEnum(inst)].bin_op;
@@ -4159,19 +4128,21 @@ fn airShlExact(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     const rhs = try self.resolveInst(bin_op.rhs);
 
     const lhs_ty = self.typeOf(bin_op.lhs);
-    if (lhs_ty.isVector(zcu) and !self.typeOf(bin_op.rhs).isVector(zcu))
-        return self.todo("implement vector shifts with scalar rhs", .{});
+    if (lhs_ty.isVector(zcu) and !self.typeOf(bin_op.rhs).isVector(zcu)) {
+        // `Sema` does not currently emit this pattern---instead it is specific to `Air.Legalize`
+        // features which we do not use. Therefore this branch is currently impossible.
+        unreachable;
+    }
     const lhs_scalar_ty = lhs_ty.scalarType(zcu);
 
-    const casted_rhs = try self.wip.conv(.unsigned, rhs, try o.lowerType(pt, lhs_ty), "");
+    const casted_rhs = try self.wip.conv(.unsigned, rhs, try self.lowerType(lhs_ty), "");
     return self.wip.bin(if (lhs_scalar_ty.isSignedInt(zcu))
         .@"shl nsw"
     else
         .@"shl nuw", lhs, casted_rhs, "");
 }
 
-fn airShl(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
-    const o = self.object;
+fn airShl(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const pt = self.pt;
     const zcu = pt.zcu;
     const bin_op = self.air.instructions.items(.data)[@intFromEnum(inst)].bin_op;
@@ -4180,14 +4151,16 @@ fn airShl(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     const rhs = try self.resolveInst(bin_op.rhs);
 
     const lhs_ty = self.typeOf(bin_op.lhs);
-    if (lhs_ty.isVector(zcu) and !self.typeOf(bin_op.rhs).isVector(zcu))
-        return self.todo("implement vector shifts with scalar rhs", .{});
-
-    const casted_rhs = try self.wip.conv(.unsigned, rhs, try o.lowerType(pt, lhs_ty), "");
+    if (lhs_ty.isVector(zcu) and !self.typeOf(bin_op.rhs).isVector(zcu)) {
+        // `Sema` does not currently emit this pattern---instead it is specific to `Air.Legalize`
+        // features which we do not use. Therefore this branch is currently impossible.
+        unreachable;
+    }
+    const casted_rhs = try self.wip.conv(.unsigned, rhs, try self.lowerType(lhs_ty), "");
     return self.wip.bin(.shl, lhs, casted_rhs, "");
 }
 
-fn airShlSat(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airShlSat(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const o = self.object;
     const pt = self.pt;
     const zcu = pt.zcu;
@@ -4198,15 +4171,18 @@ fn airShlSat(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
 
     const lhs_ty = self.typeOf(bin_op.lhs);
     const lhs_info = lhs_ty.intInfo(zcu);
-    const llvm_lhs_ty = try o.lowerType(pt, lhs_ty);
+    const llvm_lhs_ty = try self.lowerType(lhs_ty);
     const llvm_lhs_scalar_ty = llvm_lhs_ty.scalarType(&o.builder);
 
     const rhs_ty = self.typeOf(bin_op.rhs);
-    if (lhs_ty.isVector(zcu) and !rhs_ty.isVector(zcu))
-        return self.todo("implement vector shifts with scalar rhs", .{});
+    if (lhs_ty.isVector(zcu) and !rhs_ty.isVector(zcu)) {
+        // `Sema` does not currently emit this pattern---instead it is specific to `Air.Legalize`
+        // features which we do not use. Therefore this branch is currently impossible.
+        unreachable;
+    }
     const rhs_info = rhs_ty.intInfo(zcu);
     assert(rhs_info.signedness == .unsigned);
-    const llvm_rhs_ty = try o.lowerType(pt, rhs_ty);
+    const llvm_rhs_ty = try self.lowerType(rhs_ty);
     const llvm_rhs_scalar_ty = llvm_rhs_ty.scalarType(&o.builder);
 
     const result = try self.wip.callIntrinsic(
@@ -4267,8 +4243,7 @@ fn airShlSat(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     return self.wip.select(.normal, in_range, result, lhs_sat, "");
 }
 
-fn airShr(self: *FuncGen, inst: Air.Inst.Index, is_exact: bool) !Builder.Value {
-    const o = self.object;
+fn airShr(self: *FuncGen, inst: Air.Inst.Index, is_exact: bool) Allocator.Error!Builder.Value {
     const pt = self.pt;
     const zcu = pt.zcu;
     const bin_op = self.air.instructions.items(.data)[@intFromEnum(inst)].bin_op;
@@ -4277,11 +4252,14 @@ fn airShr(self: *FuncGen, inst: Air.Inst.Index, is_exact: bool) !Builder.Value {
     const rhs = try self.resolveInst(bin_op.rhs);
 
     const lhs_ty = self.typeOf(bin_op.lhs);
-    if (lhs_ty.isVector(zcu) and !self.typeOf(bin_op.rhs).isVector(zcu))
-        return self.todo("implement vector shifts with scalar rhs", .{});
+    if (lhs_ty.isVector(zcu) and !self.typeOf(bin_op.rhs).isVector(zcu)) {
+        // `Sema` does not currently emit this pattern---instead it is specific to `Air.Legalize`
+        // features which we do not use. Therefore this branch is currently impossible.
+        unreachable;
+    }
     const lhs_scalar_ty = lhs_ty.scalarType(zcu);
 
-    const casted_rhs = try self.wip.conv(.unsigned, rhs, try o.lowerType(pt, lhs_ty), "");
+    const casted_rhs = try self.wip.conv(.unsigned, rhs, try self.lowerType(lhs_ty), "");
     const is_signed_int = lhs_scalar_ty.isSignedInt(zcu);
 
     return self.wip.bin(if (is_exact)
@@ -4289,7 +4267,7 @@ fn airShr(self: *FuncGen, inst: Air.Inst.Index, is_exact: bool) !Builder.Value {
     else if (is_signed_int) .ashr else .lshr, lhs, casted_rhs, "");
 }
 
-fn airAbs(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airAbs(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const o = self.object;
     const pt = self.pt;
     const zcu = pt.zcu;
@@ -4303,7 +4281,7 @@ fn airAbs(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
             .normal,
             .none,
             .abs,
-            &.{try o.lowerType(pt, operand_ty)},
+            &.{try self.lowerType(operand_ty)},
             &.{ operand, try o.builder.intValue(.i1, 0) },
             "",
         ),
@@ -4312,13 +4290,13 @@ fn airAbs(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     }
 }
 
-fn airIntCast(fg: *FuncGen, inst: Air.Inst.Index, safety: bool) !Builder.Value {
+fn airIntCast(fg: *FuncGen, inst: Air.Inst.Index, safety: bool) Allocator.Error!Builder.Value {
     const o = fg.object;
     const pt = fg.pt;
     const zcu = pt.zcu;
     const ty_op = fg.air.instructions.items(.data)[@intFromEnum(inst)].ty_op;
     const dest_ty = fg.typeOfIndex(inst);
-    const dest_llvm_ty = try o.lowerType(pt, dest_ty);
+    const dest_llvm_ty = try fg.lowerType(dest_ty);
     const operand = try fg.resolveInst(ty_op.operand);
     const operand_ty = fg.typeOf(ty_op.operand);
     const operand_info = operand_ty.intInfo(zcu);
@@ -4346,8 +4324,8 @@ fn airIntCast(fg: *FuncGen, inst: Air.Inst.Index, safety: bool) !Builder.Value {
 
         if (!have_min_check and !have_max_check) break :bounds_check;
 
-        const operand_llvm_ty = try o.lowerType(pt, operand_ty);
-        const operand_scalar_llvm_ty = try o.lowerType(pt, operand_scalar);
+        const operand_llvm_ty = try fg.lowerType(operand_ty);
+        const operand_scalar_llvm_ty = try fg.lowerType(operand_scalar);
 
         const is_vector = operand_ty.zigTypeTag(zcu) == .vector;
         assert(is_vector == (dest_ty.zigTypeTag(zcu) == .vector));
@@ -4401,7 +4379,7 @@ fn airIntCast(fg: *FuncGen, inst: Air.Inst.Index, safety: bool) !Builder.Value {
     }, operand, dest_llvm_ty, "");
 
     if (safety and dest_is_enum and !dest_ty.isNonexhaustiveEnum(zcu)) {
-        const llvm_fn = try fg.getIsNamedEnumValueFunction(dest_ty);
+        const llvm_fn = try o.getIsNamedEnumValueFunction(pt, dest_ty);
         const is_valid_enum_val = try fg.wip.call(
             .normal,
             .fastcc,
@@ -4422,16 +4400,14 @@ fn airIntCast(fg: *FuncGen, inst: Air.Inst.Index, safety: bool) !Builder.Value {
     return result;
 }
 
-fn airTrunc(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
-    const o = self.object;
-    const pt = self.pt;
+fn airTrunc(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const ty_op = self.air.instructions.items(.data)[@intFromEnum(inst)].ty_op;
     const operand = try self.resolveInst(ty_op.operand);
-    const dest_llvm_ty = try o.lowerType(pt, self.typeOfIndex(inst));
+    const dest_llvm_ty = try self.lowerType(self.typeOfIndex(inst));
     return self.wip.cast(.trunc, operand, dest_llvm_ty, "");
 }
 
-fn airFptrunc(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airFptrunc(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const o = self.object;
     const pt = self.pt;
     const zcu = pt.zcu;
@@ -4442,10 +4418,10 @@ fn airFptrunc(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     const target = zcu.getTarget();
 
     if (intrinsicsAllowed(dest_ty, target) and intrinsicsAllowed(operand_ty, target)) {
-        return self.wip.cast(.fptrunc, operand, try o.lowerType(pt, dest_ty), "");
+        return self.wip.cast(.fptrunc, operand, try self.lowerType(dest_ty), "");
     } else {
-        const operand_llvm_ty = try o.lowerType(pt, operand_ty);
-        const dest_llvm_ty = try o.lowerType(pt, dest_ty);
+        const operand_llvm_ty = try self.lowerType(operand_ty);
+        const dest_llvm_ty = try self.lowerType(dest_ty);
 
         const dest_bits = dest_ty.floatBits(target);
         const src_bits = operand_ty.floatBits(target);
@@ -4453,7 +4429,7 @@ fn airFptrunc(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
             compilerRtFloatAbbrev(src_bits), compilerRtFloatAbbrev(dest_bits),
         });
 
-        const libc_fn = try self.getLibcFunction(fn_name, &.{operand_llvm_ty}, dest_llvm_ty);
+        const libc_fn = try o.getLibcFunction(fn_name, &.{operand_llvm_ty}, dest_llvm_ty);
         return self.wip.call(
             .normal,
             .ccc,
@@ -4466,7 +4442,7 @@ fn airFptrunc(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     }
 }
 
-fn airFpext(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airFpext(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const o = self.object;
     const pt = self.pt;
     const zcu = pt.zcu;
@@ -4477,10 +4453,10 @@ fn airFpext(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     const target = zcu.getTarget();
 
     if (intrinsicsAllowed(dest_ty, target) and intrinsicsAllowed(operand_ty, target)) {
-        return self.wip.cast(.fpext, operand, try o.lowerType(pt, dest_ty), "");
+        return self.wip.cast(.fpext, operand, try self.lowerType(dest_ty), "");
     } else {
-        const operand_llvm_ty = try o.lowerType(pt, operand_ty);
-        const dest_llvm_ty = try o.lowerType(pt, dest_ty);
+        const operand_llvm_ty = try self.lowerType(operand_ty);
+        const dest_llvm_ty = try self.lowerType(dest_ty);
 
         const dest_bits = dest_ty.scalarType(zcu).floatBits(target);
         const src_bits = operand_ty.scalarType(zcu).floatBits(target);
@@ -4488,7 +4464,7 @@ fn airFpext(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
             compilerRtFloatAbbrev(src_bits), compilerRtFloatAbbrev(dest_bits),
         });
 
-        const libc_fn = try self.getLibcFunction(fn_name, &.{operand_llvm_ty}, dest_llvm_ty);
+        const libc_fn = try o.getLibcFunction(fn_name, &.{operand_llvm_ty}, dest_llvm_ty);
         if (dest_ty.isVector(zcu)) return self.buildElementwiseCall(
             libc_fn,
             &.{operand},
@@ -4507,7 +4483,7 @@ fn airFpext(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     }
 }
 
-fn airBitCast(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airBitCast(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const ty_op = self.air.instructions.items(.data)[@intFromEnum(inst)].ty_op;
     const operand_ty = self.typeOf(ty_op.operand);
     const inst_ty = self.typeOfIndex(inst);
@@ -4515,13 +4491,13 @@ fn airBitCast(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     return self.bitCast(operand, operand_ty, inst_ty);
 }
 
-fn bitCast(self: *FuncGen, operand: Builder.Value, operand_ty: Type, inst_ty: Type) !Builder.Value {
+fn bitCast(self: *FuncGen, operand: Builder.Value, operand_ty: Type, inst_ty: Type) Allocator.Error!Builder.Value {
     const o = self.object;
     const pt = self.pt;
     const zcu = pt.zcu;
     const operand_is_ref = isByRef(operand_ty, zcu);
     const result_is_ref = isByRef(inst_ty, zcu);
-    const llvm_dest_ty = try o.lowerType(pt, inst_ty);
+    const llvm_dest_ty = try self.lowerType(inst_ty);
 
     if (operand_is_ref and result_is_ref) {
         // They are both pointers, so just return the same opaque pointer :)
@@ -4544,11 +4520,8 @@ fn bitCast(self: *FuncGen, operand: Builder.Value, operand_ty: Type, inst_ty: Ty
     }
 
     if (operand_ty.zigTypeTag(zcu) == .vector and inst_ty.zigTypeTag(zcu) == .array) {
-        const elem_ty = inst_ty.childType(zcu);
-        assert(elem_ty.toIntern() == operand_scalar_ty.toIntern());
-        if (!result_is_ref) {
-            return self.todo("implement bitcast vector to non-ref array", .{});
-        }
+        const elem_ty = operand_scalar_ty;
+        assert(result_is_ref); // arrays are always by-ref provided they have runtime bits
         const alignment = inst_ty.abiAlignment(zcu).toLlvm();
         const array_ptr = try self.buildAlloca(llvm_dest_ty, alignment);
         const bitcast_ok = elem_ty.bitSize(zcu) == elem_ty.abiSize(zcu) * 8;
@@ -4569,9 +4542,8 @@ fn bitCast(self: *FuncGen, operand: Builder.Value, operand_ty: Type, inst_ty: Ty
         return array_ptr;
     } else if (operand_ty.zigTypeTag(zcu) == .array and inst_ty.zigTypeTag(zcu) == .vector) {
         const elem_ty = operand_ty.childType(zcu);
-        assert(elem_ty.toIntern() == inst_scalar_ty.toIntern());
-        const llvm_vector_ty = try o.lowerType(pt, inst_ty);
-        if (!operand_is_ref) return self.todo("implement bitcast non-ref array to vector", .{});
+        assert(operand_is_ref); // arrays are always by-ref provided they have runtime bits
+        const llvm_vector_ty = try self.lowerType(inst_ty);
 
         const bitcast_ok = elem_ty.bitSize(zcu) == elem_ty.abiSize(zcu) * 8;
         if (bitcast_ok) {
@@ -4582,7 +4554,7 @@ fn bitCast(self: *FuncGen, operand: Builder.Value, operand_ty: Type, inst_ty: Ty
         } else {
             // If the ABI size of the element type is not evenly divisible by size in bits;
             // a simple bitcast will not work, and we fall back to extractelement.
-            const elem_llvm_ty = try o.lowerType(pt, elem_ty);
+            const elem_llvm_ty = try self.lowerType(elem_ty);
             const elem_size = elem_ty.abiSize(zcu);
             const vector_len = operand_ty.arrayLen(zcu);
             var vector = try o.builder.poisonValue(llvm_vector_ty);
@@ -4624,7 +4596,7 @@ fn bitCast(self: *FuncGen, operand: Builder.Value, operand_ty: Type, inst_ty: Ty
     return self.wip.cast(.bitcast, operand, llvm_dest_ty, "");
 }
 
-fn airArg(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airArg(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const o = self.object;
     const pt = self.pt;
     const zcu = pt.zcu;
@@ -4714,7 +4686,7 @@ fn airArg(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     return arg_val;
 }
 
-fn airAlloc(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airAlloc(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const o = self.object;
     const pt = self.pt;
     const zcu = pt.zcu;
@@ -4723,12 +4695,12 @@ fn airAlloc(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     if (!pointee_type.hasRuntimeBits(zcu))
         return (try o.lowerPtrToVoid(pt, ptr_ty)).toValue();
 
-    const pointee_llvm_ty = try o.lowerType(pt, pointee_type);
+    const pointee_llvm_ty = try self.lowerType(pointee_type);
     const alignment = ptr_ty.ptrAlignment(zcu).toLlvm();
     return self.buildAlloca(pointee_llvm_ty, alignment);
 }
 
-fn airRetPtr(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airRetPtr(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const o = self.object;
     const pt = self.pt;
     const zcu = pt.zcu;
@@ -4737,7 +4709,7 @@ fn airRetPtr(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     if (!ret_ty.hasRuntimeBits(zcu))
         return (try o.lowerPtrToVoid(pt, ptr_ty)).toValue();
     if (self.ret_ptr != .none) return self.ret_ptr;
-    const ret_llvm_ty = try o.lowerType(pt, ret_ty);
+    const ret_llvm_ty = try self.lowerType(ret_ty);
     const alignment = ptr_ty.ptrAlignment(zcu).toLlvm();
     return self.buildAlloca(ret_llvm_ty, alignment);
 }
@@ -4753,7 +4725,7 @@ fn buildAlloca(
     return buildAllocaInner(&self.wip, llvm_ty, alignment, target);
 }
 
-fn airStore(self: *FuncGen, inst: Air.Inst.Index, safety: bool) !Builder.Value {
+fn airStore(self: *FuncGen, inst: Air.Inst.Index, safety: bool) Allocator.Error!Builder.Value {
     const o = self.object;
     const pt = self.pt;
     const zcu = pt.zcu;
@@ -4790,7 +4762,7 @@ fn airStore(self: *FuncGen, inst: Air.Inst.Index, safety: bool) !Builder.Value {
 
         self.maybeMarkAllowZeroAccess(ptr_info);
 
-        const len = try o.builder.intValue(try o.lowerType(pt, Type.usize), operand_ty.abiSize(zcu));
+        const len = try o.builder.intValue(try self.lowerType(Type.usize), operand_ty.abiSize(zcu));
         _ = try self.wip.callMemSet(
             dest_ptr,
             ptr_ty.ptrAlignment(zcu).toLlvm(),
@@ -4812,7 +4784,7 @@ fn airStore(self: *FuncGen, inst: Air.Inst.Index, safety: bool) !Builder.Value {
     return .none;
 }
 
-fn airLoad(fg: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airLoad(fg: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const pt = fg.pt;
     const zcu = pt.zcu;
     const ty_op = fg.air.instructions.items(.data)[@intFromEnum(inst)].ty_op;
@@ -4823,7 +4795,7 @@ fn airLoad(fg: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     return fg.load(ptr, ptr_ty);
 }
 
-fn airTrap(self: *FuncGen, inst: Air.Inst.Index) !void {
+fn airTrap(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!void {
     _ = inst;
     const target = self.pt.zcu.getTarget();
     if ((target.cpu.arch == .mips or target.cpu.arch == .mipsel) and
@@ -4847,17 +4819,16 @@ fn airTrap(self: *FuncGen, inst: Air.Inst.Index) !void {
     _ = try self.wip.@"unreachable"();
 }
 
-fn airBreakpoint(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airBreakpoint(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     _ = inst;
     _ = try self.wip.callIntrinsic(.normal, .none, .debugtrap, &.{}, &.{}, "");
     return .none;
 }
 
-fn airRetAddr(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airRetAddr(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     _ = inst;
     const o = self.object;
-    const pt = self.pt;
-    const llvm_usize = try o.lowerType(pt, Type.usize);
+    const llvm_usize = try self.lowerType(Type.usize);
     if (!target_util.supportsReturnAddress(self.pt.zcu.getTarget(), self.ownerModule().optimize_mode)) {
         // https://github.com/ziglang/zig/issues/11946
         return o.builder.intValue(llvm_usize, 0);
@@ -4866,19 +4837,17 @@ fn airRetAddr(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     return self.wip.cast(.ptrtoint, result, llvm_usize, "");
 }
 
-fn airFrameAddress(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airFrameAddress(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     _ = inst;
-    const o = self.object;
-    const pt = self.pt;
     const result = try self.wip.callIntrinsic(.normal, .none, .frameaddress, &.{.ptr}, &.{.@"0"}, "");
-    return self.wip.cast(.ptrtoint, result, try o.lowerType(pt, Type.usize), "");
+    return self.wip.cast(.ptrtoint, result, try self.lowerType(Type.usize), "");
 }
 
 fn airCmpxchg(
     self: *FuncGen,
     inst: Air.Inst.Index,
     kind: Builder.Function.Instruction.CmpXchg.Kind,
-) !Builder.Value {
+) Allocator.Error!Builder.Value {
     const o = self.object;
     const pt = self.pt;
     const zcu = pt.zcu;
@@ -4889,7 +4858,7 @@ fn airCmpxchg(
     var expected_value = try self.resolveInst(extra.expected_value);
     var new_value = try self.resolveInst(extra.new_value);
     const operand_ty = ptr_ty.childType(zcu);
-    const llvm_operand_ty = try o.lowerType(pt, operand_ty);
+    const llvm_operand_ty = try self.lowerType(operand_ty);
     const llvm_abi_ty = try self.getAtomicAbiType(operand_ty, false);
     if (llvm_abi_ty != .none) {
         // operand needs widening and truncating
@@ -4932,7 +4901,7 @@ fn airCmpxchg(
     const non_null_bit = try self.wip.not(success_bit, "");
 
     const payload_align = operand_ty.abiAlignment(zcu).toLlvm();
-    const alloca_inst = try self.buildAlloca(try o.lowerType(pt, optional_ty), payload_align);
+    const alloca_inst = try self.buildAlloca(try self.lowerType(optional_ty), payload_align);
 
     // Payload is always the first field at offset 0, so address is `alloca_inst`
     _ = try self.wip.store(.normal, payload, alloca_inst, payload_align);
@@ -4944,7 +4913,7 @@ fn airCmpxchg(
     return alloca_inst;
 }
 
-fn airAtomicRmw(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airAtomicRmw(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const o = self.object;
     const pt = self.pt;
     const zcu = pt.zcu;
@@ -4959,7 +4928,7 @@ fn airAtomicRmw(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     const op = toLlvmAtomicRmwBinOp(extra.op(), is_signed_int, is_float);
     const ordering = toLlvmAtomicOrdering(extra.ordering());
     const llvm_abi_ty = try self.getAtomicAbiType(operand_ty, op == .xchg);
-    const llvm_operand_ty = try o.lowerType(pt, operand_ty);
+    const llvm_operand_ty = try self.lowerType(operand_ty);
 
     const access_kind: Builder.MemoryAccessKind =
         if (ptr_ty.isVolatilePtr(zcu)) .@"volatile" else .normal;
@@ -5002,7 +4971,7 @@ fn airAtomicRmw(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
         access_kind,
         op,
         ptr,
-        try self.wip.cast(.ptrtoint, operand, try o.lowerType(pt, Type.usize), ""),
+        try self.wip.cast(.ptrtoint, operand, try self.lowerType(Type.usize), ""),
         self.sync_scope,
         ordering,
         ptr_alignment,
@@ -5010,8 +4979,7 @@ fn airAtomicRmw(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     ), llvm_operand_ty, "");
 }
 
-fn airAtomicLoad(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
-    const o = self.object;
+fn airAtomicLoad(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const pt = self.pt;
     const zcu = pt.zcu;
     const atomic_load = self.air.instructions.items(.data)[@intFromEnum(inst)].atomic_load;
@@ -5028,7 +4996,7 @@ fn airAtomicLoad(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
         Type.fromInterned(info.child).abiAlignment(zcu)).toLlvm();
     const access_kind: Builder.MemoryAccessKind =
         if (info.flags.is_volatile) .@"volatile" else .normal;
-    const elem_llvm_ty = try o.lowerType(pt, elem_ty);
+    const elem_llvm_ty = try self.lowerType(elem_ty);
 
     self.maybeMarkAllowZeroAccess(info);
 
@@ -5060,7 +5028,7 @@ fn airAtomicStore(
     self: *FuncGen,
     inst: Air.Inst.Index,
     ordering: Builder.AtomicOrdering,
-) !Builder.Value {
+) Allocator.Error!Builder.Value {
     const pt = self.pt;
     const zcu = pt.zcu;
     const bin_op = self.air.instructions.items(.data)[@intFromEnum(inst)].bin_op;
@@ -5087,7 +5055,7 @@ fn airAtomicStore(
     return .none;
 }
 
-fn airMemset(self: *FuncGen, inst: Air.Inst.Index, safety: bool) !Builder.Value {
+fn airMemset(self: *FuncGen, inst: Air.Inst.Index, safety: bool) Allocator.Error!Builder.Value {
     const o = self.object;
     const pt = self.pt;
     const zcu = pt.zcu;
@@ -5186,7 +5154,7 @@ fn airMemset(self: *FuncGen, inst: Air.Inst.Index, safety: bool) !Builder.Value 
     const body_block = try self.wip.block(1, "InlineMemsetBody");
     const end_block = try self.wip.block(1, "InlineMemsetEnd");
 
-    const llvm_usize_ty = try o.lowerType(pt, Type.usize);
+    const llvm_usize_ty = try self.lowerType(Type.usize);
     const end_ptr = switch (ptr_ty.ptrSize(zcu)) {
         .slice => try self.ptraddScaled(
             dest_ptr,
@@ -5225,7 +5193,7 @@ fn airMemset(self: *FuncGen, inst: Air.Inst.Index, safety: bool) !Builder.Value 
     return .none;
 }
 
-fn airMemcpy(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airMemcpy(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const pt = self.pt;
     const zcu = pt.zcu;
     const bin_op = self.air.instructions.items(.data)[@intFromEnum(inst)].bin_op;
@@ -5254,7 +5222,7 @@ fn airMemcpy(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     return .none;
 }
 
-fn airMemmove(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airMemmove(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const pt = self.pt;
     const zcu = pt.zcu;
     const bin_op = self.air.instructions.items(.data)[@intFromEnum(inst)].bin_op;
@@ -5279,14 +5247,15 @@ fn airMemmove(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     return .none;
 }
 
-fn airSetUnionTag(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airSetUnionTag(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const pt = self.pt;
     const zcu = pt.zcu;
     const bin_op = self.air.instructions.items(.data)[@intFromEnum(inst)].bin_op;
     const un_ptr_ty = self.typeOf(bin_op.lhs);
     const un_ty = un_ptr_ty.childType(zcu);
     const layout = un_ty.unionGetLayout(zcu);
-    assert(layout.tag_size != 0);
+
+    if (layout.tag_size == 0) return .none; // TODO: stop Sema emitting this
 
     const access_kind: Builder.MemoryAccessKind =
         if (un_ptr_ty.isVolatilePtr(zcu)) .@"volatile" else .normal;
@@ -5309,7 +5278,7 @@ fn airSetUnionTag(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     return .none;
 }
 
-fn airGetUnionTag(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airGetUnionTag(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const o = self.object;
     const pt = self.pt;
     const zcu = pt.zcu;
@@ -5319,7 +5288,7 @@ fn airGetUnionTag(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     assert(layout.tag_size != 0);
     const union_ptr = try self.resolveInst(ty_op.operand);
     if (isByRef(un_ty, zcu)) {
-        const llvm_un_ty = try o.lowerType(pt, un_ty);
+        const llvm_un_ty = try self.lowerType(un_ty);
         if (layout.payload_size == 0)
             return self.wip.load(.normal, llvm_un_ty, union_ptr, .default, "");
         const tag_index = @intFromBool(layout.tag_align.compare(.lt, layout.payload_align));
@@ -5333,7 +5302,7 @@ fn airGetUnionTag(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     }
 }
 
-fn airUnaryOp(self: *FuncGen, inst: Air.Inst.Index, comptime op: FloatOp) !Builder.Value {
+fn airUnaryOp(self: *FuncGen, inst: Air.Inst.Index, comptime op: FloatOp) Allocator.Error!Builder.Value {
     const un_op = self.air.instructions.items(.data)[@intFromEnum(inst)].un_op;
     const operand = try self.resolveInst(un_op);
     const operand_ty = self.typeOf(un_op);
@@ -5341,7 +5310,7 @@ fn airUnaryOp(self: *FuncGen, inst: Air.Inst.Index, comptime op: FloatOp) !Build
     return self.buildFloatOp(op, .normal, operand_ty, 1, .{operand});
 }
 
-fn airNeg(self: *FuncGen, inst: Air.Inst.Index, fast: Builder.FastMathKind) !Builder.Value {
+fn airNeg(self: *FuncGen, inst: Air.Inst.Index, fast: Builder.FastMathKind) Allocator.Error!Builder.Value {
     const un_op = self.air.instructions.items(.data)[@intFromEnum(inst)].un_op;
     const operand = try self.resolveInst(un_op);
     const operand_ty = self.typeOf(un_op);
@@ -5349,9 +5318,7 @@ fn airNeg(self: *FuncGen, inst: Air.Inst.Index, fast: Builder.FastMathKind) !Bui
     return self.buildFloatOp(.neg, fast, operand_ty, 1, .{operand});
 }
 
-fn airClzCtz(self: *FuncGen, inst: Air.Inst.Index, intrinsic: Builder.Intrinsic) !Builder.Value {
-    const o = self.object;
-    const pt = self.pt;
+fn airClzCtz(self: *FuncGen, inst: Air.Inst.Index, intrinsic: Builder.Intrinsic) Allocator.Error!Builder.Value {
     const ty_op = self.air.instructions.items(.data)[@intFromEnum(inst)].ty_op;
     const inst_ty = self.typeOfIndex(inst);
     const operand_ty = self.typeOf(ty_op.operand);
@@ -5361,16 +5328,14 @@ fn airClzCtz(self: *FuncGen, inst: Air.Inst.Index, intrinsic: Builder.Intrinsic)
         .normal,
         .none,
         intrinsic,
-        &.{try o.lowerType(pt, operand_ty)},
+        &.{try self.lowerType(operand_ty)},
         &.{ operand, .false },
         "",
     );
-    return self.wip.conv(.unsigned, result, try o.lowerType(pt, inst_ty), "");
+    return self.wip.conv(.unsigned, result, try self.lowerType(inst_ty), "");
 }
 
-fn airBitOp(self: *FuncGen, inst: Air.Inst.Index, intrinsic: Builder.Intrinsic) !Builder.Value {
-    const o = self.object;
-    const pt = self.pt;
+fn airBitOp(self: *FuncGen, inst: Air.Inst.Index, intrinsic: Builder.Intrinsic) Allocator.Error!Builder.Value {
     const ty_op = self.air.instructions.items(.data)[@intFromEnum(inst)].ty_op;
     const inst_ty = self.typeOfIndex(inst);
     const operand_ty = self.typeOf(ty_op.operand);
@@ -5380,14 +5345,14 @@ fn airBitOp(self: *FuncGen, inst: Air.Inst.Index, intrinsic: Builder.Intrinsic) 
         .normal,
         .none,
         intrinsic,
-        &.{try o.lowerType(pt, operand_ty)},
+        &.{try self.lowerType(operand_ty)},
         &.{operand},
         "",
     );
-    return self.wip.conv(.unsigned, result, try o.lowerType(pt, inst_ty), "");
+    return self.wip.conv(.unsigned, result, try self.lowerType(inst_ty), "");
 }
 
-fn airByteSwap(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airByteSwap(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const o = self.object;
     const pt = self.pt;
     const zcu = pt.zcu;
@@ -5398,7 +5363,7 @@ fn airByteSwap(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
 
     const inst_ty = self.typeOfIndex(inst);
     var operand = try self.resolveInst(ty_op.operand);
-    var llvm_operand_ty = try o.lowerType(pt, operand_ty);
+    var llvm_operand_ty = try self.lowerType(operand_ty);
 
     if (bits % 16 == 8) {
         // If not an even byte-multiple, we need zero-extend + shift-left 1 byte
@@ -5419,10 +5384,10 @@ fn airByteSwap(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
 
     const result =
         try self.wip.callIntrinsic(.normal, .none, .bswap, &.{llvm_operand_ty}, &.{operand}, "");
-    return self.wip.conv(.unsigned, result, try o.lowerType(pt, inst_ty), "");
+    return self.wip.conv(.unsigned, result, try self.lowerType(inst_ty), "");
 }
 
-fn airErrorSetHasValue(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airErrorSetHasValue(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const o = self.object;
     const pt = self.pt;
     const zcu = pt.zcu;
@@ -5440,7 +5405,7 @@ fn airErrorSetHasValue(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
 
     for (0..names.len) |name_index| {
         const err_int = ip.getErrorValueIfExists(names.get(ip)[name_index]).?;
-        const this_tag_int_value = try o.builder.intConst(try o.errorIntType(pt), err_int);
+        const this_tag_int_value = try o.builder.intConst(try o.errorIntType(), err_int);
         try wip_switch.addCase(this_tag_int_value, valid_block, &self.wip);
     }
     self.wip.cursor = .{ .block = valid_block };
@@ -5455,13 +5420,13 @@ fn airErrorSetHasValue(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     return phi.toValue();
 }
 
-fn airIsNamedEnumValue(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airIsNamedEnumValue(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const o = self.object;
     const un_op = self.air.instructions.items(.data)[@intFromEnum(inst)].un_op;
     const operand = try self.resolveInst(un_op);
     const enum_ty = self.typeOf(un_op);
 
-    const llvm_fn = try self.getIsNamedEnumValueFunction(enum_ty);
+    const llvm_fn = try o.getIsNamedEnumValueFunction(self.pt, enum_ty);
     return self.wip.call(
         .normal,
         .fastcc,
@@ -5473,28 +5438,7 @@ fn airIsNamedEnumValue(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     );
 }
 
-fn getIsNamedEnumValueFunction(self: *FuncGen, enum_ty: Type) !Builder.Function.Index {
-    const o = self.object;
-    const pt = self.pt;
-    const zcu = pt.zcu;
-    const ip = &zcu.intern_pool;
-
-    const gop = try o.named_enum_map.getOrPut(o.gpa, enum_ty.toIntern());
-    if (gop.found_existing) return gop.value_ptr.*;
-    errdefer assert(o.named_enum_map.remove(enum_ty.toIntern()));
-    const function_index = try o.builder.addFunction(
-        // Dummy function type; `updateIsNamedEnumValue` will replace it with the correct type.
-        // TODO: change the builder API so we don't need to do this.
-        try o.builder.fnType(.void, &.{}, .normal),
-        try o.builder.strtabStringFmt("__zig_is_named_enum_value_{f}", .{enum_ty.containerTypeName(ip).fmt(ip)}),
-        toLlvmAddressSpace(.generic, zcu.getTarget()),
-    );
-    gop.value_ptr.* = function_index;
-    try o.updateIsNamedEnumValueFunction(pt, enum_ty, function_index);
-    return function_index;
-}
-
-fn airTagName(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airTagName(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const o = self.object;
     const pt = self.pt;
     const un_op = self.air.instructions.items(.data)[@intFromEnum(inst)].un_op;
@@ -5513,34 +5457,31 @@ fn airTagName(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     );
 }
 
-fn airErrorName(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airErrorName(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const o = self.object;
     const pt = self.pt;
     const zcu = pt.zcu;
     const un_op = self.air.instructions.items(.data)[@intFromEnum(inst)].un_op;
     const operand = try self.resolveInst(un_op);
     const slice_ty = self.typeOfIndex(inst);
-    const slice_llvm_ty = try o.lowerType(pt, slice_ty);
+    const slice_llvm_ty = try self.lowerType(slice_ty);
 
     // If operand is small (e.g. `u8`), then signedness becomes a problem -- GEP always treats the index as signed.
-    const operand_usize = try self.wip.conv(.unsigned, operand, try o.lowerType(pt, .usize), "");
+    const operand_usize = try self.wip.conv(.unsigned, operand, try self.lowerType(.usize), "");
 
-    const error_name_table_ptr = try self.getErrorNameTable();
-    const error_name_table = try self.wip.load(.normal, .ptr, error_name_table_ptr.toValue(&o.builder), .default, "");
-    const error_name_ptr = try self.ptraddScaled(error_name_table, operand_usize, slice_ty.abiSize(zcu));
+    const error_name_table_ptr = try o.getErrorNameTable();
+    const error_name_ptr = try self.ptraddScaled(error_name_table_ptr.toValue(&o.builder), operand_usize, slice_ty.abiSize(zcu));
     return self.wip.load(.normal, slice_llvm_ty, error_name_ptr, .default, "");
 }
 
-fn airSplat(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
-    const o = self.object;
-    const pt = self.pt;
+fn airSplat(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const ty_op = self.air.instructions.items(.data)[@intFromEnum(inst)].ty_op;
     const scalar = try self.resolveInst(ty_op.operand);
     const vector_ty = self.typeOfIndex(inst);
-    return self.wip.splatVector(try o.lowerType(pt, vector_ty), scalar, "");
+    return self.wip.splatVector(try self.lowerType(vector_ty), scalar, "");
 }
 
-fn airSelect(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airSelect(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const pl_op = self.air.instructions.items(.data)[@intFromEnum(inst)].pl_op;
     const extra = self.air.extraData(Air.Bin, pl_op.payload).data;
     const pred = try self.resolveInst(pl_op.operand);
@@ -5550,7 +5491,7 @@ fn airSelect(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     return self.wip.select(.normal, pred, a, b, "");
 }
 
-fn airShuffleOne(fg: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airShuffleOne(fg: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const o = fg.object;
     const pt = fg.pt;
     const zcu = pt.zcu;
@@ -5561,9 +5502,9 @@ fn airShuffleOne(fg: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     const operand = try fg.resolveInst(unwrapped.operand);
     const mask = unwrapped.mask;
     const operand_ty = fg.typeOf(unwrapped.operand);
-    const llvm_operand_ty = try o.lowerType(pt, operand_ty);
-    const llvm_result_ty = try o.lowerType(pt, unwrapped.result_ty);
-    const llvm_elem_ty = try o.lowerType(pt, unwrapped.result_ty.childType(zcu));
+    const llvm_operand_ty = try fg.lowerType(operand_ty);
+    const llvm_result_ty = try fg.lowerType(unwrapped.result_ty);
+    const llvm_elem_ty = try fg.lowerType(unwrapped.result_ty.childType(zcu));
     const llvm_poison_elem = try o.builder.poisonConst(llvm_elem_ty);
     const llvm_poison_mask_elem = try o.builder.poisonConst(.i32);
     const llvm_mask_ty = try o.builder.vectorType(.normal, @intCast(mask.len), .i32);
@@ -5657,7 +5598,7 @@ fn airShuffleOne(fg: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     );
 }
 
-fn airShuffleTwo(fg: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airShuffleTwo(fg: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const o = fg.object;
     const pt = fg.pt;
     const zcu = pt.zcu;
@@ -5666,7 +5607,7 @@ fn airShuffleTwo(fg: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     const unwrapped = fg.air.unwrapShuffleTwo(zcu, inst);
 
     const mask = unwrapped.mask;
-    const llvm_elem_ty = try o.lowerType(pt, unwrapped.result_ty.childType(zcu));
+    const llvm_elem_ty = try fg.lowerType(unwrapped.result_ty.childType(zcu));
     const llvm_mask_ty = try o.builder.vectorType(.normal, @intCast(mask.len), .i32);
     const llvm_poison_mask_elem = try o.builder.poisonConst(.i32);
 
@@ -5756,10 +5697,9 @@ fn buildReducedCall(
     operand_vector: Builder.Value,
     vector_len: usize,
     accum_init: Builder.Value,
-) !Builder.Value {
+) Allocator.Error!Builder.Value {
     const o = self.object;
-    const pt = self.pt;
-    const usize_ty = try o.lowerType(pt, Type.usize);
+    const usize_ty = try self.lowerType(Type.usize);
     const llvm_vector_len = try o.builder.intValue(usize_ty, vector_len);
     const llvm_result_ty = accum_init.typeOfWip(&self.wip);
 
@@ -5811,7 +5751,7 @@ fn buildReducedCall(
     return self.wip.load(.normal, llvm_result_ty, accum_ptr, .default, "");
 }
 
-fn airReduce(self: *FuncGen, inst: Air.Inst.Index, fast: Builder.FastMathKind) !Builder.Value {
+fn airReduce(self: *FuncGen, inst: Air.Inst.Index, fast: Builder.FastMathKind) Allocator.Error!Builder.Value {
     const o = self.object;
     const pt = self.pt;
     const zcu = pt.zcu;
@@ -5820,9 +5760,9 @@ fn airReduce(self: *FuncGen, inst: Air.Inst.Index, fast: Builder.FastMathKind) !
     const reduce = self.air.instructions.items(.data)[@intFromEnum(inst)].reduce;
     const operand = try self.resolveInst(reduce.operand);
     const operand_ty = self.typeOf(reduce.operand);
-    const llvm_operand_ty = try o.lowerType(pt, operand_ty);
+    const llvm_operand_ty = try self.lowerType(operand_ty);
     const scalar_ty = self.typeOfIndex(inst);
-    const llvm_scalar_ty = try o.lowerType(pt, scalar_ty);
+    const llvm_scalar_ty = try self.lowerType(scalar_ty);
 
     switch (reduce.operation) {
         .And, .Or, .Xor => return self.wip.callIntrinsic(.normal, .none, switch (reduce.operation) {
@@ -5890,8 +5830,7 @@ fn airReduce(self: *FuncGen, inst: Air.Inst.Index, fast: Builder.FastMathKind) !
         else => unreachable,
     };
 
-    const libc_fn =
-        try self.getLibcFunction(fn_name, &.{ llvm_scalar_ty, llvm_scalar_ty }, llvm_scalar_ty);
+    const libc_fn = try o.getLibcFunction(fn_name, &.{ llvm_scalar_ty, llvm_scalar_ty }, llvm_scalar_ty);
     const init_val = switch (llvm_scalar_ty) {
         .i16 => try o.builder.intValue(.i16, @as(i16, @bitCast(
             @as(f16, switch (reduce.operation) {
@@ -5922,7 +5861,7 @@ fn airReduce(self: *FuncGen, inst: Air.Inst.Index, fast: Builder.FastMathKind) !
     return self.buildReducedCall(libc_fn, operand, operand_ty.vectorLen(zcu), init_val);
 }
 
-fn airAggregateInit(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airAggregateInit(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const o = self.object;
     const pt = self.pt;
     const zcu = pt.zcu;
@@ -5931,7 +5870,7 @@ fn airAggregateInit(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     const result_ty = self.typeOfIndex(inst);
     const len: usize = @intCast(result_ty.arrayLen(zcu));
     const elements: []const Air.Inst.Ref = @ptrCast(self.air.extra.items[ty_pl.payload..][0..len]);
-    const llvm_result_ty = try o.lowerType(pt, result_ty);
+    const llvm_result_ty = try self.lowerType(result_ty);
 
     switch (result_ty.zigTypeTag(zcu)) {
         .vector => {
@@ -5997,7 +5936,7 @@ fn airAggregateInit(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
                             field_ptr_align.toLlvm(),
                             llvm_field_val,
                             field_ty.abiAlignment(zcu).toLlvm(),
-                            try o.builder.intValue(try o.lowerType(pt, .usize), field_ty.abiSize(zcu)),
+                            try o.builder.intValue(try self.lowerType(.usize), field_ty.abiSize(zcu)),
                             .normal,
                             self.disable_intrinsics,
                         );
@@ -6042,7 +5981,7 @@ fn airAggregateInit(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     }
 }
 
-fn airUnionInit(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airUnionInit(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const o = self.object;
     const pt = self.pt;
     const zcu = pt.zcu;
@@ -6050,7 +5989,7 @@ fn airUnionInit(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     const ty_pl = self.air.instructions.items(.data)[@intFromEnum(inst)].ty_pl;
     const extra = self.air.extraData(Air.UnionInit, ty_pl.payload).data;
     const union_ty = self.typeOfIndex(inst);
-    const union_llvm_ty = try o.lowerType(pt, union_ty);
+    const union_llvm_ty = try self.lowerType(union_ty);
     const union_obj = zcu.typeToUnion(union_ty).?;
 
     assert(union_obj.layout != .@"packed");
@@ -6086,7 +6025,7 @@ fn airUnionInit(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     return result_ptr;
 }
 
-fn airPrefetch(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airPrefetch(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const o = self.object;
     const prefetch = self.air.instructions.items(.data)[@intFromEnum(inst)].prefetch;
 
@@ -6135,14 +6074,12 @@ fn airPrefetch(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     return .none;
 }
 
-fn airAddrSpaceCast(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
-    const o = self.object;
-    const pt = self.pt;
+fn airAddrSpaceCast(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const ty_op = self.air.instructions.items(.data)[@intFromEnum(inst)].ty_op;
     const inst_ty = self.typeOfIndex(inst);
     const operand = try self.resolveInst(ty_op.operand);
 
-    return self.wip.cast(.addrspacecast, operand, try o.lowerType(pt, inst_ty), "");
+    return self.wip.cast(.addrspacecast, operand, try self.lowerType(inst_ty), "");
 }
 
 fn workIntrinsic(
@@ -6150,7 +6087,7 @@ fn workIntrinsic(
     dimension: u32,
     default: u32,
     comptime basename: []const u8,
-) !Builder.Value {
+) Allocator.Error!Builder.Value {
     return self.wip.callIntrinsic(.normal, .none, switch (dimension) {
         0 => @field(Builder.Intrinsic, basename ++ ".x"),
         1 => @field(Builder.Intrinsic, basename ++ ".y"),
@@ -6159,7 +6096,7 @@ fn workIntrinsic(
     }, &.{}, &.{}, "");
 }
 
-fn airWorkItemId(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airWorkItemId(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const target = self.pt.zcu.getTarget();
 
     const pl_op = self.air.instructions.items(.data)[@intFromEnum(inst)].pl_op;
@@ -6172,7 +6109,7 @@ fn airWorkItemId(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     };
 }
 
-fn airWorkGroupSize(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airWorkGroupSize(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const pt = self.pt;
     const target = pt.zcu.getTarget();
 
@@ -6200,7 +6137,7 @@ fn airWorkGroupSize(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
     }
 }
 
-fn airWorkGroupId(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+fn airWorkGroupId(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const target = self.pt.zcu.getTarget();
 
     const pl_op = self.air.instructions.items(.data)[@intFromEnum(inst)].pl_op;
@@ -6211,28 +6148,6 @@ fn airWorkGroupId(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
         .nvptx, .nvptx64 => self.workIntrinsic(dimension, 0, "nvvm.read.ptx.sreg.ctaid"),
         else => unreachable,
     };
-}
-
-fn getErrorNameTable(self: *FuncGen) Allocator.Error!Builder.Variable.Index {
-    const o = self.object;
-    const pt = self.pt;
-
-    const table = o.error_name_table;
-    if (table != .none) return table;
-
-    // TODO: Address space
-    const variable_index =
-        try o.builder.addVariable(try o.builder.strtabString("__zig_err_name_table"), .ptr, .default);
-    variable_index.setLinkage(.private, &o.builder);
-    variable_index.setMutability(.constant, &o.builder);
-    variable_index.setUnnamedAddr(.unnamed_addr, &o.builder);
-    variable_index.setAlignment(
-        Type.slice_const_u8_sentinel_0.abiAlignment(pt.zcu).toLlvm(),
-        &o.builder,
-    );
-
-    o.error_name_table = variable_index;
-    return variable_index;
 }
 
 /// Assumes that `Type.optionalReprIsPayload` is `false` for `opt_ty` and that the payload has bits.
@@ -6258,7 +6173,7 @@ fn optPayloadHandle(
     opt_ptr: Builder.Value,
     opt_ty: Type,
     can_elide_load: bool,
-) !Builder.Value {
+) Allocator.Error!Builder.Value {
     const pt = fg.pt;
     const zcu = pt.zcu;
     assert(isByRef(opt_ty, zcu));
@@ -6281,7 +6196,7 @@ fn fieldPtr(
     aggregate_ptr: Builder.Value,
     aggregate_ptr_ty: Type,
     field_index: u32,
-) !Builder.Value {
+) Allocator.Error!Builder.Value {
     const pt = self.pt;
     const zcu = pt.zcu;
     const aggregate_ty = aggregate_ptr_ty.childType(zcu);
@@ -6305,7 +6220,7 @@ fn loadTruncate(
     payload_ty: Type,
     payload_ptr: Builder.Value,
     payload_alignment: Builder.Alignment,
-) !Builder.Value {
+) Allocator.Error!Builder.Value {
     // from https://llvm.org/docs/LangRef.html#load-instruction :
     // "When loading a value of a type like i20 with a size that is not an integral number of bytes, the result is undefined if the value was not originally written using a store of the same type. "
     // => so load the byte aligned value and trunc the unwanted bits.
@@ -6313,7 +6228,7 @@ fn loadTruncate(
     const o = fg.object;
     const pt = fg.pt;
     const zcu = pt.zcu;
-    const payload_llvm_ty = try o.lowerType(pt, payload_ty);
+    const payload_llvm_ty = try fg.lowerType(payload_ty);
     const abi_size = payload_ty.abiSize(zcu);
 
     const load_llvm_ty = if (payload_ty.isAbiInt(zcu))
@@ -6321,7 +6236,7 @@ fn loadTruncate(
     else
         payload_llvm_ty;
     const loaded = try fg.wip.load(access_kind, load_llvm_ty, payload_ptr, payload_alignment, "");
-    const shifted = if (payload_llvm_ty != load_llvm_ty and o.target.cpu.arch.endian() == .big)
+    const shifted = if (payload_llvm_ty != load_llvm_ty and zcu.getTarget().cpu.arch.endian() == .big)
         try fg.wip.bin(.lshr, loaded, try o.builder.intValue(
             load_llvm_ty,
             (payload_ty.abiSize(zcu) - (std.math.divCeil(u64, payload_ty.bitSize(zcu), 8) catch unreachable)) * 8,
@@ -6339,10 +6254,10 @@ fn loadByRef(
     pointee_type: Type,
     ptr_alignment: Builder.Alignment,
     access_kind: Builder.MemoryAccessKind,
-) !Builder.Value {
+) Allocator.Error!Builder.Value {
     const o = fg.object;
     const pt = fg.pt;
-    const pointee_llvm_ty = try o.lowerType(pt, pointee_type);
+    const pointee_llvm_ty = try fg.lowerType(pointee_type);
     const result_align = InternPool.Alignment.fromLlvm(ptr_alignment)
         .max(pointee_type.abiAlignment(pt.zcu)).toLlvm();
     const result_ptr = try fg.buildAlloca(pointee_llvm_ty, result_align);
@@ -6352,7 +6267,7 @@ fn loadByRef(
         result_align,
         ptr,
         ptr_alignment,
-        try o.builder.intValue(try o.lowerType(pt, Type.usize), size_bytes),
+        try o.builder.intValue(try fg.lowerType(.usize), size_bytes),
         access_kind,
         fg.disable_intrinsics,
     );
@@ -6362,7 +6277,7 @@ fn loadByRef(
 /// This function always performs a copy. For isByRef=true types, it creates a new
 /// alloca and copies the value into it, then returns the alloca instruction.
 /// For isByRef=false types, it creates a load instruction and returns it.
-fn load(self: *FuncGen, ptr: Builder.Value, ptr_ty: Type) !Builder.Value {
+fn load(self: *FuncGen, ptr: Builder.Value, ptr_ty: Type) Allocator.Error!Builder.Value {
     const o = self.object;
     const pt = self.pt;
     const zcu = pt.zcu;
@@ -6380,7 +6295,7 @@ fn load(self: *FuncGen, ptr: Builder.Value, ptr_ty: Type) !Builder.Value {
 
     if (info.flags.vector_index != .none) {
         const index_u32 = try o.builder.intValue(.i32, info.flags.vector_index);
-        const vec_elem_ty = try o.lowerType(pt, elem_ty);
+        const vec_elem_ty = try self.lowerType(elem_ty);
         const vec_ty = try o.builder.vectorType(.normal, info.packed_offset.host_size, vec_elem_ty);
 
         const loaded_vector = try self.wip.load(access_kind, vec_ty, ptr, ptr_alignment, "");
@@ -6401,7 +6316,7 @@ fn load(self: *FuncGen, ptr: Builder.Value, ptr_ty: Type) !Builder.Value {
     const elem_bits = ptr_ty.childType(zcu).bitSize(zcu);
     const shift_amt = try o.builder.intValue(containing_int_ty, info.packed_offset.bit_offset);
     const shifted_value = try self.wip.bin(.lshr, containing_int, shift_amt, "");
-    const elem_llvm_ty = try o.lowerType(pt, elem_ty);
+    const elem_llvm_ty = try self.lowerType(elem_ty);
 
     if (isByRef(elem_ty, zcu)) {
         const result_align = elem_ty.abiAlignment(zcu).toLlvm();
@@ -6434,7 +6349,7 @@ fn store(
     ptr_ty: Type,
     elem: Builder.Value,
     ordering: Builder.AtomicOrdering,
-) !void {
+) Allocator.Error!void {
     const o = self.object;
     const pt = self.pt;
     const zcu = pt.zcu;
@@ -6449,7 +6364,7 @@ fn store(
 
     if (info.flags.vector_index != .none) {
         const index_u32 = try o.builder.intValue(.i32, info.flags.vector_index);
-        const vec_elem_ty = try o.lowerType(pt, elem_ty);
+        const vec_elem_ty = try self.lowerType(elem_ty);
         const vec_ty = try o.builder.vectorType(.normal, info.packed_offset.host_size, vec_elem_ty);
 
         const loaded_vector = try self.wip.load(.normal, vec_ty, ptr, ptr_alignment, "");
@@ -6518,7 +6433,7 @@ fn store(
         ptr_alignment,
         elem,
         elem_ty.abiAlignment(zcu).toLlvm(),
-        try o.builder.intValue(try o.lowerType(pt, Type.usize), elem_ty.abiSize(zcu)),
+        try o.builder.intValue(try self.lowerType(Type.usize), elem_ty.abiSize(zcu)),
         access_kind,
         self.disable_intrinsics,
     );
@@ -6527,8 +6442,7 @@ fn store(
 fn valgrindMarkUndef(fg: *FuncGen, ptr: Builder.Value, len: Builder.Value) Allocator.Error!void {
     const VG_USERREQ__MAKE_MEM_UNDEFINED = 1296236545;
     const o = fg.object;
-    const pt = fg.pt;
-    const usize_ty = try o.lowerType(pt, Type.usize);
+    const usize_ty = try fg.lowerType(.usize);
     const zero = try o.builder.intValue(usize_ty, 0);
     const req = try o.builder.intValue(usize_ty, VG_USERREQ__MAKE_MEM_UNDEFINED);
     const ptr_as_usize = try fg.wip.cast(.ptrtoint, ptr, usize_ty, "");
@@ -6551,7 +6465,7 @@ fn valgrindClientRequest(
     const target = zcu.getTarget();
     if (!target_util.hasValgrindSupport(target, .stage2_llvm)) return default_value;
 
-    const llvm_usize = try o.lowerType(pt, Type.usize);
+    const llvm_usize = try fg.lowerType(.usize);
     const usize_alignment = Type.usize.abiAlignment(zcu).toLlvm();
 
     const array_llvm_ty = try o.builder.arrayType(6, llvm_usize);
@@ -7360,11 +7274,12 @@ pub fn isByRef(ty: Type, zcu: *const Zcu) bool {
         => false,
 
         .array,
-        .error_union,
         .frame,
         => ty.hasRuntimeBits(zcu),
 
-        .optional => ty.hasRuntimeBits(zcu) and !ty.optionalReprIsPayload(zcu),
+        .error_union => ty.errorUnionPayload(zcu).hasRuntimeBits(zcu),
+
+        .optional => !ty.optionalReprIsPayload(zcu) and ty.optionalChild(zcu).hasRuntimeBits(zcu),
 
         .@"struct" => switch (ty.containerLayout(zcu)) {
             .@"packed" => false,
@@ -7402,25 +7317,19 @@ fn getAtomicAbiType(fg: *const FuncGen, ty: Type, is_rmw_xchg: bool) Allocator.E
 
 fn ptraddConst(fg: *FuncGen, ptr: Builder.Value, offset: u64) Allocator.Error!Builder.Value {
     if (offset == 0) return ptr;
-    const llvm_usize_ty = try fg.object.lowerType(fg.pt, .usize);
+    const llvm_usize_ty = try fg.lowerType(.usize);
     const offset_val = try fg.object.builder.intValue(llvm_usize_ty, offset);
-    return fg.ptradd(ptr, offset_val);
+    return fg.wip.gep(.inbounds, .i8, ptr, &.{offset_val}, "");
 }
 fn ptraddScaled(fg: *FuncGen, ptr: Builder.Value, index: Builder.Value, scale: u64) Allocator.Error!Builder.Value {
-    switch (scale) {
-        0 => return ptr,
-        1 => return fg.ptradd(ptr, index),
-        else => {
-            const o = fg.object;
-            const llvm_usize_ty = try o.lowerType(fg.pt, .usize);
-            const scale_val = try o.builder.intValue(llvm_usize_ty, scale);
-            const offset = try fg.wip.bin(.@"mul nuw", index, scale_val, "");
-            return fg.ptradd(ptr, offset);
-        },
-    }
-}
-fn ptradd(fg: *FuncGen, ptr: Builder.Value, offset: Builder.Value) Allocator.Error!Builder.Value {
-    return fg.wip.gep(.inbounds, .i8, ptr, &.{offset}, "");
+    if (scale == 0) return ptr;
+    // Right now LLVM seems to fare a bit worse with an explicit `mul nuw` instruction than it does
+    // if we use a bigger type for the GEP, so we'll do that. As I understand it, it has not yet
+    // been decided whether the planned `ptradd` instruction will accept a scale or not; if it does
+    // not then presumably upstream will improve their handling of explicit `mul nuw` computing the
+    // offset.
+    const llvm_scale_ty = try fg.object.builder.arrayType(scale, .i8);
+    return fg.wip.gep(.inbounds, llvm_scale_ty, ptr, &.{index}, "");
 }
 
 fn compilerRtIntBits(bits: u16) ?u16 {
