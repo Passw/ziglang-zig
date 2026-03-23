@@ -2722,7 +2722,7 @@ fn genBodyInner(f: *Function, body: []const Air.Inst.Index) Error!void {
                 const extra = f.air.extraData(Air.VectorCmp, ty_pl.payload).data;
                 break :blk try airCmpOp(f, inst, extra, extra.compareOperator());
             },
-            .cmp_lt_errors_len => try airCmpLtErrorsLen(f, inst),
+            .cmp_lte_errors_len => try airCmpLteErrorsLen(f, inst),
 
             // bool_and and bool_or are non-short-circuit operations
             .bool_and, .bit_and => try airBinOp(f, inst, "&",  "and", .none),
@@ -3728,7 +3728,7 @@ fn airEquality(
     return local;
 }
 
-fn airCmpLtErrorsLen(f: *Function, inst: Air.Inst.Index) !CValue {
+fn airCmpLteErrorsLen(f: *Function, inst: Air.Inst.Index) !CValue {
     const un_op = f.air.instructions.items(.data)[@intFromEnum(inst)].un_op;
 
     const operand = try f.resolveInst(un_op);

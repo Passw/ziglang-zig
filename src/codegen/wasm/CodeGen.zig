@@ -1718,7 +1718,7 @@ fn genInst(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
         .cmp_neq => cg.airCmp(inst, .neq),
 
         .cmp_vector => cg.airCmpVector(inst),
-        .cmp_lt_errors_len => cg.airCmpLtErrorsLen(inst),
+        .cmp_lte_errors_len => cg.airCmpLteErrorsLen(inst),
 
         .array_elem_val => cg.airArrayElemVal(inst),
         .array_to_slice => cg.airArrayToSlice(inst),
@@ -4841,7 +4841,7 @@ fn airCmpVector(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     return cg.fail("TODO implement airCmpVector for wasm", .{});
 }
 
-fn airCmpLtErrorsLen(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
+fn airCmpLteErrorsLen(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     const un_op = cg.air.instructions.items(.data)[@intFromEnum(inst)].un_op;
     const operand = try cg.resolveInst(un_op);
 

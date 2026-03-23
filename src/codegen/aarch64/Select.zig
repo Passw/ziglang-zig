@@ -522,7 +522,7 @@ pub fn analyze(isel: *Select, air_body: []const Air.Inst.Index) !void {
         .is_named_enum_value,
         .tag_name,
         .error_name,
-        .cmp_lt_errors_len,
+        .cmp_lte_errors_len,
         => {
             const un_op = air_data[@intFromEnum(air_inst_index)].un_op;
 
@@ -7175,7 +7175,7 @@ pub fn body(isel: *Select, air_body: []const Air.Inst.Index) error{ OutOfMemory,
             if (air.next()) |next_air_tag| continue :air_tag next_air_tag;
         },
         .wasm_memory_size, .wasm_memory_grow => unreachable,
-        .cmp_lt_errors_len => {
+        .cmp_lte_errors_len => {
             if (isel.live_values.fetchRemove(air.inst_index)) |is_vi| unused: {
                 defer is_vi.value.deref(isel);
                 const is_ra = try is_vi.value.defReg(isel) orelse break :unused;

@@ -7832,10 +7832,10 @@ fn zirErrorFromInt(sema: *Sema, block: *Block, extended: Zir.Inst.Extended.InstD
     }
     try sema.requireRuntimeBlock(block, src, operand_src);
     if (block.wantSafety()) {
-        const is_lt_len = try block.addUnOp(.cmp_lt_errors_len, operand);
+        const is_lte_len = try block.addUnOp(.cmp_lte_errors_len, operand);
         const zero_val = Air.internedToRef((try pt.intValue(err_int_ty, 0)).toIntern());
         const is_non_zero = try block.addBinOp(.cmp_neq, operand, zero_val);
-        const ok = try block.addBinOp(.bool_and, is_lt_len, is_non_zero);
+        const ok = try block.addBinOp(.bool_and, is_lte_len, is_non_zero);
         try sema.addSafetyCheck(block, src, ok, .invalid_error_code);
     }
     return block.addInst(.{

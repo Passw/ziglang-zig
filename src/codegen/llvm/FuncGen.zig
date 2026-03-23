@@ -302,7 +302,7 @@ pub fn genBody(self: *FuncGen, body: []const Air.Inst.Index, coverage_point: Air
 
             .cmp_vector           => try self.airCmpVector(inst, .normal),
             .cmp_vector_optimized => try self.airCmpVector(inst, .fast),
-            .cmp_lt_errors_len    => try self.airCmpLtErrorsLen(inst),
+            .cmp_lte_errors_len   => try self.airCmpLteErrorsLen(inst),
 
             .is_non_null     => try self.airIsNonNull(inst, false, .ne),
             .is_non_null_ptr => try self.airIsNonNull(inst, true , .ne),
@@ -1105,7 +1105,7 @@ fn airCmpVector(self: *FuncGen, inst: Air.Inst.Index, fast: Builder.FastMathKind
     return self.cmp(fast, cmp_op, vec_ty, lhs, rhs);
 }
 
-fn airCmpLtErrorsLen(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
+fn airCmpLteErrorsLen(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const o = self.object;
     const un_op = self.air.instructions.items(.data)[@intFromEnum(inst)].un_op;
     const operand = try self.resolveInst(un_op);
@@ -1117,7 +1117,6 @@ fn airCmpLtErrorsLen(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Build
         Type.errorAbiAlignment(o.zcu).toLlvm(),
         "",
     );
-    // Despite the name, this instruction is actually lte. MLUGG TODO RENAME
     return self.wip.icmp(.ule, operand, errors_len_val, "");
 }
 
