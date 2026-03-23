@@ -303,7 +303,7 @@ fn resolveInst(cg: *CodeGen, ref: Air.Inst.Ref) InnerError!WValue {
 
     const pt = cg.pt;
     const zcu = pt.zcu;
-    const val = (try cg.air.value(ref, pt)).?;
+    const val: Value = .fromInterned(ref.toInterned().?);
     const ty = cg.typeOf(ref);
     if (!ty.hasRuntimeBits(zcu) and !ty.isInt(zcu) and !ty.isError(zcu)) {
         gop.value_ptr.* = .none;
@@ -2006,7 +2006,7 @@ fn airCall(cg: *CodeGen, inst: Air.Inst.Index, modifier: std.builtin.CallModifie
     const first_param_sret = firstParamSRet(fn_info.cc, Type.fromInterned(fn_info.return_type), zcu, cg.target);
 
     const callee: ?InternPool.Nav.Index = blk: {
-        const func_val = (try cg.air.value(call.callee, pt)) orelse break :blk null;
+        const func_val: Value = .fromInterned(call.callee.toInterned() orelse break :blk null);
 
         switch (ip.indexToKey(func_val.toIntern())) {
             inline .func, .@"extern" => |x| break :blk x.owner_nav,
@@ -4464,7 +4464,7 @@ fn lowerConstant(cg: *CodeGen, val: Value) InnerError!WValue {
             .vector_type => {
                 assert(determineSimdStoreStrategy(ty, zcu, cg.target) == .direct);
                 var buf: [16]u8 = undefined;
-                val.writeToMemory(pt, &buf) catch unreachable;
+                val.writeToMemory(zcu, &buf) catch unreachable;
                 return cg.storeSimdImmd(buf);
             },
             .struct_type => unreachable, // packed structs use `bitpack`

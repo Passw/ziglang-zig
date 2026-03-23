@@ -3751,7 +3751,7 @@ fn processExportsInner(
     if (skip_linker_work) return;
 
     if (zcu.llvm_object) |llvm_object| {
-        try zcu.handleUpdateExports(export_indices, llvm_object.updateExports(pt, exported, export_indices));
+        try zcu.handleUpdateExports(export_indices, llvm_object.updateExports(exported, export_indices));
     } else if (zcu.comp.bin_file) |lf| {
         try zcu.handleUpdateExports(export_indices, lf.updateExports(pt, exported, export_indices));
     }

@@ -4956,8 +4956,8 @@ fn genCall(
     // on linking.
     switch (info) {
         .air => |callee| {
-            if (try func.air.value(callee, pt)) |func_value| {
-                const func_key = zcu.intern_pool.indexToKey(func_value.ip_index);
+            if (callee.toInterned()) |func_ip_index| {
+                const func_key = zcu.intern_pool.indexToKey(func_ip_index);
                 switch (switch (func_key) {
                     else => func_key,
                     .ptr => |ptr| if (ptr.byte_offset == 0) switch (ptr.base_addr) {

@@ -1310,7 +1310,7 @@ fn airCall(self: *Self, inst: Air.Inst.Index, modifier: std.builtin.CallModifier
 
     // Due to incremental compilation, how function calls are generated depends
     // on linking.
-    if (try self.air.value(call.callee, pt)) |func_value| switch (ip.indexToKey(func_value.toIntern())) {
+    if (call.callee.toInterned()) |func_ip_index| switch (ip.indexToKey(func_ip_index)) {
         .func => {
             return self.fail("TODO implement calling functions", .{});
         },
@@ -4487,7 +4487,7 @@ fn resolveInst(self: *Self, ref: Air.Inst.Ref) InnerError!MCValue {
         return self.getResolvedInstValue(inst);
     }
 
-    return self.genTypedValue((try self.air.value(ref, pt)).?);
+    return self.genTypedValue(.fromInterned(ref.toInterned().?));
 }
 
 fn ret(self: *Self, mcv: MCValue) !void {

@@ -18896,7 +18896,7 @@ fn finishStructInit(
             var bit_offset: u16 = 0;
             for (field_inits) |field_init| {
                 const field_val = sema.resolveValue(field_init).?;
-                field_val.writeToPackedMemory(pt, buf, bit_offset) catch |err| switch (err) {
+                field_val.writeToPackedMemory(zcu, buf, bit_offset) catch |err| switch (err) {
                     error.ReinterpretDeclRef => unreachable, // bitpack fields cannot be pointers
                     error.OutOfMemory => |e| return e,
                 };

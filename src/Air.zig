@@ -1843,15 +1843,6 @@ pub fn internedToRef(ip_index: InternPool.Index) Inst.Ref {
     return .fromIntern(ip_index);
 }
 
-/// Returns `null` if runtime-known.
-pub fn value(air: Air, inst: Inst.Ref, pt: Zcu.PerThread) !?Value {
-    if (inst.toInterned()) |ip_index| {
-        return .fromInterned(ip_index);
-    }
-    const index = inst.toIndex().?;
-    return air.typeOfIndex(index, &pt.zcu.intern_pool).onePossibleValue(pt);
-}
-
 pub const NullTerminatedString = enum(u32) {
     none = std.math.maxInt(u32),
     _,
