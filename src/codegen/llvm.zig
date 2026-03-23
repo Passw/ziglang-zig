@@ -562,7 +562,7 @@ pub const Object = struct {
     /// Same deal as `decl_map` but for anonymous declarations, which are always global constants.
     uav_map: std.AutoHashMapUnmanaged(InternPool.Index, Builder.Global.Index),
     /// Maps enum types to their corresponding LLVM functions for implementing the `tag_name` instruction.
-    enum_tag_name_map: std.AutoHashMapUnmanaged(InternPool.Index, Builder.Global.Index),
+    enum_tag_name_map: std.AutoHashMapUnmanaged(InternPool.Index, Builder.Function.Index),
     /// Serves the same purpose as `enum_tag_name_map` but for the `is_named_enum_value` instruction.
     named_enum_map: std.AutoHashMapUnmanaged(InternPool.Index, Builder.Function.Index),
     /// Maps Zig types to LLVM types. The table memory is backed by the GPA of
@@ -1138,7 +1138,7 @@ pub const Object = struct {
         func_index: InternPool.Index,
         air: *const Air,
         liveness: *const ?Air.Liveness,
-    ) !void {
+    ) Zcu.CodegenFailError!void {
         const zcu = o.zcu;
         const comp = zcu.comp;
         const ip = &zcu.intern_pool;
@@ -1514,10 +1514,7 @@ pub const Object = struct {
         defer fg.deinit();
         deinit_wip = false;
 
-        fg.genBody(air.getMainBody(), .poi) catch |err| switch (err) {
-            error.CodegenFail => return, // MLUGG TODO
-            else => |e| return e,
-        };
+        try fg.genBody(air.getMainBody(), .poi);
 
         // If we saw any loads or stores involving `allowzero` pointers, we need to mark the whole
         // function as considering null pointers valid so that LLVM's optimizers don't remove these
@@ -1893,6 +1890,9 @@ pub const Object = struct {
         try o.type_pool.updateContainerType(pt, .{ .llvm = o }, ty, success);
         if (o.named_enum_map.get(ty)) |function_index| {
             try o.updateIsNamedEnumValueFunction(.fromInterned(ty), function_index);
+        }
+        if (o.enum_tag_name_map.get(ty)) |function_index| {
+            try o.updateEnumTagNameFunction(.fromInterned(ty), function_index);
         }
     }
 
@@ -4271,25 +4271,39 @@ pub const Object = struct {
         return o.errors_len_variable;
     }
 
-    /// MLUGG TODO: this also needs incremental updates dumbass
-    pub fn getEnumTagNameFunction(o: *Object, enum_ty: Type) !Builder.Function.Index {
+    pub fn getEnumTagNameFunction(o: *Object, enum_ty: Type) Allocator.Error!Builder.Function.Index {
         const zcu = o.zcu;
         const ip = &zcu.intern_pool;
-        const enum_type = ip.loadEnumType(enum_ty.toIntern());
 
         const gop = try o.enum_tag_name_map.getOrPut(o.gpa, enum_ty.toIntern());
-        if (gop.found_existing) return gop.value_ptr.ptrConst(&o.builder).kind.function;
+        if (gop.found_existing) return gop.value_ptr.*;
         errdefer assert(o.enum_tag_name_map.remove(enum_ty.toIntern()));
-
-        const usize_ty = try o.lowerType(.usize);
-        const ret_ty = try o.lowerType(.slice_const_u8_sentinel_0);
-        const llvm_int_ty = try o.lowerType(.fromInterned(enum_type.int_tag_type));
-        const target = &zcu.root_mod.resolved_target.result;
         const function_index = try o.builder.addFunction(
-            try o.builder.fnType(ret_ty, &.{llvm_int_ty}, .normal),
-            try o.builder.strtabStringFmt("__zig_tag_name_{f}", .{enum_type.name.fmt(ip)}),
-            toLlvmAddressSpace(.generic, target),
+            // Dummy function type; `updateEnumTagNameFunction` will replace it with the correct type.
+            // TODO: change the builder API so we don't need to do this.
+            try o.builder.fnType(.void, &.{}, .normal),
+            try o.builder.strtabStringFmt("__zig_tag_name_{f}", .{enum_ty.containerTypeName(ip).fmt(ip)}),
+            toLlvmAddressSpace(.generic, zcu.getTarget()),
         );
+        gop.value_ptr.* = function_index;
+        try o.updateEnumTagNameFunction(enum_ty, function_index);
+        return function_index;
+    }
+    fn updateEnumTagNameFunction(
+        o: *Object,
+        enum_ty: Type,
+        function_index: Builder.Function.Index,
+    ) Allocator.Error!void {
+        const zcu = o.zcu;
+        const ip = &zcu.intern_pool;
+        const loaded_enum = ip.loadEnumType(enum_ty.toIntern());
+
+        const llvm_usize_ty = try o.lowerType(.usize);
+        const llvm_ret_ty = try o.lowerType(.slice_const_u8_sentinel_0);
+        const llvm_int_ty = try o.lowerType(.fromInterned(loaded_enum.int_tag_type));
+
+        function_index.ptrConst(&o.builder).global.ptr(&o.builder).type =
+            try o.builder.fnType(llvm_ret_ty, &.{llvm_int_ty}, .normal);
 
         var attributes: Builder.FunctionAttributes.Wip = .{};
         defer attributes.deinit(&o.builder);
@@ -4298,7 +4312,6 @@ pub const Object = struct {
         function_index.setLinkage(if (o.builder.strip) .private else .internal, &o.builder);
         function_index.setCallConv(.fastcc, &o.builder);
         function_index.setAttributes(try attributes.finish(&o.builder), &o.builder);
-        gop.value_ptr.* = function_index.ptrConst(&o.builder).global;
 
         var wip = try Builder.WipFunction.init(&o.builder, .{
             .function = function_index,
@@ -4312,13 +4325,13 @@ pub const Object = struct {
         var wip_switch = try wip.@"switch"(
             tag_int_value,
             bad_value_block,
-            @intCast(enum_type.field_names.len),
+            @intCast(loaded_enum.field_names.len),
             .none,
         );
         defer wip_switch.finish(&wip);
 
-        for (0..enum_type.field_names.len) |field_index| {
-            const name = try o.builder.stringNull(enum_type.field_names.get(ip)[field_index].toSlice(ip));
+        for (0..loaded_enum.field_names.len) |field_index| {
+            const name = try o.builder.stringNull(loaded_enum.field_names.get(ip)[field_index].toSlice(ip));
             const name_init = try o.builder.stringConst(name);
             const name_variable_index =
                 try o.builder.addVariable(.empty, name_init.typeOf(&o.builder), .default);
@@ -4328,13 +4341,13 @@ pub const Object = struct {
             name_variable_index.setUnnamedAddr(.unnamed_addr, &o.builder);
             name_variable_index.setAlignment(comptime Builder.Alignment.fromByteUnits(1), &o.builder);
 
-            const name_val = try o.builder.structValue(ret_ty, &.{
+            const name_val = try o.builder.structValue(llvm_ret_ty, &.{
                 name_variable_index.toConst(&o.builder),
-                try o.builder.intConst(usize_ty, name.slice(&o.builder).?.len - 1),
+                try o.builder.intConst(llvm_usize_ty, name.slice(&o.builder).?.len - 1),
             });
 
             const return_block = try wip.block(1, "Name");
-            const llvm_tag_val = switch (enum_type.field_values.getOrNone(ip, field_index)) {
+            const llvm_tag_val = switch (loaded_enum.field_values.getOrNone(ip, field_index)) {
                 .none => try o.builder.intConst(llvm_int_ty, field_index), // auto-numbered
                 else => |tag_val_ip| try o.lowerValue(tag_val_ip),
             };
@@ -4348,7 +4361,6 @@ pub const Object = struct {
         _ = try wip.@"unreachable"();
 
         try wip.finish();
-        return function_index;
     }
 
     pub fn lazyAbiAlignment(o: *Object, pt: Zcu.PerThread, ty: Type) Allocator.Error!Builder.Alignment.Lazy {
@@ -4356,7 +4368,7 @@ pub const Object = struct {
         return o.lazy_abi_aligns.items[@intFromEnum(index)];
     }
 
-    pub fn getIsNamedEnumValueFunction(o: *Object, enum_ty: Type) !Builder.Function.Index {
+    pub fn getIsNamedEnumValueFunction(o: *Object, enum_ty: Type) Allocator.Error!Builder.Function.Index {
         const zcu = o.zcu;
         const ip = &zcu.intern_pool;
 
@@ -4380,22 +4392,22 @@ pub const Object = struct {
         function_index: Builder.Function.Index,
     ) Allocator.Error!void {
         const zcu = o.zcu;
-        const builder = &o.builder;
-        const loaded_enum = zcu.intern_pool.loadEnumType(enum_ty.toIntern());
+        const ip = &zcu.intern_pool;
+        const loaded_enum = ip.loadEnumType(enum_ty.toIntern());
 
         const llvm_int_ty = try o.lowerType(.fromInterned(loaded_enum.int_tag_type));
-        function_index.ptrConst(builder).global.ptr(builder).type =
-            try builder.fnType(.i1, &.{llvm_int_ty}, .normal);
+        function_index.ptrConst(&o.builder).global.ptr(&o.builder).type =
+            try o.builder.fnType(.i1, &.{llvm_int_ty}, .normal);
 
         var attributes: Builder.FunctionAttributes.Wip = .{};
-        defer attributes.deinit(builder);
+        defer attributes.deinit(&o.builder);
         try o.addCommonFnAttributes(&attributes, zcu.root_mod, zcu.root_mod.omit_frame_pointer);
 
-        function_index.setLinkage(if (o.builder.strip) .private else .internal, builder);
-        function_index.setCallConv(.fastcc, builder);
-        function_index.setAttributes(try attributes.finish(builder), builder);
+        function_index.setLinkage(if (o.builder.strip) .private else .internal, &o.builder);
+        function_index.setCallConv(.fastcc, &o.builder);
+        function_index.setAttributes(try attributes.finish(&o.builder), &o.builder);
 
-        var wip: Builder.WipFunction = try .init(builder, .{
+        var wip: Builder.WipFunction = try .init(&o.builder, .{
             .function = function_index,
             .strip = true,
         });
@@ -4409,7 +4421,7 @@ pub const Object = struct {
         defer wip_switch.finish(&wip);
 
         if (loaded_enum.field_values.len > 0) {
-            for (loaded_enum.field_values.get(&zcu.intern_pool)) |tag_val_ip| {
+            for (loaded_enum.field_values.get(ip)) |tag_val_ip| {
                 const llvm_tag_val = try o.lowerValue(tag_val_ip);
                 try wip_switch.addCase(llvm_tag_val, named_block, &wip);
             }
