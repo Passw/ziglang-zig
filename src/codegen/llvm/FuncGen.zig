@@ -16,8 +16,8 @@ scope: Builder.Metadata,
 inlined_at: Builder.Metadata.Optional,
 
 base_line: u32,
-prev_dbg_line: c_uint,
-prev_dbg_column: c_uint,
+prev_dbg_line: u32,
+prev_dbg_column: u32,
 
 /// This stores the LLVM values used in a function, such that they can be referred to
 /// in other instructions. This table is cleared before every function is generated.
@@ -815,7 +815,7 @@ fn airCall(self: *FuncGen, inst: Air.Inst.Index, modifier: std.builtin.CallModif
             .always_tail => .musttail,
             .no_suspend, .always_inline, .compile_time => unreachable,
         },
-        toLlvmCallConvTag(fn_info.cc, target).?,
+        llvm.toLlvmCallConvTag(fn_info.cc, target).?,
         try attributes.finish(&o.builder),
         try o.lowerType(zig_fn_ty),
         llvm_fn,
@@ -882,7 +882,7 @@ fn buildSimplePanic(fg: *FuncGen, panic_id: Zcu.SimplePanicId) Allocator.Error!v
     _ = try fg.wip.callIntrinsicAssumeCold();
     _ = try fg.wip.call(
         .normal,
-        toLlvmCallConvTag(fn_info.cc, target).?,
+        llvm.toLlvmCallConvTag(fn_info.cc, target).?,
         .none,
         panic_global.typeOf(&o.builder),
         panic_global.toValue(&o.builder),
@@ -1394,7 +1394,7 @@ fn lowerSwitchDispatch(
     // be handled by conditional branches in the `else` prong.
 
     const llvm_usize = try o.lowerType(.usize);
-    const cond_int = if (cond.typeOfWip(&self.wip).isPointer(&o.builder))
+    const cond_int = if (cond_ty.zigTypeTag(zcu) == .pointer)
         try self.wip.cast(.ptrtoint, cond, llvm_usize, "")
     else
         cond;
@@ -1433,7 +1433,7 @@ fn lowerSwitchDispatch(
 
         for (case.items) |item| {
             const llvm_item = (try self.resolveInst(item)).toConst().?;
-            const llvm_int_item = if (llvm_item.typeOf(&o.builder).isPointer(&o.builder))
+            const llvm_int_item = if (cond_ty.zigTypeTag(zcu) == .pointer)
                 try o.builder.castConst(.ptrtoint, llvm_item, llvm_usize)
             else
                 llvm_item;
@@ -2840,7 +2840,7 @@ fn airIsNonNull(
             operand;
         if (payload_ty.isSlice(zcu)) {
             const slice_ptr = try self.wip.extractValue(loaded, &.{0}, "");
-            const ptr_ty = try o.builder.ptrType(toLlvmAddressSpace(
+            const ptr_ty = try o.builder.ptrType(llvm.toLlvmAddressSpace(
                 payload_ty.ptrAddressSpace(zcu),
                 zcu.getTarget(),
             ));
@@ -3342,17 +3342,17 @@ fn airSafeArithmetic(
 
     const overflow_bits = try fg.wip.extractValue(results, &.{1}, "");
     const overflow_bits_ty = overflow_bits.typeOfWip(&fg.wip);
-    const overflow_bit = if (overflow_bits_ty.isVector(&o.builder))
-        try fg.wip.callIntrinsic(
+    const overflow_bit = switch (inst_ty.zigTypeTag(zcu)) {
+        .vector => try fg.wip.callIntrinsic(
             .normal,
             .none,
             .@"vector.reduce.or",
             &.{overflow_bits_ty},
             &.{overflow_bits},
             "",
-        )
-    else
-        overflow_bits;
+        ),
+        else => overflow_bits,
+    };
 
     const fail_block = try fg.wip.block(1, "OverflowFail");
     const ok_block = try fg.wip.block(1, "OverflowOk");
@@ -3508,6 +3508,7 @@ fn airDivFloor(self: *FuncGen, inst: Air.Inst.Index, fast: Builder.FastMathKind)
         return self.buildFloatOp(.floor, fast, inst_ty, 1, .{result});
     }
     if (scalar_ty.isSignedInt(zcu)) {
+        const scalar_llvm_ty = try o.lowerType(scalar_ty);
         const inst_llvm_ty = try o.lowerType(inst_ty);
 
         const ExpectedContents = [std.math.big.int.calcTwosCompLimbCount(256)]std.math.big.Limb;
@@ -3517,7 +3518,7 @@ fn airDivFloor(self: *FuncGen, inst: Air.Inst.Index, fast: Builder.FastMathKind)
         )) = std.heap.stackFallback(@sizeOf(ExpectedContents), self.gpa);
         const allocator = stack.get();
 
-        const scalar_bits = inst_llvm_ty.scalarBits(&o.builder);
+        const scalar_bits = scalar_ty.intInfo(zcu).bits;
         var smin_big_int: std.math.big.int.Mutable = .{
             .limbs = try allocator.alloc(
                 std.math.big.Limb,
@@ -3529,7 +3530,7 @@ fn airDivFloor(self: *FuncGen, inst: Air.Inst.Index, fast: Builder.FastMathKind)
         defer allocator.free(smin_big_int.limbs);
         smin_big_int.setTwosCompIntLimit(.min, .signed, scalar_bits);
         const smin = try o.builder.splatValue(inst_llvm_ty, try o.builder.bigIntConst(
-            inst_llvm_ty.scalarType(&o.builder),
+            scalar_llvm_ty,
             smin_big_int.toConst(),
         ));
 
@@ -3603,7 +3604,7 @@ fn airMod(self: *FuncGen, inst: Air.Inst.Index, fast: Builder.FastMathKind) Allo
         )) = std.heap.stackFallback(@sizeOf(ExpectedContents), self.gpa);
         const allocator = stack.get();
 
-        const scalar_bits = inst_llvm_ty.scalarBits(&o.builder);
+        const scalar_bits = scalar_ty.intInfo(zcu).bits;
         var smin_big_int: std.math.big.int.Mutable = .{
             .limbs = try allocator.alloc(
                 std.math.big.Limb,
@@ -3615,7 +3616,7 @@ fn airMod(self: *FuncGen, inst: Air.Inst.Index, fast: Builder.FastMathKind) Allo
         defer allocator.free(smin_big_int.limbs);
         smin_big_int.setTwosCompIntLimit(.min, .signed, scalar_bits);
         const smin = try o.builder.splatValue(inst_llvm_ty, try o.builder.bigIntConst(
-            inst_llvm_ty.scalarType(&o.builder),
+            try o.lowerType(scalar_ty),
             smin_big_int.toConst(),
         ));
 
@@ -3929,7 +3930,10 @@ fn buildFloatOp(
             // In this case we can generate a softfloat negation by XORing the
             // bits with a constant.
             const int_ty = try o.builder.intType(@intCast(float_bits));
-            const cast_ty = try llvm_ty.changeScalar(int_ty, &o.builder);
+            const cast_ty = switch (ty.zigTypeTag(zcu)) {
+                .vector => try o.builder.vectorType(.normal, ty.vectorLen(zcu), int_ty),
+                else => int_ty,
+            };
             const sign_mask = try o.builder.splatValue(
                 cast_ty,
                 try o.builder.intConst(int_ty, @as(u128, 1) << @intCast(float_bits - 1)),
@@ -3964,7 +3968,7 @@ fn buildFloatOp(
         }),
     };
 
-    const scalar_llvm_ty = llvm_ty.scalarType(&o.builder);
+    const scalar_llvm_ty = try o.lowerType(scalar_ty);
     const libc_fn = try o.getLibcFunction(
         fn_name,
         ([1]Builder.Type{scalar_llvm_ty} ** 3)[0..params.len],
@@ -4121,7 +4125,7 @@ fn airShlSat(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value
     const lhs_ty = self.typeOf(bin_op.lhs);
     const lhs_info = lhs_ty.intInfo(zcu);
     const llvm_lhs_ty = try o.lowerType(lhs_ty);
-    const llvm_lhs_scalar_ty = llvm_lhs_ty.scalarType(&o.builder);
+    const llvm_lhs_scalar_ty = try o.lowerType(lhs_ty.scalarType(zcu));
 
     const rhs_ty = self.typeOf(bin_op.rhs);
     if (lhs_ty.isVector(zcu) and !rhs_ty.isVector(zcu)) {
@@ -4132,7 +4136,7 @@ fn airShlSat(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value
     const rhs_info = rhs_ty.intInfo(zcu);
     assert(rhs_info.signedness == .unsigned);
     const llvm_rhs_ty = try o.lowerType(rhs_ty);
-    const llvm_rhs_scalar_ty = llvm_rhs_ty.scalarType(&o.builder);
+    const llvm_rhs_scalar_ty = try o.lowerType(rhs_ty.scalarType(zcu));
 
     const result = try self.wip.callIntrinsic(
         .normal,
@@ -4448,9 +4452,7 @@ fn bitCast(self: *FuncGen, operand: Builder.Value, operand_ty: Type, inst_ty: Ty
         return operand;
     }
 
-    if (llvm_dest_ty.isInteger(&o.builder) and
-        operand.typeOfWip(&self.wip).isInteger(&o.builder))
-    {
+    if (inst_ty.isAbiInt(zcu) and operand_ty.isAbiInt(zcu)) {
         return self.wip.conv(.unsigned, operand, llvm_dest_ty, "");
     }
 
@@ -4524,7 +4526,7 @@ fn bitCast(self: *FuncGen, operand: Builder.Value, operand_ty: Type, inst_ty: Ty
         return result_ptr;
     }
 
-    if (llvm_dest_ty.isStruct(&o.builder) or
+    if (inst_ty.isSliceAtRuntime(zcu) or
         ((operand_ty.zigTypeTag(zcu) == .vector or inst_ty.zigTypeTag(zcu) == .vector) and
             operand_ty.bitSize(zcu) != inst_ty.bitSize(zcu)))
     {
@@ -4948,28 +4950,28 @@ fn airAtomicRmw(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Va
         ), llvm_operand_ty, "");
     }
 
-    if (!llvm_operand_ty.isPointer(&o.builder)) return self.wip.atomicrmw(
+    // If we are storing a pointer we need to convert to and from a plain old integer.
+    const non_ptr_operand = switch (operand_ty.zigTypeTag(zcu)) {
+        .pointer => try self.wip.cast(.ptrtoint, operand, try o.lowerType(.usize), ""),
+        else => operand,
+    };
+
+    const raw_result = try self.wip.atomicrmw(
         access_kind,
         op,
         ptr,
-        operand,
+        non_ptr_operand,
         self.sync_scope,
         ordering,
         ptr_alignment,
         "",
     );
 
-    // It's a pointer but we need to treat it as an int.
-    return self.wip.cast(.inttoptr, try self.wip.atomicrmw(
-        access_kind,
-        op,
-        ptr,
-        try self.wip.cast(.ptrtoint, operand, try o.lowerType(.usize), ""),
-        self.sync_scope,
-        ordering,
-        ptr_alignment,
-        "",
-    ), llvm_operand_ty, "");
+    // ...and then convert the result back.
+    switch (operand_ty.zigTypeTag(zcu)) {
+        .pointer => return self.wip.cast(.inttoptr, raw_result, llvm_operand_ty, ""),
+        else => return raw_result,
+    }
 }
 
 fn airAtomicLoad(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
@@ -5274,19 +5276,16 @@ fn airGetUnionTag(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.
     const un_ty = self.typeOf(ty_op.operand);
     const layout = un_ty.unionGetLayout(zcu);
     assert(layout.tag_size != 0);
-    const union_ptr = try self.resolveInst(ty_op.operand);
+    const operand = try self.resolveInst(ty_op.operand);
     if (isByRef(un_ty, zcu)) {
-        const llvm_un_ty = try o.lowerType(un_ty);
-        if (layout.payload_size == 0)
-            return self.wip.load(.normal, llvm_un_ty, union_ptr, .default, "");
-        const tag_index = @intFromBool(layout.tag_align.compare(.lt, layout.payload_align));
-        const tag_field_ptr = try self.ptraddConst(union_ptr, layout.tagOffset());
-        const llvm_tag_ty = llvm_un_ty.structFields(&o.builder)[tag_index];
+        const llvm_tag_ty = try o.lowerType(un_ty.unionTagTypeRuntime(zcu).?);
+        const tag_field_ptr = try self.ptraddConst(operand, layout.tagOffset());
         return self.wip.load(.normal, llvm_tag_ty, tag_field_ptr, .default, "");
     } else {
-        if (layout.payload_size == 0) return union_ptr;
-        const tag_index = @intFromBool(layout.tag_align.compare(.lt, layout.payload_align));
-        return self.wip.extractValue(union_ptr, &.{tag_index}, "");
+        // This is only possible if all fields are zero-bit, in which case `operand` is already an
+        // integer value (the union is lowered as its enum tag).
+        assert(layout.payload_size == 0);
+        return operand;
     }
 }
 
@@ -7356,9 +7355,9 @@ fn appendConstraints(
 /// may need to manually generate a compiler-rt call.
 fn intrinsicsAllowed(scalar_ty: Type, target: *const std.Target) bool {
     return switch (scalar_ty.toIntern()) {
-        .f16_type => backendSupportsF16(target),
-        .f80_type => (target.cTypeBitSize(.longdouble) == 80) and backendSupportsF80(target),
-        .f128_type => (target.cTypeBitSize(.longdouble) == 128) and backendSupportsF128(target),
+        .f16_type => llvm.backendSupportsF16(target),
+        .f80_type => (target.cTypeBitSize(.longdouble) == 80) and llvm.backendSupportsF80(target),
+        .f128_type => (target.cTypeBitSize(.longdouble) == 128) and llvm.backendSupportsF128(target),
         else => true,
     };
 }
@@ -7702,9 +7701,4 @@ const compilerRtFloatAbbrev = target_util.compilerRtFloatAbbrev;
 
 const llvm = @import("../llvm.zig");
 const Object = llvm.Object;
-const toLlvmCallConvTag = llvm.toLlvmCallConvTag;
-const toLlvmAddressSpace = llvm.toLlvmAddressSpace;
 const optional_layout_version = llvm.optional_layout_version;
-const backendSupportsF16 = llvm.backendSupportsF16;
-const backendSupportsF80 = llvm.backendSupportsF80;
-const backendSupportsF128 = llvm.backendSupportsF128;

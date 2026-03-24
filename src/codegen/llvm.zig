@@ -944,7 +944,6 @@ pub const Object = struct {
                 .version = build_options.semver,
             });
             defer o.gpa.free(bitcode);
-            o.builder.clearAndFree();
 
             if (options.pre_bc_path) |path| {
                 var file = Io.Dir.cwd().createFile(io, path, .{}) catch |err|
