@@ -207,17 +207,20 @@ pub fn reset(arena: *ArenaAllocator, mode: ResetMode) bool {
 
 /// Concurrent accesses to node pointers generally have to have acquire/release
 /// semantics to guarantee that newly allocated notes are in a valid state when
-/// being inserted into a list. Exceptions are possible, e.g. a CAS loop that
+/// being inserted into a list. Exceptions are possible, e.g. a cmpxchg loop that
 /// never accesses the node returned on failure can use monotonic semantics on
 /// failure, but must still use release semantics on success to protect the node
 /// it's trying to push.
 const Node = struct {
     /// Only meant to be accessed indirectly via the methods supplied by this type,
     /// except if the node is owned by the thread accessing it.
-    /// Must always be an even number to accomodate `resize` bit.
+    /// Must always be an even number to accommodate `resize` bit.
     size: Size,
-    /// Concurrent accesses to `end_index` can be monotonic as long as its value
-    /// is compared to a version of `size` before using it to access memory.
+    /// Any increase of `end_index` has to use acquire semantics;
+    /// any decrease of `end_index` that invalidates (formerly) active allocations
+    /// has to use release semantics.
+    /// This guarantees that all accesses to memory that's about to be freed
+    /// happen-before the free is published.
     /// Since `size` can only grow and never shrink, memory access depending on
     /// any `end_index` <= any `size` can never be OOB.
     end_index: usize,
@@ -352,10 +355,17 @@ fn alloc(ctx: *anyopaque, n: usize, alignment: Alignment, ret_addr: usize) ?[*]u
             // with a single cmpxchg afterwards, which may fail.
 
             const alignable = n + alignment.toByteUnits() - 1;
-            const end_index = @atomicRmw(usize, &node.end_index, .Add, alignable, .monotonic);
+            const end_index = @atomicRmw(usize, &node.end_index, .Add, alignable, .acquire); // acquire any memory that may have been freed
             const aligned_index = alignedIndex(buf.ptr, end_index, alignment);
             assert(end_index + alignable >= aligned_index + n);
-            _ = @cmpxchgStrong(usize, &node.end_index, end_index + alignable, aligned_index + n, .monotonic, .monotonic);
+            _ = @cmpxchgStrong(
+                usize,
+                &node.end_index,
+                end_index + alignable,
+                aligned_index + n,
+                .monotonic, // no need to release alignment padding; there's no one accessing it!
+                .monotonic,
+            );
 
             if (aligned_index + n > buf.len) break :first_node .{ node, buf.len };
             return buf[aligned_index..][0..n].ptr;
@@ -377,7 +387,7 @@ fn alloc(ctx: *anyopaque, n: usize, alignment: Alignment, ret_addr: usize) ?[*]u
             const new_size = mem.alignForward(usize, @sizeOf(Node) + aligned_index + n, 2);
 
             if (new_size <= allocated_slice.len) {
-                // a `resize` or `free` call managed to sneak in and we need to
+                // A `resize` or `free` call managed to sneak in and we need to
                 // guarantee that `size` is only ever increased; retry!
                 continue :retry;
             }
@@ -385,14 +395,16 @@ fn alloc(ctx: *anyopaque, n: usize, alignment: Alignment, ret_addr: usize) ?[*]u
             if (arena.child_allocator.rawResize(allocated_slice, .of(Node), new_size, @returnAddress())) {
                 size = new_size;
 
-                if (@cmpxchgStrong( // strong because a spurious failure could result in suboptimal usage of this node
+                // strong because a spurious failure could result in suboptimal
+                // usage of this node
+                if (null == @cmpxchgStrong(
                     usize,
                     &node.end_index,
                     end_index,
                     aligned_index + n,
+                    .acquire, // acquire any memory that may have been freed
                     .monotonic,
-                    .monotonic,
-                ) == null) {
+                )) {
                     const new_buf = allocated_slice.ptr[0..new_size][@sizeOf(Node)..];
                     return new_buf[aligned_index..][0..n].ptr;
                 }
@@ -546,35 +558,45 @@ fn resize(ctx: *anyopaque, memory: []u8, alignment: Alignment, new_len: usize, r
     const buf_ptr = @as([*]u8, @ptrCast(node)) + @sizeOf(Node);
 
     const cur_end_index = @atomicLoad(usize, &node.end_index, .monotonic);
+
     if (buf_ptr + cur_end_index != memory.ptr + memory.len) {
         // It's not the most recent allocation, so it cannot be expanded,
         // but it's fine if they want to make it smaller.
         return new_len <= memory.len;
     }
 
-    const new_end_index: usize = new_end_index: {
-        if (memory.len >= new_len) {
-            break :new_end_index cur_end_index - (memory.len - new_len);
-        }
-        const cur_buf_len: usize = node.loadBuf().len;
-        // Saturating arithmetic because `end_index` and `size` are not
-        // guaranteed to be in sync.
-        if (cur_buf_len -| cur_end_index >= new_len - memory.len) {
-            break :new_end_index cur_end_index + (new_len - memory.len);
-        }
-        return false;
-    };
-    assert(buf_ptr + new_end_index == memory.ptr + new_len);
+    if (new_len <= memory.len) {
+        const new_end_index = cur_end_index - (memory.len - new_len);
+        assert(buf_ptr + new_end_index == memory.ptr + new_len);
 
-    return null == @cmpxchgStrong(
-        usize,
-        &node.end_index,
-        cur_end_index,
-        new_end_index,
-        .monotonic,
-        .monotonic,
-    ) or
-        new_len <= memory.len; // Shrinking allocations should always succeed.
+        _ = @cmpxchgStrong(
+            usize,
+            &node.end_index,
+            cur_end_index,
+            new_end_index,
+            .release, // release freed memory
+            .monotonic,
+        );
+        return true; // Shrinking allocations should always succeed.
+    }
+
+    // Saturating arithmetic because `end_index` is not guaranteed to be `<= size`.
+    // The allocation we're trying to resize *could* belong to a different node!
+    if (node.loadBuf().len -| cur_end_index >= new_len - memory.len) {
+        const new_end_index = cur_end_index + (new_len - memory.len);
+        assert(buf_ptr + new_end_index == memory.ptr + new_len);
+
+        return null == @cmpxchgStrong(
+            usize,
+            &node.end_index,
+            cur_end_index,
+            new_end_index,
+            .acquire, // acquire any memory that may have been freed
+            .monotonic,
+        );
+    }
+
+    return false;
 }
 
 fn remap(ctx: *anyopaque, memory: []u8, alignment: Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
@@ -592,6 +614,7 @@ fn free(ctx: *anyopaque, memory: []u8, alignment: Alignment, ret_addr: usize) vo
     const buf_ptr = @as([*]u8, @ptrCast(node)) + @sizeOf(Node);
 
     const cur_end_index = @atomicLoad(usize, &node.end_index, .monotonic);
+
     if (buf_ptr + cur_end_index != memory.ptr + memory.len) {
         // Not the most recent allocation; we cannot free it.
         return;
@@ -605,7 +628,7 @@ fn free(ctx: *anyopaque, memory: []u8, alignment: Alignment, ret_addr: usize) vo
         &node.end_index,
         cur_end_index,
         new_end_index,
-        .monotonic,
+        .release, // release freed memory
         .monotonic,
     );
 }
