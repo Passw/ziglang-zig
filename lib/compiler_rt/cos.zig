@@ -1,13 +1,23 @@
+//! Ported from musl, which is licensed under the MIT license:
+//! https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT
+//!
+//! https://git.musl-libc.org/cgit/musl/tree/src/math/cosf.c
+//! https://git.musl-libc.org/cgit/musl/tree/src/math/cos.c
+//! https://git.musl-libc.org/cgit/musl/tree/src/math/cosl.c
+
 const std = @import("std");
 const math = std.math;
 const mem = std.mem;
 const expect = std.testing.expect;
+const expectApproxEqAbs = std.testing.expectApproxEqAbs;
 
 const compiler_rt = @import("../compiler_rt.zig");
 const symbol = @import("../compiler_rt.zig").symbol;
 const trig = @import("trig.zig");
 const rem_pio2 = @import("rem_pio2.zig").rem_pio2;
 const rem_pio2f = @import("rem_pio2f.zig").rem_pio2f;
+const rem_pio2l = @import("rem_pio2l.zig").rem_pio2l;
+const utils = @import("math_utils.zig");
 
 comptime {
     symbol(&__cosh, "__cosh");
@@ -112,14 +122,36 @@ pub fn cos(x: f64) callconv(.c) f64 {
     };
 }
 
-pub fn __cosx(a: f80) callconv(.c) f80 {
-    // TODO: more efficient implementation
-    return @floatCast(cosq(a));
+fn coslGeneric(comptime T: type, x: T) T {
+    const se = utils.ldSignExponent(x) & 0x7fff;
+    if (se == 0x7fff) {
+        return x - x;
+    }
+
+    if (@abs(x) < utils.pi_4) {
+        if (se < 0x3fff - math.floatMantissaBits(T)) {
+            // raise inexact if x!=0
+            return 1.0 + x;
+        }
+        return trig.__cosl(T, x, 0.0);
+    }
+
+    var y: [2]T = undefined;
+    const n = rem_pio2l(T, x, &y);
+    return switch (n & 3) {
+        0 => trig.__cosl(T, y[0], y[1]),
+        1 => -trig.__sinl(T, y[0], y[1], 1),
+        2 => -trig.__cosl(T, y[0], y[1]),
+        else => trig.__sinl(T, y[0], y[1], 1),
+    };
 }
 
-pub fn cosq(a: f128) callconv(.c) f128 {
-    // TODO: more correct implementation
-    return cos(@floatCast(a));
+pub fn __cosx(x: f80) callconv(.c) f80 {
+    return coslGeneric(f80, x);
+}
+
+pub fn cosq(x: f128) callconv(.c) f128 {
+    return coslGeneric(f128, x);
 }
 
 pub fn cosl(x: c_longdouble) callconv(.c) c_longdouble {
@@ -133,38 +165,78 @@ pub fn cosl(x: c_longdouble) callconv(.c) c_longdouble {
     }
 }
 
-test "cos32" {
-    const epsilon = 0.00001;
+fn testCosSpecial(comptime T: type) !void {
+    const f = switch (T) {
+        f32 => cosf,
+        f64 => cos,
+        f80 => __cosx,
+        f128 => cosq,
+        else => @compileError("unimplemented"),
+    };
 
-    try expect(math.approxEqAbs(f32, cosf(0.0), 1.0, epsilon));
-    try expect(math.approxEqAbs(f32, cosf(0.2), 0.980067, epsilon));
-    try expect(math.approxEqAbs(f32, cosf(0.8923), 0.627623, epsilon));
-    try expect(math.approxEqAbs(f32, cosf(1.5), 0.070737, epsilon));
-    try expect(math.approxEqAbs(f32, cosf(-1.5), 0.070737, epsilon));
-    try expect(math.approxEqAbs(f32, cosf(37.45), 0.969132, epsilon));
-    try expect(math.approxEqAbs(f32, cosf(89.123), 0.400798, epsilon));
+    try expect(f(0.0) == 1.0);
+    try expect(f(-0.0) == 1.0);
+    try expect(math.isNan(f(math.inf(T))));
+    try expect(math.isNan(f(-math.inf(T))));
+    try expect(math.isNan(f(math.nan(T))));
 }
 
-test "cos64" {
-    const epsilon = 0.000001;
-
-    try expect(math.approxEqAbs(f64, cos(0.0), 1.0, epsilon));
-    try expect(math.approxEqAbs(f64, cos(0.2), 0.980067, epsilon));
-    try expect(math.approxEqAbs(f64, cos(0.8923), 0.627623, epsilon));
-    try expect(math.approxEqAbs(f64, cos(1.5), 0.070737, epsilon));
-    try expect(math.approxEqAbs(f64, cos(-1.5), 0.070737, epsilon));
-    try expect(math.approxEqAbs(f64, cos(37.45), 0.969132, epsilon));
-    try expect(math.approxEqAbs(f64, cos(89.123), 0.40080, epsilon));
+test "cos32.normal" {
+    const epsilon = math.floatEps(f32);
+    try expectApproxEqAbs(@as(f32, 1.0), cosf(0.0), epsilon);
+    try expectApproxEqAbs(@as(f32, 0.9800666), cosf(0.2), epsilon);
+    try expectApproxEqAbs(@as(f32, 0.6276231), cosf(0.8923), epsilon);
+    try expectApproxEqAbs(@as(f32, 0.0707372), cosf(1.5), epsilon);
+    try expectApproxEqAbs(@as(f32, 0.0707372), cosf(-1.5), epsilon);
+    try expectApproxEqAbs(@as(f32, 0.96913195), cosf(37.45), epsilon);
+    try expectApproxEqAbs(@as(f32, 0.40079966), cosf(89.123), epsilon);
 }
 
 test "cos32.special" {
-    try expect(math.isNan(cosf(math.inf(f32))));
-    try expect(math.isNan(cosf(-math.inf(f32))));
-    try expect(math.isNan(cosf(math.nan(f32))));
+    try testCosSpecial(f32);
+}
+
+test "cos64.normal" {
+    const epsilon = math.floatEps(f64);
+    try expectApproxEqAbs(@as(f64, 1.0), cos(0.0), epsilon);
+    try expectApproxEqAbs(@as(f64, 0.9800665778412416), cos(0.2), epsilon);
+    try expectApproxEqAbs(@as(f64, 0.6276230983360804), cos(0.8923), epsilon);
+    try expectApproxEqAbs(@as(f64, 0.0707372016677029), cos(1.5), epsilon);
+    try expectApproxEqAbs(@as(f64, 0.0707372016677029), cos(-1.5), epsilon);
+    try expectApproxEqAbs(@as(f64, 0.9691317730707778), cos(37.45), epsilon);
+    try expectApproxEqAbs(@as(f64, 0.4008006809354791), cos(89.123), epsilon);
 }
 
 test "cos64.special" {
-    try expect(math.isNan(cos(math.inf(f64))));
-    try expect(math.isNan(cos(-math.inf(f64))));
-    try expect(math.isNan(cos(math.nan(f64))));
+    try testCosSpecial(f64);
+}
+
+test "cos80.normal" {
+    const epsilon = math.floatEps(f80);
+    try expectApproxEqAbs(@as(f80, 1.0), __cosx(0.0), epsilon);
+    try expectApproxEqAbs(@as(f80, 0.98006657784124163112419651674816888), __cosx(0.2), epsilon);
+    try expectApproxEqAbs(@as(f80, 0.62762309833608037003563995939286067), __cosx(0.8923), epsilon);
+    try expectApproxEqAbs(@as(f80, 0.070737201667702910088189851434268747), __cosx(1.5), epsilon);
+    try expectApproxEqAbs(@as(f80, 0.070737201667702910088189851434268747), __cosx(-1.5), epsilon);
+    try expectApproxEqAbs(@as(f80, 0.9691317730707771246), __cosx(37.45), epsilon);
+    try expectApproxEqAbs(@as(f80, 0.4008006809354834001), __cosx(89.123), epsilon);
+}
+
+test "cos80.special" {
+    try testCosSpecial(f80);
+}
+
+test "cos128.normal" {
+    const epsilon = math.floatEps(f128);
+    try expectApproxEqAbs(@as(f128, 1.0), cosq(0.0), epsilon);
+    try expectApproxEqAbs(@as(f128, 0.98006657784124163112419651674816888), cosq(0.2), epsilon);
+    try expectApproxEqAbs(@as(f128, 0.62762309833608037003563995939286067), cosq(0.8923), epsilon);
+    try expectApproxEqAbs(@as(f128, 0.070737201667702910088189851434268747), cosq(1.5), epsilon);
+    try expectApproxEqAbs(@as(f128, 0.070737201667702910088189851434268747), cosq(-1.5), epsilon);
+    try expectApproxEqAbs(@as(f128, 0.96913177307077712443149563847233230), cosq(37.45), epsilon);
+    try expectApproxEqAbs(@as(f128, 0.40080068093548339848199454493704702), cosq(89.123), epsilon);
+}
+
+test "cos128.special" {
+    try testCosSpecial(f128);
 }

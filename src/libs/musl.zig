@@ -811,8 +811,6 @@ const src_files = [_][]const u8{
     "musl/src/math/__cos.c",
     "musl/src/math/__cosdf.c",
     "musl/src/math/coshl.c",
-    "musl/src/math/__cosl.c",
-    "musl/src/math/cosl.c",
     "musl/src/math/erf.c",
     "musl/src/math/erff.c",
     "musl/src/math/erfl.c",
