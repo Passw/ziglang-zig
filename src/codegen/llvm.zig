@@ -550,17 +550,13 @@ pub const Object = struct {
     debug_anyerror_fwd_ref: Builder.Metadata.Optional,
 
     zcu: *Zcu,
-    /// Ideally we would use `llvm_module.getNamedFunction` to go from *Decl to LLVM function,
-    /// but that has some downsides:
-    /// * we have to compute the fully qualified name every time we want to do the lookup
-    /// * for externally linked functions, the name is not fully qualified, but when
-    ///   a Decl goes from exported to not exported and vice-versa, we would use the wrong
-    ///   version of the name and incorrectly get function not found in the llvm module.
-    /// * it works for functions not all globals.
-    /// Therefore, this table keeps track of the mapping.
+    /// Maps a `Nav` to the corresponding LLVM global.
     nav_map: std.AutoHashMapUnmanaged(InternPool.Nav.Index, Builder.Global.Index),
-    /// Same deal as `decl_map` but for anonymous declarations, which are always global constants.
-    uav_map: std.AutoHashMapUnmanaged(InternPool.Index, Builder.Global.Index),
+    /// Same as `nav_map` but for UAVs (which are always global constants).
+    uav_map: std.AutoHashMapUnmanaged(struct {
+        val: InternPool.Index,
+        @"addrspace": std.builtin.AddressSpace,
+    }, Builder.Variable.Index),
     /// Maps enum types to their corresponding LLVM functions for implementing the `tag_name` instruction.
     enum_tag_name_map: std.AutoHashMapUnmanaged(InternPool.Index, Builder.Function.Index),
     /// Serves the same purpose as `enum_tag_name_map` but for the `is_named_enum_value` instruction.
@@ -717,13 +713,13 @@ pub const Object = struct {
         for (llvm_errors[1..], error_name_list) |*llvm_error, name| {
             const name_string = try o.builder.stringNull(name.toSlice(ip));
             const name_init = try o.builder.stringConst(name_string);
-            const name_variable_index =
-                try o.builder.addVariable(.empty, name_init.typeOf(&o.builder), .default);
+            const name_variable_index = try o.builder.addVariable(.empty, name_init.typeOf(&o.builder), .default);
             try name_variable_index.setInitializer(name_init, &o.builder);
-            name_variable_index.setLinkage(.private, &o.builder);
             name_variable_index.setMutability(.constant, &o.builder);
-            name_variable_index.setUnnamedAddr(.unnamed_addr, &o.builder);
             name_variable_index.setAlignment(comptime .fromByteUnits(1), &o.builder);
+            const global_index = name_variable_index.ptrConst(&o.builder).global;
+            global_index.setLinkage(.private, &o.builder);
+            global_index.setUnnamedAddr(.unnamed_addr, &o.builder);
 
             llvm_error.* = try o.builder.structConst(llvm_slice_ty, &.{
                 name_variable_index.toConst(&o.builder),
@@ -790,9 +786,9 @@ pub const Object = struct {
                     array_llvm_ty,
                     .default,
                 );
-                compiler_used_variable.setLinkage(.appending, &o.builder);
-                compiler_used_variable.setSection(try o.builder.string("llvm.metadata"), &o.builder);
                 try compiler_used_variable.setInitializer(init_val, &o.builder);
+                compiler_used_variable.setSection(try o.builder.string("llvm.metadata"), &o.builder);
+                compiler_used_variable.ptrConst(&o.builder).global.setLinkage(.appending, &o.builder);
             }
 
             if (!o.builder.strip) {
@@ -1140,6 +1136,7 @@ pub const Object = struct {
     ) Zcu.CodegenFailError!void {
         const zcu = o.zcu;
         const comp = zcu.comp;
+        const gpa = comp.gpa;
         const ip = &zcu.intern_pool;
         const func = zcu.funcInfo(func_index);
         const nav = ip.getNav(func.owner_nav);
@@ -1149,9 +1146,42 @@ pub const Object = struct {
         const fn_info = zcu.typeToFunc(fn_ty).?;
         const target = &owner_mod.resolved_target.result;
 
-        const function_index = try o.resolveLlvmFunction(func.owner_nav);
+        const gop = try o.nav_map.getOrPut(gpa, func.owner_nav);
+        if (!gop.found_existing) {
+            errdefer assert(o.nav_map.remove(func.owner_nav));
+            // First time lowering this NAV! Create a fresh global.
+            const llvm_name = try o.builder.strtabString(nav.fqn.toSlice(ip));
+            gop.value_ptr.* = try o.builder.addGlobal(llvm_name, .{
+                .type = .void, // placeholder; populated below
+                .kind = .{ .alias = .none }, // placeholder; populated below
+            });
+        }
+        const llvm_global = gop.value_ptr.*;
 
-        var attributes = try function_index.ptrConst(&o.builder).attributes.toWip(&o.builder);
+        const llvm_function: Builder.Function.Index = switch (llvm_global.ptrConst(&o.builder).kind) {
+            .function => |function| function, // re-use existing `Builder.Function`
+            .replaced, .alias, .variable => try llvm_global.toNewFunction(&o.builder),
+        };
+        {
+            const global = llvm_function.ptrConst(&o.builder).global.ptr(&o.builder);
+            global.type = try o.lowerType(fn_ty);
+            global.addr_space = toLlvmAddressSpace(nav.resolved.?.@"addrspace", target);
+            global.linkage = if (o.builder.strip) .private else .internal;
+            global.visibility = .default;
+            global.dll_storage_class = .default;
+            global.unnamed_addr = .unnamed_addr;
+        }
+        llvm_function.setAlignment(switch (nav.resolved.?.@"align") {
+            .none => fn_ty.abiAlignment(zcu).toLlvm(),
+            else => |a| a.toLlvm(),
+        }, &o.builder);
+        llvm_function.setSection(s: {
+            const section = nav.resolved.?.@"linksection".toSlice(ip) orelse break :s .none;
+            break :s try o.builder.string(section);
+        }, &o.builder);
+        try o.addLlvmFunctionAttributes(pt, func.owner_nav, llvm_function);
+
+        var attributes = try llvm_function.ptrConst(&o.builder).attributes.toWip(&o.builder);
         defer attributes.deinit(&o.builder);
 
         const func_analysis = func.analysisUnordered(ip);
@@ -1221,47 +1251,41 @@ pub const Object = struct {
             } }, &o.builder);
         }
 
-        if (nav.resolved.?.@"linksection".toSlice(ip)) |section|
-            function_index.setSection(try o.builder.string(section), &o.builder);
-
         var deinit_wip = true;
         var wip = try Builder.WipFunction.init(&o.builder, .{
-            .function = function_index,
+            .function = llvm_function,
             .strip = owner_mod.strip,
         });
         defer if (deinit_wip) wip.deinit();
         wip.cursor = .{ .block = try wip.block(0, "Entry") };
-
-        var llvm_arg_i: u32 = 0;
-
-        const ret_ptr: Builder.Value = if (firstParamSRet(fn_info, zcu, target)) param: {
-            const param = wip.arg(llvm_arg_i);
-            llvm_arg_i += 1;
-            break :param param;
-        } else .none;
 
         if (ccAbiPromoteInt(fn_info.cc, zcu, Type.fromInterned(fn_info.return_type))) |s| switch (s) {
             .signed => try attributes.addRetAttr(.signext, &o.builder),
             .unsigned => try attributes.addRetAttr(.zeroext, &o.builder),
         };
 
-        const err_return_tracing = fn_info.cc == .auto and comp.config.any_error_tracing;
-
-        const err_ret_trace: Builder.Value = if (err_return_tracing) param: {
-            const param = wip.arg(llvm_arg_i);
-            llvm_arg_i += 1;
-            break :param param;
-        } else .none;
-
         // This is the list of args we will use that correspond directly to the AIR arg
         // instructions. Depending on the calling convention, this list is not necessarily
         // a bijection with the actual LLVM parameters of the function.
-        const gpa = o.gpa;
         var args: std.ArrayList(Builder.Value) = .empty;
         defer args.deinit(gpa);
 
-        {
+        const ret_ptr: Builder.Value, const err_ret_trace: Builder.Value = implicit_args: {
             var it = iterateParamTypes(o, fn_info);
+
+            const ret_ptr: Builder.Value = if (firstParamSRet(fn_info, zcu, target)) param: {
+                const param = wip.arg(it.llvm_index);
+                it.llvm_index += 1;
+                break :param param;
+            } else .none;
+
+            const err_return_tracing = fn_info.cc == .auto and comp.config.any_error_tracing;
+            const err_ret_trace: Builder.Value = if (err_return_tracing) param: {
+                const param = wip.arg(it.llvm_index);
+                it.llvm_index += 1;
+                break :param param;
+            } else .none;
+
             while (try it.next()) |lowering| {
                 try args.ensureUnusedCapacity(gpa, 1);
 
@@ -1271,7 +1295,7 @@ pub const Object = struct {
                         assert(!it.byval_attr);
                         const param_index = it.zig_index - 1;
                         const param_ty = Type.fromInterned(fn_info.param_types.get(ip)[param_index]);
-                        const param = wip.arg(llvm_arg_i);
+                        const param = wip.arg(it.llvm_index - 1);
 
                         if (isByRef(param_ty, zcu)) {
                             const alignment = param_ty.abiAlignment(zcu).toLlvm();
@@ -1281,146 +1305,116 @@ pub const Object = struct {
                             args.appendAssumeCapacity(arg_ptr);
                         } else {
                             args.appendAssumeCapacity(param);
-
-                            try o.addByValParamAttrs(pt, &attributes, param_ty, param_index, fn_info, llvm_arg_i);
                         }
-                        llvm_arg_i += 1;
                     },
                     .byref => {
-                        const param_ty = Type.fromInterned(fn_info.param_types.get(ip)[it.zig_index - 1]);
-                        const param_llvm_ty = try o.lowerType(param_ty);
-                        const param = wip.arg(llvm_arg_i);
-                        const alignment = param_ty.abiAlignment(zcu).toLlvm();
-
-                        try o.addByRefParamAttrs(&attributes, llvm_arg_i, alignment, it.byval_attr, param_llvm_ty);
-                        llvm_arg_i += 1;
+                        const param_ty: Type = .fromInterned(fn_info.param_types.get(ip)[it.zig_index - 1]);
+                        const param = wip.arg(it.llvm_index - 1);
 
                         if (isByRef(param_ty, zcu)) {
                             args.appendAssumeCapacity(param);
                         } else {
+                            const param_llvm_ty = try o.lowerType(param_ty);
+                            const alignment = param_ty.abiAlignment(zcu).toLlvm();
                             args.appendAssumeCapacity(try wip.load(.normal, param_llvm_ty, param, alignment, ""));
                         }
                     },
                     .byref_mut => {
-                        const param_ty = Type.fromInterned(fn_info.param_types.get(ip)[it.zig_index - 1]);
-                        const param_llvm_ty = try o.lowerType(param_ty);
-                        const param = wip.arg(llvm_arg_i);
-                        const alignment = param_ty.abiAlignment(zcu).toLlvm();
-
-                        try attributes.addParamAttr(llvm_arg_i, .noundef, &o.builder);
-                        llvm_arg_i += 1;
+                        const param_ty: Type = .fromInterned(fn_info.param_types.get(ip)[it.zig_index - 1]);
+                        const param = wip.arg(it.llvm_index - 1);
 
                         if (isByRef(param_ty, zcu)) {
                             args.appendAssumeCapacity(param);
                         } else {
+                            const param_llvm_ty = try o.lowerType(param_ty);
+                            const alignment = param_ty.abiAlignment(zcu).toLlvm();
                             args.appendAssumeCapacity(try wip.load(.normal, param_llvm_ty, param, alignment, ""));
                         }
                     },
                     .abi_sized_int => {
                         assert(!it.byval_attr);
-                        const param_ty = Type.fromInterned(fn_info.param_types.get(ip)[it.zig_index - 1]);
-                        const param = wip.arg(llvm_arg_i);
-                        llvm_arg_i += 1;
+                        const param_ty: Type = .fromInterned(fn_info.param_types.get(ip)[it.zig_index - 1]);
+                        const param = wip.arg(it.llvm_index - 1);
 
                         const param_llvm_ty = try o.lowerType(param_ty);
                         const alignment = param_ty.abiAlignment(zcu).toLlvm();
                         const arg_ptr = try buildAllocaInner(&wip, param_llvm_ty, alignment, target);
                         _ = try wip.store(.normal, param, arg_ptr, alignment);
 
-                        args.appendAssumeCapacity(if (isByRef(param_ty, zcu))
-                            arg_ptr
-                        else
-                            try wip.load(.normal, param_llvm_ty, arg_ptr, alignment, ""));
+                        if (isByRef(param_ty, zcu)) {
+                            args.appendAssumeCapacity(arg_ptr);
+                        } else {
+                            args.appendAssumeCapacity(try wip.load(.normal, param_llvm_ty, arg_ptr, alignment, ""));
+                        }
                     },
                     .slice => {
                         assert(!it.byval_attr);
-                        const param_ty = Type.fromInterned(fn_info.param_types.get(ip)[it.zig_index - 1]);
-                        const ptr_info = param_ty.ptrInfo(zcu);
-
-                        if (std.math.cast(u5, it.zig_index - 1)) |i| {
-                            if (@as(u1, @truncate(fn_info.noalias_bits >> i)) != 0) {
-                                try attributes.addParamAttr(llvm_arg_i, .@"noalias", &o.builder);
-                            }
-                        }
-                        if (param_ty.zigTypeTag(zcu) != .optional and
-                            !ptr_info.flags.is_allowzero and
-                            ptr_info.flags.address_space == .generic)
-                        {
-                            try attributes.addParamAttr(llvm_arg_i, .nonnull, &o.builder);
-                        }
-                        if (ptr_info.flags.is_const) {
-                            try attributes.addParamAttr(llvm_arg_i, .readonly, &o.builder);
-                        }
-                        const elem_align: Builder.Alignment.Lazy = switch (ptr_info.flags.alignment) {
-                            else => |a| .wrap(a.toLlvm()),
-                            .none => try o.lazyAbiAlignment(pt, .fromInterned(ptr_info.child)),
-                        };
-                        try attributes.addParamAttr(llvm_arg_i, .{ .@"align" = elem_align }, &o.builder);
-                        const ptr_param = wip.arg(llvm_arg_i);
-                        llvm_arg_i += 1;
-                        const len_param = wip.arg(llvm_arg_i);
-                        llvm_arg_i += 1;
-
-                        const slice_llvm_ty = try o.lowerType(param_ty);
-                        args.appendAssumeCapacity(
-                            try wip.buildAggregate(slice_llvm_ty, &.{ ptr_param, len_param }, ""),
+                        const param_ty: Type = .fromInterned(fn_info.param_types.get(ip)[it.zig_index - 1]);
+                        assert(!isByRef(param_ty, zcu));
+                        const slice_val = try wip.buildAggregate(
+                            try o.lowerType(param_ty),
+                            &.{ wip.arg(it.llvm_index - 2), wip.arg(it.llvm_index - 1) },
+                            "",
                         );
+                        args.appendAssumeCapacity(slice_val);
                     },
                     .multiple_llvm_types => {
                         assert(!it.byval_attr);
                         const field_types = it.types_buffer[0..it.types_len];
-                        const param_ty = Type.fromInterned(fn_info.param_types.get(ip)[it.zig_index - 1]);
+                        const param_ty: Type = .fromInterned(fn_info.param_types.get(ip)[it.zig_index - 1]);
                         const param_llvm_ty = try o.lowerType(param_ty);
                         const param_alignment = param_ty.abiAlignment(zcu).toLlvm();
                         const arg_ptr = try buildAllocaInner(&wip, param_llvm_ty, param_alignment, target);
                         const llvm_ty = try o.builder.structType(.normal, field_types);
-                        for (0..field_types.len) |field_i| {
-                            const param = wip.arg(llvm_arg_i);
-                            llvm_arg_i += 1;
+                        const llvm_args_start = it.llvm_index - field_types.len;
+                        for (0..field_types.len, llvm_args_start..) |field_i, llvm_arg_index| {
+                            const param = wip.arg(@intCast(llvm_arg_index));
                             const field_ptr = try wip.gepStruct(llvm_ty, arg_ptr, field_i, "");
-                            const alignment = Builder.Alignment.fromByteUnits(@divExact(target.ptrBitWidth(), 8));
+                            const alignment: Builder.Alignment = .fromByteUnits(@divExact(target.ptrBitWidth(), 8));
                             _ = try wip.store(.normal, param, field_ptr, alignment);
                         }
 
-                        const is_by_ref = isByRef(param_ty, zcu);
-                        args.appendAssumeCapacity(if (is_by_ref)
-                            arg_ptr
-                        else
-                            try wip.load(.normal, param_llvm_ty, arg_ptr, param_alignment, ""));
+                        if (isByRef(param_ty, zcu)) {
+                            args.appendAssumeCapacity(arg_ptr);
+                        } else {
+                            args.appendAssumeCapacity(try wip.load(.normal, param_llvm_ty, arg_ptr, param_alignment, ""));
+                        }
                     },
                     .float_array => {
-                        const param_ty = Type.fromInterned(fn_info.param_types.get(ip)[it.zig_index - 1]);
+                        const param_ty: Type = .fromInterned(fn_info.param_types.get(ip)[it.zig_index - 1]);
                         const param_llvm_ty = try o.lowerType(param_ty);
-                        const param = wip.arg(llvm_arg_i);
-                        llvm_arg_i += 1;
+                        const param = wip.arg(it.llvm_index - 1);
 
                         const alignment = param_ty.abiAlignment(zcu).toLlvm();
                         const arg_ptr = try buildAllocaInner(&wip, param_llvm_ty, alignment, target);
                         _ = try wip.store(.normal, param, arg_ptr, alignment);
 
-                        args.appendAssumeCapacity(if (isByRef(param_ty, zcu))
-                            arg_ptr
-                        else
-                            try wip.load(.normal, param_llvm_ty, arg_ptr, alignment, ""));
+                        if (isByRef(param_ty, zcu)) {
+                            args.appendAssumeCapacity(arg_ptr);
+                        } else {
+                            args.appendAssumeCapacity(try wip.load(.normal, param_llvm_ty, arg_ptr, alignment, ""));
+                        }
                     },
                     .i32_array, .i64_array => {
-                        const param_ty = Type.fromInterned(fn_info.param_types.get(ip)[it.zig_index - 1]);
+                        const param_ty: Type = .fromInterned(fn_info.param_types.get(ip)[it.zig_index - 1]);
                         const param_llvm_ty = try o.lowerType(param_ty);
-                        const param = wip.arg(llvm_arg_i);
-                        llvm_arg_i += 1;
+                        const param = wip.arg(it.llvm_index - 1);
 
                         const alignment = param_ty.abiAlignment(zcu).toLlvm();
                         const arg_ptr = try buildAllocaInner(&wip, param.typeOfWip(&wip), alignment, target);
                         _ = try wip.store(.normal, param, arg_ptr, alignment);
 
-                        args.appendAssumeCapacity(if (isByRef(param_ty, zcu))
-                            arg_ptr
-                        else
-                            try wip.load(.normal, param_llvm_ty, arg_ptr, alignment, ""));
+                        if (isByRef(param_ty, zcu)) {
+                            args.appendAssumeCapacity(arg_ptr);
+                        } else {
+                            args.appendAssumeCapacity(try wip.load(.normal, param_llvm_ty, arg_ptr, alignment, ""));
+                        }
                     },
                 }
             }
-        }
+
+            break :implicit_args .{ ret_ptr, err_ret_trace };
+        };
 
         const file, const subprogram = if (!wip.strip) debug_info: {
             const file = try o.getDebugFile(file_scope);
@@ -1432,7 +1426,7 @@ pub const Object = struct {
             const subprogram = try o.builder.debugSubprogram(
                 file,
                 try o.builder.metadataString(nav.name.toSlice(ip)),
-                try o.builder.metadataStringFromStrtabString(function_index.name(&o.builder)),
+                try o.builder.metadataString(nav.fqn.toSlice(ip)),
                 line_number,
                 line_number + func.lbrace_line,
                 debug_decl_type,
@@ -1449,7 +1443,7 @@ pub const Object = struct {
                 },
                 o.debug_compile_unit.unwrap().?,
             );
-            function_index.setSubprogram(subprogram, &o.builder);
+            llvm_function.setSubprogram(subprogram, &o.builder);
             break :debug_info .{ file, subprogram };
         } else .{undefined} ** 2;
 
@@ -1466,7 +1460,7 @@ pub const Object = struct {
             const anon_name = try o.builder.strtabStringFmt("__sancov_gen_.{d}", .{o.used.items.len});
             const counters_variable = try o.builder.addVariable(anon_name, .void, .default);
             try o.used.append(gpa, counters_variable.toConst(&o.builder));
-            counters_variable.setLinkage(.private, &o.builder);
+            counters_variable.ptrConst(&o.builder).global.setLinkage(.private, &o.builder);
             counters_variable.setAlignment(comptime Builder.Alignment.fromByteUnits(1), &o.builder);
 
             if (target.ofmt == .macho) {
@@ -1524,7 +1518,7 @@ pub const Object = struct {
             _ = try attributes.removeFnAttr(.null_pointer_is_valid);
         }
 
-        function_index.setAttributes(try attributes.finish(&o.builder), &o.builder);
+        llvm_function.setAttributes(try attributes.finish(&o.builder), &o.builder);
 
         if (fg.fuzz) |*f| {
             {
@@ -1539,157 +1533,161 @@ pub const Object = struct {
             // Due to error "members of llvm.compiler.used must be named", this global needs a name.
             const anon_name = try o.builder.strtabStringFmt("__sancov_gen_.{d}", .{o.used.items.len});
             const pcs_variable = try o.builder.addVariable(anon_name, array_llvm_ty, .default);
-            try o.used.append(gpa, pcs_variable.toConst(&o.builder));
-            pcs_variable.setLinkage(.private, &o.builder);
-            pcs_variable.setMutability(.constant, &o.builder);
-            pcs_variable.setAlignment(Type.usize.abiAlignment(zcu).toLlvm(), &o.builder);
-            if (target.ofmt == .macho) {
-                pcs_variable.setSection(try o.builder.string("__DATA,__sancov_pcs1"), &o.builder);
-            } else {
-                pcs_variable.setSection(try o.builder.string("__sancov_pcs1"), &o.builder);
-            }
             try pcs_variable.setInitializer(init_val, &o.builder);
+            pcs_variable.setMutability(.constant, &o.builder);
+            pcs_variable.setSection(switch (target.ofmt) {
+                .macho => try o.builder.string("__DATA,__sancov_pcs1"),
+                else => try o.builder.string("__sancov_pcs1"),
+            }, &o.builder);
+            pcs_variable.setAlignment(Type.usize.abiAlignment(zcu).toLlvm(), &o.builder);
+            const pcs_global = pcs_variable.ptrConst(&o.builder).global;
+            pcs_global.setLinkage(.private, &o.builder);
+            try o.used.append(gpa, pcs_global.toConst());
         }
 
         try fg.wip.finish();
         try o.flushTypePool(pt);
     }
 
-    pub fn updateNav(o: *Object, pt: Zcu.PerThread, nav_index: InternPool.Nav.Index) !void {
+    pub fn updateNav(o: *Object, pt: Zcu.PerThread, nav_id: InternPool.Nav.Index) !void {
         const zcu = o.zcu;
         const ip = &zcu.intern_pool;
+        const comp = zcu.comp;
+        const gpa = comp.gpa;
 
-        const nav = ip.getNav(nav_index);
+        const nav = ip.getNav(nav_id);
         const resolved = nav.resolved.?;
 
-        const lib_name, const linkage, const visibility: Builder.Visibility, const is_dll_import, const init_val, const owner_nav = switch (ip.indexToKey(resolved.value)) {
-            else => .{ .none, .internal, .default, false, resolved.value, nav_index },
-            .@"extern" => |e| .{ e.lib_name, e.linkage, .fromSymbolVisibility(e.visibility), e.is_dll_import, .none, e.owner_nav },
+        const opt_extern: ?InternPool.Key.Extern = switch (ip.indexToKey(resolved.value)) {
+            .@"extern" => |@"extern"| @"extern",
+            else => null,
         };
-        const ty: Type = .fromInterned(nav.resolved.?.type);
-
-        if (linkage != .internal and ip.isFunctionType(ty.toIntern())) {
-            const function_index = try o.resolveLlvmFunction(owner_nav);
-            // Add parameter attributes which weren't set by `resolveLlvmFunction`
-            const fn_info = zcu.typeToFunc(ty).?;
-            var attributes = try function_index.ptrConst(&o.builder).attributes.toWip(&o.builder);
-            defer attributes.deinit(&o.builder);
-            var it = iterateParamTypes(o, fn_info);
-            if (firstParamSRet(fn_info, zcu, zcu.getTarget())) it.llvm_index += 1;
-            if (fn_info.cc == .auto and zcu.comp.config.any_error_tracing) it.llvm_index += 1;
-            while (try it.next()) |lowering| switch (lowering) {
-                .byval => {
-                    const param_index = it.zig_index - 1;
-                    const param_ty = Type.fromInterned(fn_info.param_types.get(ip)[param_index]);
-                    if (!isByRef(param_ty, zcu)) {
-                        try o.addByValParamAttrs(pt, &attributes, param_ty, param_index, fn_info, it.llvm_index - 1);
-                    }
-                },
-                .byref => {
-                    const param_ty = Type.fromInterned(fn_info.param_types.get(ip)[it.zig_index - 1]);
-                    const param_llvm_ty = try o.lowerType(param_ty);
-                    const alignment = param_ty.abiAlignment(zcu);
-                    try o.addByRefParamAttrs(&attributes, it.llvm_index - 1, alignment.toLlvm(), it.byval_attr, param_llvm_ty);
-                },
-                .byref_mut => try attributes.addParamAttr(it.llvm_index - 1, .noundef, &o.builder),
-                // No attributes needed for these.
-                .no_bits,
-                .abi_sized_int,
-                .multiple_llvm_types,
-                .float_array,
-                .i32_array,
-                .i64_array,
-                => continue,
-
-                .slice => unreachable, // extern functions do not support slice types.
-            };
-            function_index.setAttributes(try attributes.finish(&o.builder), &o.builder);
+        const nav_ty: Type = .fromInterned(resolved.type);
+        const llvm_ty: Builder.Type = if (opt_extern != null) ty: {
+            // We *must* lower this declaration no matter what. If it has a type we can't actually
+            // represent (because it doesn't have runtime bits), we instead lower as the zero-size
+            // type `[0 x i8]`. I don't think the type on an extern declaration actually does much
+            // anyway.
+            if (nav_ty.isRuntimeFnOrHasRuntimeBits(zcu)) break :ty try o.lowerType(nav_ty);
+            break :ty try o.builder.arrayType(0, .i8);
+        } else if (nav_ty.hasRuntimeBits(zcu)) ty: {
+            break :ty try o.lowerType(nav_ty);
         } else {
-            const variable_index = try o.resolveGlobalNav(nav_index);
-            variable_index.setAlignment(zcu.navAlignment(nav_index).toLlvm(), &o.builder);
-            if (resolved.@"linksection".toSlice(ip)) |section|
-                variable_index.setSection(try o.builder.string(section), &o.builder);
-            if (resolved.@"const") variable_index.setMutability(.constant, &o.builder);
-            try variable_index.setInitializer(switch (init_val) {
-                .none => .no_init,
-                else => try o.lowerValue(init_val),
-            }, &o.builder);
-            variable_index.setVisibility(visibility, &o.builder);
+            // This is a non-extern zero-bit `Nav`---we're not interested in it.
+            // TODO: we might need to rethink this a little under incremental compilation. If a
+            // declaration becomes zero-bit, we can't just leave its old value there, because it
+            // might now be ill-formed.
+            return;
+        };
 
-            const file_scope = zcu.navFileScopeIndex(nav_index);
+        const gop = try o.nav_map.getOrPut(gpa, nav_id);
+        if (!gop.found_existing) {
+            errdefer assert(o.nav_map.remove(nav_id));
+            // First time lowering this NAV! Create a fresh global.
+            const llvm_name = try o.builder.strtabString(nav.fqn.toSlice(ip));
+            gop.value_ptr.* = try o.builder.addGlobal(llvm_name, .{
+                .type = .void, // placeholder; populated below
+                .kind = .{ .alias = .none }, // placeholder; populated below
+            });
+        }
+        const llvm_global = gop.value_ptr.*;
+
+        llvm_global.ptr(&o.builder).type = llvm_ty;
+        llvm_global.ptr(&o.builder).addr_space = toLlvmAddressSpace(resolved.@"addrspace", zcu.getTarget());
+
+        if (opt_extern) |@"extern"| {
+            const name = name: {
+                const name_slice = nav.name.toSlice(ip);
+                if (zcu.getTarget().cpu.arch.isWasm() and nav_ty.zigTypeTag(zcu) == .@"fn") {
+                    if (@"extern".lib_name.toSlice(ip)) |lib_name_slice| {
+                        if (!std.mem.eql(u8, lib_name_slice, "c")) {
+                            break :name try o.builder.strtabStringFmt("{s}|{s}", .{ name_slice, lib_name_slice });
+                        }
+                    }
+                }
+                break :name try o.builder.strtabString(name_slice);
+            };
+            if (o.builder.getGlobal(name)) |other_global| {
+                if (other_global != llvm_global) {
+                    // Another global already has this name; just use it in place of this global.
+                    try llvm_global.replace(other_global, &o.builder);
+                    return;
+                }
+            }
+            try llvm_global.rename(name, &o.builder);
+            llvm_global.ptr(&o.builder).unnamed_addr = .default;
+            llvm_global.ptr(&o.builder).dll_storage_class = switch (@"extern".is_dll_import) {
+                true => .dllimport,
+                false => .default,
+            };
+            llvm_global.ptr(&o.builder).linkage = switch (@"extern".linkage) {
+                .internal => if (o.builder.strip) .private else .internal,
+                .strong => .external,
+                .weak => .extern_weak,
+                .link_once => unreachable,
+            };
+            llvm_global.ptr(&o.builder).visibility = .fromSymbolVisibility(@"extern".visibility);
+        } else {
+            llvm_global.ptr(&o.builder).linkage = if (o.builder.strip) .private else .internal;
+            llvm_global.ptr(&o.builder).visibility = .default;
+            llvm_global.ptr(&o.builder).dll_storage_class = .default;
+            llvm_global.ptr(&o.builder).unnamed_addr = .unnamed_addr;
+        }
+
+        const llvm_align = switch (resolved.@"align") {
+            .none => nav_ty.abiAlignment(zcu).toLlvm(),
+            else => |a| a.toLlvm(),
+        };
+        const llvm_section: Builder.String = if (resolved.@"linksection".toSlice(ip)) |section| s: {
+            break :s try o.builder.string(section);
+        } else .none;
+
+        // Actual function bodies with AIR go through `updateFunc` instead, so the only functions we
+        // can see are extern functions or other comptime function body values (e.g. undefined). Of
+        // these, only extern functions need to be lowered to LLVM functions.
+        if (opt_extern != null and nav_ty.zigTypeTag(zcu) == .@"fn" and nav_ty.fnHasRuntimeBits(zcu)) {
+            const llvm_function: Builder.Function.Index = switch (llvm_global.ptrConst(&o.builder).kind) {
+                .function => |function| function, // re-use existing `Builder.Function`
+                .replaced, .alias, .variable => try llvm_global.toNewFunction(&o.builder),
+            };
+            llvm_function.setAlignment(llvm_align, &o.builder);
+            llvm_function.setSection(llvm_section, &o.builder);
+            try o.addLlvmFunctionAttributes(pt, nav_id, llvm_function);
+        } else {
+            const file_scope = nav.srcInst(ip).resolveFile(ip);
             const mod = zcu.fileByIndex(file_scope).mod.?;
-            if (resolved.@"threadlocal" and !mod.single_threaded)
-                variable_index.setThreadLocal(.generaldynamic, &o.builder);
 
-            const line_number = zcu.navSrcLine(nav_index) + 1;
+            const llvm_variable: Builder.Variable.Index = switch (llvm_global.ptrConst(&o.builder).kind) {
+                .variable => |variable| variable, // re-use existing `Builder.Variable`
+                .replaced, .alias, .function => try llvm_global.toNewVariable(&o.builder),
+            };
+            llvm_variable.setAlignment(llvm_align, &o.builder);
+            llvm_variable.setSection(llvm_section, &o.builder);
+            llvm_variable.setMutability(if (resolved.@"const") .constant else .global, &o.builder);
+            try llvm_variable.setInitializer(if (opt_extern != null) .no_init else try o.lowerValue(resolved.value), &o.builder);
+            llvm_variable.setThreadLocal(tl: {
+                if (resolved.@"threadlocal" and !mod.single_threaded) break :tl .generaldynamic;
+                break :tl .default;
+            }, &o.builder);
 
             if (!mod.strip) {
                 const debug_file = try o.getDebugFile(file_scope);
-
-                const debug_global_var = try o.builder.debugGlobalVar(
-                    try o.builder.metadataString(nav.name.toSlice(ip)), // Name
-                    try o.builder.metadataStringFromStrtabString(variable_index.name(&o.builder)), // Linkage name
-                    debug_file, // File
-                    debug_file, // Scope
-                    line_number,
-                    try o.getDebugType(pt, ty),
-                    variable_index,
-                    .{ .local = linkage == .internal },
+                const debug_global_var_expr = try o.builder.debugGlobalVarExpression(
+                    try o.builder.debugGlobalVar(
+                        try o.builder.metadataString(nav.name.toSlice(ip)), // Name
+                        try o.builder.metadataString(nav.fqn.toSlice(ip)), // Linkage name
+                        debug_file, // File
+                        debug_file, // Scope
+                        zcu.navSrcLine(nav_id) + 1,
+                        try o.getDebugType(pt, nav_ty),
+                        llvm_variable,
+                        .{ .local = llvm_global.ptrConst(&o.builder).linkage == .internal },
+                    ),
+                    try o.builder.debugExpression(&.{}),
                 );
-
-                const debug_expression = try o.builder.debugExpression(&.{});
-
-                const debug_global_var_expression = try o.builder.debugGlobalVarExpression(
-                    debug_global_var,
-                    debug_expression,
-                );
-
-                variable_index.setGlobalVariableExpression(debug_global_var_expression, &o.builder);
-                try o.debug_globals.append(o.gpa, debug_global_var_expression);
+                llvm_variable.setGlobalVariableExpression(debug_global_var_expr, &o.builder);
+                try o.debug_globals.append(o.gpa, debug_global_var_expr);
             }
-        }
-
-        switch (linkage) {
-            .internal => {},
-            .strong, .weak => {
-                const global_index = o.nav_map.get(nav_index).?;
-
-                const decl_name = decl_name: {
-                    if (zcu.getTarget().cpu.arch.isWasm() and ty.zigTypeTag(zcu) == .@"fn") {
-                        if (lib_name.toSlice(ip)) |lib_name_slice| {
-                            if (!std.mem.eql(u8, lib_name_slice, "c")) {
-                                break :decl_name try o.builder.strtabStringFmt("{f}|{s}", .{ nav.name.fmt(ip), lib_name_slice });
-                            }
-                        }
-                    }
-                    break :decl_name try o.builder.strtabString(nav.name.toSlice(ip));
-                };
-
-                if (o.builder.getGlobal(decl_name)) |other_global| {
-                    if (other_global != global_index) {
-                        // Another global already has this name; just use it in place of this global.
-                        try global_index.replace(other_global, &o.builder);
-                        return;
-                    }
-                }
-
-                try global_index.rename(decl_name, &o.builder);
-                global_index.setUnnamedAddr(.default, &o.builder);
-                if (is_dll_import) {
-                    global_index.setDllStorageClass(.dllimport, &o.builder);
-                } else if (zcu.comp.config.dll_export_fns) {
-                    global_index.setDllStorageClass(.default, &o.builder);
-                }
-
-                global_index.setLinkage(switch (linkage) {
-                    .internal => unreachable,
-                    .strong => .external,
-                    .weak => .extern_weak,
-                    .link_once => unreachable,
-                }, &o.builder);
-                global_index.setVisibility(visibility, &o.builder);
-            },
-            .link_once => unreachable,
         }
     }
 
@@ -1698,18 +1696,43 @@ pub const Object = struct {
     }
 
     pub fn updateExports(
-        self: *Object,
+        o: *Object,
         exported: Zcu.Exported,
         export_indices: []const Zcu.Export.Index,
     ) link.File.UpdateExportsError!void {
-        const zcu = self.zcu;
-        const nav_index = switch (exported) {
-            .nav => |nav| nav,
-            .uav => |uav| return updateExportedValue(self, uav, export_indices),
-        };
+        const zcu = o.zcu;
         const ip = &zcu.intern_pool;
-        const global_index = self.nav_map.get(nav_index).?;
+        const ty: Type, const llvm_ptr: Builder.Constant = switch (exported) {
+            .nav => |nav| exp: {
+                const nav_ty: Type = .fromInterned(ip.getNav(nav).resolved.?.type);
+                const nav_ref = try o.lowerNavRef(nav);
+                break :exp .{ nav_ty, nav_ref };
+            },
+            .uav => |uav| exp: {
+                const uav_ty = Value.fromInterned(uav).typeOf(zcu);
+                const uav_ref = try o.lowerUavRef(
+                    uav,
+                    uav_ty.abiAlignment(zcu),
+                    target_util.defaultAddressSpace(zcu.getTarget(), .global_constant),
+                );
+                break :exp .{ uav_ty, uav_ref };
+            },
+        };
+        switch (llvm_ptr.unwrap()) {
+            .global => |global| return o.updateExportedGlobal(global, ty, export_indices),
+            .constant => @panic("LLVM TODO: export zero-bit value"),
+        }
+    }
+
+    fn updateExportedGlobal(
+        o: *Object,
+        global_index: Builder.Global.Index,
+        ty: Type,
+        export_indices: []const Zcu.Export.Index,
+    ) link.File.UpdateExportsError!void {
+        const zcu = o.zcu;
         const comp = zcu.comp;
+        const ip = &zcu.intern_pool;
 
         // If we're on COFF and linking with LLD, the linker cares about our exports to determine the subsystem in use.
         coff_export_flags: {
@@ -1719,7 +1742,7 @@ pub const Object = struct {
                 .elf, .wasm => break :coff_export_flags,
                 .coff => |*coff| coff,
             };
-            if (!ip.isFunctionType(ip.getNav(nav_index).resolved.?.type)) break :coff_export_flags;
+            if (ty.zigTypeTag(zcu) != .@"fn") break :coff_export_flags;
             const flags = &coff.lld_export_flags;
             for (export_indices) |export_index| {
                 const name = export_index.ptr(zcu).opts.name;
@@ -1732,152 +1755,88 @@ pub const Object = struct {
             }
         }
 
-        if (export_indices.len != 0) {
-            return updateExportedGlobal(self, zcu, global_index, export_indices);
-        } else {
-            const fqn = try self.builder.strtabString(ip.getNav(nav_index).fqn.toSlice(ip));
-            try global_index.rename(fqn, &self.builder);
-            global_index.setLinkage(if (self.builder.strip) .private else .internal, &self.builder);
-            if (comp.config.dll_export_fns)
-                global_index.setDllStorageClass(.default, &self.builder);
-            global_index.setUnnamedAddr(.unnamed_addr, &self.builder);
-        }
-    }
-
-    fn updateExportedValue(
-        o: *Object,
-        exported_value: InternPool.Index,
-        export_indices: []const Zcu.Export.Index,
-    ) link.File.UpdateExportsError!void {
-        const zcu = o.zcu;
-        const gpa = zcu.gpa;
-        const ip = &zcu.intern_pool;
-        const main_exp_name = try o.builder.strtabString(export_indices[0].ptr(zcu).opts.name.toSlice(ip));
-        const global_index = i: {
-            const gop = try o.uav_map.getOrPut(gpa, exported_value);
-            if (gop.found_existing) {
-                const global_index = gop.value_ptr.*;
-                try global_index.rename(main_exp_name, &o.builder);
-                break :i global_index;
-            }
-            const llvm_addr_space = toLlvmAddressSpace(.generic, zcu.getTarget());
-            const variable_index = try o.builder.addVariable(
-                main_exp_name,
-                try o.lowerType(.fromInterned(ip.typeOf(exported_value))),
-                llvm_addr_space,
-            );
-            const global_index = variable_index.ptrConst(&o.builder).global;
-            gop.value_ptr.* = global_index;
-            // This line invalidates `gop`.
-            const init_val = try o.lowerValue(exported_value);
-            try variable_index.setInitializer(init_val, &o.builder);
-            break :i global_index;
-        };
-        return updateExportedGlobal(o, zcu, global_index, export_indices);
-    }
-
-    fn updateExportedGlobal(
-        o: *Object,
-        zcu: *Zcu,
-        global_index: Builder.Global.Index,
-        export_indices: []const Zcu.Export.Index,
-    ) link.File.UpdateExportsError!void {
-        const comp = zcu.comp;
-        const ip = &zcu.intern_pool;
-        const first_export = export_indices[0].ptr(zcu);
-
-        // We will rename this global to have a name matching `first_export`.
-        // Successive exports become aliases.
-        // If the first export name already exists, then there is a corresponding
-        // extern global - we replace it with this global.
-        const first_exp_name = try o.builder.strtabString(first_export.opts.name.toSlice(ip));
-        if (o.builder.getGlobal(first_exp_name)) |other_global| replace: {
-            if (other_global.toConst().getBase(&o.builder) == global_index.toConst().getBase(&o.builder)) {
-                break :replace; // this global already has the name we want
-            }
-            try global_index.takeName(other_global, &o.builder);
-            try other_global.replace(global_index, &o.builder);
-            // Problem: now we need to replace in the decl_map that
-            // the extern decl index points to this new global. However we don't
-            // know the decl index.
-            // Even if we did, a future incremental update to the extern would then
-            // treat the LLVM global as an extern rather than an export, so it would
-            // need a way to check that.
-            // This is a TODO that needs to be solved when making
-            // the LLVM backend support incremental compilation.
-        } else {
-            try global_index.rename(first_exp_name, &o.builder);
+        // If the first export specifies a linksection, set the exported variable's section to that
+        // one. This is kind of a hack because `std.builtin.ExportOptions.section` doesn't actually
+        // make much sense: the linksection should be associated with the declaration itself rather
+        // than some particular symbol it is exported as!
+        if (export_indices[0].ptr(zcu).opts.section.toSlice(ip)) |section_slice| {
+            const variable = &global_index.ptrConst(&o.builder).kind.variable;
+            variable.setSection(try o.builder.string(section_slice), &o.builder);
         }
 
-        global_index.setUnnamedAddr(.default, &o.builder);
-        if (comp.config.dll_export_fns and first_export.opts.visibility != .hidden)
-            global_index.setDllStorageClass(.dllexport, &o.builder);
-        global_index.setLinkage(switch (first_export.opts.linkage) {
-            .internal => unreachable,
-            .strong => .external,
-            .weak => .weak_odr,
-            .link_once => .linkonce_odr,
-        }, &o.builder);
-        global_index.setVisibility(switch (first_export.opts.visibility) {
-            .default => .default,
-            .hidden => .hidden,
-            .protected => .protected,
-        }, &o.builder);
-        if (first_export.opts.section.toSlice(ip)) |section|
-            switch (global_index.ptrConst(&o.builder).kind) {
-                .variable => |impl_index| impl_index.setSection(
-                    try o.builder.string(section),
-                    &o.builder,
-                ),
-                .function => unreachable,
-                .alias => unreachable,
-                .replaced => unreachable,
-            };
+        const llvm_global_ty = global_index.typeOf(&o.builder);
 
-        // If a Decl is exported more than one time (which is rare),
-        // we add aliases for all but the first export.
-        // TODO LLVM C API does not support deleting aliases.
-        // The planned solution to this is https://github.com/ziglang/zig/issues/13265
-        // Until then we iterate over existing aliases and make them point
-        // to the correct decl, or otherwise add a new alias. Old aliases are leaked.
-        for (export_indices[1..]) |export_idx| {
+        // All exports are represented as aliases to the original global.
+
+        // TODO: we currently do not delete old exports. To do that we'll need to track which
+        // globals actually *are* exports.
+
+        for (export_indices) |export_idx| {
             const exp = export_idx.ptr(zcu);
             const exp_name = try o.builder.strtabString(exp.opts.name.toSlice(ip));
-            if (o.builder.getGlobal(exp_name)) |global| {
-                switch (global.ptrConst(&o.builder).kind) {
+
+            // Our goal is to make an alias with the name `exp_name`, but if that name is already
+            // taken by some existing global, we need to figure out what to do with that existing
+            // global.
+            //
+            // The name, aliasee, and type will be set within this block. Other properties of the
+            // alias will be set below.
+            const alias_global: Builder.Global.Index = global: {
+                const existing_global = o.builder.getGlobal(exp_name) orelse {
+                    // There is no existing global with this name, so make a new alias.
+                    const alias = try o.builder.addAlias(
+                        exp_name,
+                        llvm_global_ty,
+                        .default,
+                        global_index.toConst(),
+                    );
+                    break :global alias.ptrConst(&o.builder).global;
+                };
+                // There is an existing global with this name, so we can't just create an alias. We
+                // need to figure out what to do with the existing global instead.
+                switch (existing_global.ptrConst(&o.builder).kind) {
                     .alias => |alias| {
+                        // We can just repurpose the existing alias.
                         alias.setAliasee(global_index.toConst(), &o.builder);
-                        continue;
+                        alias.ptrConst(&o.builder).global.ptr(&o.builder).type = global_index.typeOf(&o.builder);
+                        break :global existing_global;
                     },
                     .variable, .function => {
-                        // This existing global is an `extern` corresponding to this export.
-                        // Replace it with the global being exported.
-                        // This existing global must be replaced with the alias.
-                        try global.rename(.empty, &o.builder);
-                        try global.replace(global_index, &o.builder);
+                        // This must be an extern, which is no good to us---we need an alias. The
+                        // extern should refer to the value we're exporting, so replace it with the
+                        // exported value. That will free up the name for us to create a new alias.
+                        // We need to make a new global which is an alias. Replace this existing one
+                        // with the target global, making the name available and fixing references
+                        // to this global to point to the target.
+                        try existing_global.replace(global_index, &o.builder);
+                        // The name is now free, so create an alias.
+                        const alias = try o.builder.addAlias(
+                            exp_name,
+                            llvm_global_ty,
+                            .default,
+                            global_index.toConst(),
+                        );
+                        break :global alias.ptrConst(&o.builder).global;
                     },
-                    .replaced => unreachable,
+                    .replaced => unreachable, // a replaced global would have lost the name `exp_name`
                 }
-            }
-            const alias_index = try o.builder.addAlias(
-                .empty,
-                global_index.typeOf(&o.builder),
-                .default,
-                global_index.toConst(),
-            );
-            try alias_index.rename(exp_name, &o.builder);
+            };
 
-            const alias_global_index = alias_index.ptrConst(&o.builder).global;
-            alias_global_index.setUnnamedAddr(.default, &o.builder);
-            if (comp.config.dll_export_fns and first_export.opts.visibility != .hidden)
-                alias_global_index.setDllStorageClass(.dllexport, &o.builder);
-            alias_global_index.setLinkage(switch (first_export.opts.linkage) {
-                .internal => unreachable,
+            // Now for a bit of setup which
+
+            // We need the alias to *not* be `unnamed_addr` to ensure that the alias address equals
+            // the address of the original global.
+            alias_global.setUnnamedAddr(.default, &o.builder);
+
+            if (comp.config.dll_export_fns and exp.opts.visibility != .hidden)
+                alias_global.setDllStorageClass(.dllexport, &o.builder);
+            alias_global.setLinkage(switch (exp.opts.linkage) {
+                .internal => if (o.builder.strip) .private else .internal, // we still did useful work in replacing an existing symbol if there was one
                 .strong => .external,
                 .weak => .weak_odr,
                 .link_once => .linkonce_odr,
             }, &o.builder);
-            alias_global_index.setVisibility(switch (first_export.opts.visibility) {
+            alias_global.setVisibility(switch (exp.opts.visibility) {
                 .default => .default,
                 .hidden => .hidden,
                 .protected => .protected,
@@ -1940,7 +1899,12 @@ pub const Object = struct {
             assert(val != .anyerror_type);
             const fwd_ref = o.debug_types.items[@intFromEnum(index)];
             const name_str = try o.builder.metadataStringFmt("{f}", .{ty.fmt(pt)});
-            const debug_incomplete_type = try o.builder.debugSignedType(name_str, 0);
+            // If `ty` is a function, use a dummy *function* type to prevent existing debug
+            // subprograms from becoming ill-formed.
+            const debug_incomplete_type = switch (ty.zigTypeTag(zcu)) {
+                .@"fn" => try o.builder.debugSubroutineType(null),
+                else => try o.builder.debugSignedType(name_str, 0),
+            };
             o.builder.resolveDebugForwardReference(fwd_ref, debug_incomplete_type);
         }
     }
@@ -2269,7 +2233,9 @@ pub const Object = struct {
             },
             .@"fn" => {
                 if (!ty.fnHasRuntimeBits(zcu)) {
-                    return o.builder.debugSignedType(name, 0);
+                    // Use a dummy *function* type to prevent existing debug subprograms from
+                    // becoming ill-formed.
+                    return o.builder.debugSubroutineType(null);
                 }
 
                 const fn_info = zcu.typeToFunc(ty).?;
@@ -2716,75 +2682,38 @@ pub const Object = struct {
         return o.getDebugType(pt, .fromInterned(namespace.owner_type));
     }
 
-    /// If the llvm function does not exist, create it.
-    /// Note that this can be called before the function's semantic analysis has
-    /// completed, so if any attributes rely on that, they must be done in updateFunc, not here.
-    pub fn resolveLlvmFunction(
+    /// Sets the attributes and callconv of the given `Builder.Function`, which corresponds to the
+    /// given `Nav` (which is a function).
+    fn addLlvmFunctionAttributes(
         o: *Object,
-        nav_index: InternPool.Nav.Index,
-    ) Allocator.Error!Builder.Function.Index {
+        pt: Zcu.PerThread,
+        nav_id: InternPool.Nav.Index,
+        function_index: Builder.Function.Index,
+    ) Allocator.Error!void {
         const zcu = o.zcu;
         const ip = &zcu.intern_pool;
-        const gpa = o.gpa;
-        const nav = ip.getNav(nav_index);
-        const owner_mod = zcu.navFileScope(nav_index).mod.?;
+        const nav = ip.getNav(nav_id);
+        const owner_mod = zcu.navFileScope(nav_id).mod.?;
         const ty: Type = .fromInterned(nav.resolved.?.type);
-        const gop = try o.nav_map.getOrPut(gpa, nav_index);
-        if (gop.found_existing) return gop.value_ptr.ptr(&o.builder).kind.function;
 
         const fn_info = zcu.typeToFunc(ty).?;
         const target = &owner_mod.resolved_target.result;
 
-        const is_extern, const lib_name = if (nav.getExtern(ip)) |@"extern"|
-            .{ true, @"extern".lib_name }
-        else
-            .{ false, .none };
-        const function_index = try o.builder.addFunction(
-            try o.lowerType(ty),
-            try o.builder.strtabString((if (is_extern) nav.name else nav.fqn).toSlice(ip)),
-            toLlvmAddressSpace(nav.resolved.?.@"addrspace", target),
-        );
-        gop.value_ptr.* = function_index.ptrConst(&o.builder).global;
-
         var attributes: Builder.FunctionAttributes.Wip = .{};
         defer attributes.deinit(&o.builder);
 
-        if (!is_extern) {
-            function_index.setLinkage(if (o.builder.strip) .private else .internal, &o.builder);
-            function_index.setUnnamedAddr(.unnamed_addr, &o.builder);
-        } else {
-            if (target.cpu.arch.isWasm()) {
-                try attributes.addFnAttr(.{ .string = .{
-                    .kind = try o.builder.string("wasm-import-name"),
-                    .value = try o.builder.string(nav.name.toSlice(ip)),
+        if (target.cpu.arch.isWasm()) if (nav.getExtern(ip)) |@"extern"| {
+            try attributes.addFnAttr(.{ .string = .{
+                .kind = try o.builder.string("wasm-import-name"),
+                .value = try o.builder.string(nav.name.toSlice(ip)),
+            } }, &o.builder);
+            if (@"extern".lib_name.toSlice(ip)) |lib_name_slice| {
+                if (!std.mem.eql(u8, lib_name_slice, "c")) try attributes.addFnAttr(.{ .string = .{
+                    .kind = try o.builder.string("wasm-import-module"),
+                    .value = try o.builder.string(lib_name_slice),
                 } }, &o.builder);
-                if (lib_name.toSlice(ip)) |lib_name_slice| {
-                    if (!std.mem.eql(u8, lib_name_slice, "c")) try attributes.addFnAttr(.{ .string = .{
-                        .kind = try o.builder.string("wasm-import-module"),
-                        .value = try o.builder.string(lib_name_slice),
-                    } }, &o.builder);
-                }
             }
-        }
-
-        var llvm_arg_i: u32 = 0;
-        if (firstParamSRet(fn_info, zcu, target)) {
-            // Sret pointers must not be address 0
-            try attributes.addParamAttr(llvm_arg_i, .nonnull, &o.builder);
-            try attributes.addParamAttr(llvm_arg_i, .@"noalias", &o.builder);
-
-            const raw_llvm_ret_ty = try o.lowerType(.fromInterned(fn_info.return_type));
-            try attributes.addParamAttr(llvm_arg_i, .{ .sret = raw_llvm_ret_ty }, &o.builder);
-
-            llvm_arg_i += 1;
-        }
-
-        const err_return_tracing = fn_info.cc == .auto and zcu.comp.config.any_error_tracing;
-
-        if (err_return_tracing) {
-            try attributes.addParamAttr(llvm_arg_i, .nonnull, &o.builder);
-            llvm_arg_i += 1;
-        }
+        };
 
         if (fn_info.cc == .async) {
             @panic("TODO: LLVM backend lower async function");
@@ -2859,9 +2788,6 @@ pub const Object = struct {
             }
         }
 
-        if (nav.resolved.?.@"align" != .none)
-            function_index.setAlignment(nav.resolved.?.@"align".toLlvm(), &o.builder);
-
         // Function attributes that are independent of analysis results of the function body.
         try o.addCommonFnAttributes(
             &attributes,
@@ -2877,8 +2803,71 @@ pub const Object = struct {
 
         if (fn_info.return_type == .noreturn_type) try attributes.addFnAttr(.noreturn, &o.builder);
 
+        var it = iterateParamTypes(o, fn_info);
+        if (firstParamSRet(fn_info, zcu, target)) {
+            // Sret pointers must not be address 0
+            try attributes.addParamAttr(it.llvm_index, .nonnull, &o.builder);
+            try attributes.addParamAttr(it.llvm_index, .@"noalias", &o.builder);
+
+            const raw_llvm_ret_ty = try o.lowerType(.fromInterned(fn_info.return_type));
+            try attributes.addParamAttr(it.llvm_index, .{ .sret = raw_llvm_ret_ty }, &o.builder);
+            it.llvm_index += 1;
+        }
+        const err_return_tracing = fn_info.cc == .auto and zcu.comp.config.any_error_tracing;
+        if (err_return_tracing) {
+            try attributes.addParamAttr(it.llvm_index, .nonnull, &o.builder);
+            it.llvm_index += 1;
+        }
+        while (try it.next()) |lowering| switch (lowering) {
+            .byval => {
+                const param_index = it.zig_index - 1;
+                const param_ty: Type = .fromInterned(fn_info.param_types.get(ip)[param_index]);
+                if (!isByRef(param_ty, zcu)) {
+                    try o.addByValParamAttrs(pt, &attributes, param_ty, param_index, fn_info, it.llvm_index - 1);
+                }
+            },
+            .byref => {
+                const param_ty: Type = .fromInterned(fn_info.param_types.get(ip)[it.zig_index - 1]);
+                const param_llvm_ty = try o.lowerType(param_ty);
+                const alignment = param_ty.abiAlignment(zcu);
+                try o.addByRefParamAttrs(&attributes, it.llvm_index - 1, alignment.toLlvm(), it.byval_attr, param_llvm_ty);
+            },
+            .byref_mut => try attributes.addParamAttr(it.llvm_index - 1, .noundef, &o.builder),
+            .slice => {
+                const param_ty: Type = .fromInterned(fn_info.param_types.get(ip)[it.zig_index - 1]);
+                const ptr_info = param_ty.ptrInfo(zcu);
+                const llvm_ptr_index = it.llvm_index - 2;
+                if (std.math.cast(u5, it.zig_index - 1)) |i| {
+                    if (@as(u1, @truncate(fn_info.noalias_bits >> i)) != 0) {
+                        try attributes.addParamAttr(llvm_ptr_index, .@"noalias", &o.builder);
+                    }
+                }
+                if (param_ty.zigTypeTag(zcu) != .optional and
+                    !ptr_info.flags.is_allowzero and
+                    ptr_info.flags.address_space == .generic)
+                {
+                    try attributes.addParamAttr(llvm_ptr_index, .nonnull, &o.builder);
+                }
+                if (ptr_info.flags.is_const) {
+                    try attributes.addParamAttr(llvm_ptr_index, .readonly, &o.builder);
+                }
+                const elem_align: Builder.Alignment.Lazy = switch (ptr_info.flags.alignment) {
+                    else => |a| .wrap(a.toLlvm()),
+                    .none => try o.lazyAbiAlignment(pt, .fromInterned(ptr_info.child)),
+                };
+                try attributes.addParamAttr(llvm_ptr_index, .{ .@"align" = elem_align }, &o.builder);
+            },
+            // No attributes needed for these.
+            .no_bits,
+            .abi_sized_int,
+            .multiple_llvm_types,
+            .float_array,
+            .i32_array,
+            .i64_array,
+            => continue,
+        };
+
         function_index.setAttributes(try attributes.finish(&o.builder), &o.builder);
-        return function_index;
     }
 
     fn addCommonFnAttributes(
@@ -2951,97 +2940,6 @@ pub const Object = struct {
         }
     }
 
-    fn resolveGlobalUav(
-        o: *Object,
-        uav: InternPool.Index,
-        llvm_addr_space: Builder.AddrSpace,
-        alignment: InternPool.Alignment,
-    ) Allocator.Error!Builder.Variable.Index {
-        assert(alignment != .none);
-        // TODO: Add address space to the anon_decl_map
-        const gop = try o.uav_map.getOrPut(o.gpa, uav);
-        if (gop.found_existing) {
-            // Keep the greater of the two alignments.
-            const variable_index = gop.value_ptr.ptr(&o.builder).kind.variable;
-            const old_alignment = InternPool.Alignment.fromLlvm(variable_index.getAlignment(&o.builder));
-            const max_alignment = old_alignment.maxStrict(alignment);
-            variable_index.setAlignment(max_alignment.toLlvm(), &o.builder);
-            return variable_index;
-        }
-        errdefer assert(o.uav_map.remove(uav));
-
-        const zcu = o.zcu;
-        const decl_ty = zcu.intern_pool.typeOf(uav);
-
-        const variable_index = try o.builder.addVariable(
-            try o.builder.strtabStringFmt("__anon_{d}", .{@intFromEnum(uav)}),
-            try o.lowerType(.fromInterned(decl_ty)),
-            llvm_addr_space,
-        );
-        gop.value_ptr.* = variable_index.ptrConst(&o.builder).global;
-
-        try variable_index.setInitializer(try o.lowerValue(uav), &o.builder);
-        variable_index.setLinkage(if (o.builder.strip) .private else .internal, &o.builder);
-        variable_index.setMutability(.constant, &o.builder);
-        variable_index.setUnnamedAddr(.unnamed_addr, &o.builder);
-        variable_index.setAlignment(alignment.toLlvm(), &o.builder);
-        return variable_index;
-    }
-
-    fn resolveGlobalNav(
-        o: *Object,
-        nav_index: InternPool.Nav.Index,
-    ) Allocator.Error!Builder.Variable.Index {
-        const gop = try o.nav_map.getOrPut(o.gpa, nav_index);
-        if (gop.found_existing) return gop.value_ptr.ptr(&o.builder).kind.variable;
-        errdefer assert(o.nav_map.remove(nav_index));
-
-        const zcu = o.zcu;
-        const ip = &zcu.intern_pool;
-        const nav = ip.getNav(nav_index);
-        const linkage: std.builtin.GlobalLinkage, const visibility: Builder.Visibility, const is_dll_import: bool = switch (nav.resolved.?.value) {
-            .none => .{ .internal, .default, false }, // this is a source declaration which is *not* marked `extern`
-            else => |val| switch (ip.indexToKey(val)) {
-                else => .{ .internal, .default, false },
-                .@"extern" => |e| .{ e.linkage, .fromSymbolVisibility(e.visibility), e.is_dll_import },
-            },
-        };
-
-        const variable_index = try o.builder.addVariable(
-            try o.builder.strtabString(switch (linkage) {
-                .internal => nav.fqn,
-                .strong, .weak => nav.name,
-                .link_once => unreachable,
-            }.toSlice(ip)),
-            try o.lowerType(.fromInterned(nav.resolved.?.type)),
-            toLlvmGlobalAddressSpace(nav.resolved.?.@"addrspace", zcu.getTarget()),
-        );
-        gop.value_ptr.* = variable_index.ptrConst(&o.builder).global;
-
-        // This is needed for declarations created by `@extern`.
-        switch (linkage) {
-            .internal => {
-                variable_index.setLinkage(if (o.builder.strip) .private else .internal, &o.builder);
-                variable_index.setUnnamedAddr(.unnamed_addr, &o.builder);
-            },
-            .strong, .weak => {
-                variable_index.setLinkage(switch (linkage) {
-                    .internal => unreachable,
-                    .strong => .external,
-                    .weak => .extern_weak,
-                    .link_once => unreachable,
-                }, &o.builder);
-                variable_index.setUnnamedAddr(.default, &o.builder);
-                if (nav.resolved.?.@"threadlocal" and !zcu.navFileScope(nav_index).mod.?.single_threaded)
-                    variable_index.setThreadLocal(.generaldynamic, &o.builder);
-                if (is_dll_import) variable_index.setDllStorageClass(.dllimport, &o.builder);
-            },
-            .link_once => unreachable,
-        }
-        variable_index.setVisibility(visibility, &o.builder);
-        return variable_index;
-    }
-
     pub fn errorIntType(o: *Object) Allocator.Error!Builder.Type {
         return o.builder.intType(o.zcu.errorSetBits());
     }
@@ -3051,7 +2949,7 @@ pub const Object = struct {
         const target = zcu.getTarget();
         const ip = &zcu.intern_pool;
         return switch (t.toIntern()) {
-            .u0_type, .i0_type => unreachable,
+            .u0_type, .i0_type => unreachable, // no runtime bits
             inline .u1_type,
             .u8_type,
             .i8_type,
@@ -3100,18 +2998,18 @@ pub const Object = struct {
                 return .i8;
             },
             .bool_type => .i1,
-            .void_type => .void,
-            .type_type => unreachable,
             .anyerror_type => try o.errorIntType(),
-            .comptime_int_type,
-            .comptime_float_type,
-            .noreturn_type,
-            => unreachable,
+            .void_type => unreachable, // no runtime bits
+            .type_type => unreachable, // no runtime bits
+            .comptime_int_type => unreachable, // no runtime bits
+            .comptime_float_type => unreachable, // no runtime bits
+            .noreturn_type => unreachable, // no runtime bits
+            .null_type => unreachable, // no runtime bits
+            .undefined_type => unreachable, // no runtime bits
+            .enum_literal_type => unreachable, // no runtime bits
+            .optional_noreturn_type => unreachable, // no runtime bits
+            .empty_tuple_type => unreachable, // no runtime bits
             .anyframe_type => @panic("TODO implement lowerType for AnyFrame types"),
-            .null_type,
-            .undefined_type,
-            .enum_literal_type,
-            => unreachable,
             .ptr_usize_type,
             .ptr_const_comptime_int_type,
             .manyptr_u8_type,
@@ -3121,13 +3019,10 @@ pub const Object = struct {
             .slice_const_u8_type,
             .slice_const_u8_sentinel_0_type,
             => try o.builder.structType(.normal, &.{ .ptr, try o.lowerType(.usize) }),
-            .optional_noreturn_type => unreachable,
             .anyerror_void_error_union_type,
             .adhoc_inferred_error_set_type,
             => try o.errorIntType(),
-            .generic_poison_type,
-            .empty_tuple_type,
-            => unreachable,
+            .generic_poison_type => unreachable,
             // values, not types
             .undef,
             .undef_bool,
@@ -3176,7 +3071,11 @@ pub const Object = struct {
                 ),
                 .opt_type => |child_ty| {
                     // Must stay in sync with `opt_payload` logic in `lowerPtr`.
-                    if (!Type.fromInterned(child_ty).hasRuntimeBits(zcu)) return .i8;
+                    switch (Type.fromInterned(child_ty).classify(zcu)) {
+                        .no_possible_value, .fully_comptime => unreachable,
+                        .one_possible_value => return .i8,
+                        .runtime, .partially_comptime => {},
+                    }
 
                     const payload_ty = try o.lowerType(.fromInterned(child_ty));
                     if (t.optionalReprIsPayload(zcu)) return payload_ty;
@@ -3198,8 +3097,13 @@ pub const Object = struct {
                     // Must stay in sync with `codegen.errUnionPayloadOffset`.
                     // See logic in `lowerPtr`.
                     const error_type = try o.errorIntType();
-                    if (!Type.fromInterned(error_union_type.payload_type).hasRuntimeBits(zcu))
-                        return error_type;
+
+                    switch (Type.fromInterned(error_union_type.payload_type).classify(zcu)) {
+                        .fully_comptime => unreachable,
+                        .no_possible_value, .one_possible_value => return error_type,
+                        .runtime, .partially_comptime => {},
+                    }
+
                     const payload_type = try o.lowerType(.fromInterned(error_union_type.payload_type));
 
                     const payload_align = Type.fromInterned(error_union_type.payload_type).abiAlignment(zcu);
@@ -3244,6 +3148,8 @@ pub const Object = struct {
                         try o.type_map.put(o.gpa, t.toIntern(), int_ty);
                         return int_ty;
                     }
+
+                    assert(struct_type.size > 0);
 
                     var llvm_field_types: std.ArrayList(Builder.Type) = .empty;
                     defer llvm_field_types.deinit(o.gpa);
@@ -3311,7 +3217,7 @@ pub const Object = struct {
 
                     comptime assert(struct_layout_version == 2);
                     var offset: u64 = 0;
-                    var big_align: InternPool.Alignment = .none;
+                    var big_align: InternPool.Alignment = .@"1";
 
                     for (
                         tuple_type.types.get(ip),
@@ -3345,6 +3251,7 @@ pub const Object = struct {
                             try o.builder.arrayType(padding_len, .i8),
                         );
                     }
+                    assert(offset > 0);
                     return o.builder.structType(.normal, llvm_field_types.items);
                 },
                 .union_type => {
@@ -3357,6 +3264,8 @@ pub const Object = struct {
                         try o.type_map.put(o.gpa, t.toIntern(), int_ty);
                         return int_ty;
                     }
+
+                    assert(union_obj.size > 0);
 
                     const layout = Type.getUnionLayout(union_obj, zcu);
 
@@ -3421,15 +3330,9 @@ pub const Object = struct {
                     );
                     return ty;
                 },
-                .opaque_type => {
-                    const gop = try o.type_map.getOrPut(o.gpa, t.toIntern());
-                    if (!gop.found_existing) {
-                        gop.value_ptr.* = try o.builder.opaqueType(try o.builder.string(t.containerTypeName(ip).toSlice(ip)));
-                    }
-                    return gop.value_ptr.*;
-                },
+                .opaque_type => unreachable, // no runtime bits
                 .enum_type => try o.lowerType(t.intTagType(zcu)),
-                .func_type => |func_type| try o.lowerFnType(func_type),
+                .func_type => |func_type| try o.lowerFnType(t, func_type),
                 .error_set_type, .inferred_error_set_type => try o.errorIntType(),
                 // values, not types
                 .undef,
@@ -3455,10 +3358,13 @@ pub const Object = struct {
         };
     }
 
-    fn lowerFnType(o: *Object, fn_info: InternPool.Key.FuncType) Allocator.Error!Builder.Type {
+    fn lowerFnType(o: *Object, fn_ty: Type, fn_info: InternPool.Key.FuncType) Allocator.Error!Builder.Type {
         const zcu = o.zcu;
         const ip = &zcu.intern_pool;
         const target = zcu.getTarget();
+
+        assert(fn_ty.fnHasRuntimeBits(zcu));
+
         const ret_ty = try lowerFnRetTy(o, fn_info);
 
         var llvm_params: std.ArrayList(Builder.Type) = .empty;
@@ -3526,15 +3432,12 @@ pub const Object = struct {
         const ip = &zcu.intern_pool;
         const target = zcu.getTarget();
 
-        const val = Value.fromInterned(arg_val);
+        const val: Value = .fromInterned(arg_val);
         const val_key = ip.indexToKey(val.toIntern());
-
-        if (val.isUndef(zcu)) {
-            return o.builder.undefConst(try o.lowerType(.fromInterned(val_key.typeOf())));
-        }
 
         const ty: Type = .fromInterned(val_key.typeOf());
         ty.assertHasLayout(zcu);
+        assert(ty.hasRuntimeBits(zcu));
 
         return switch (val_key) {
             .int_type,
@@ -3555,7 +3458,7 @@ pub const Object = struct {
             .inferred_error_set_type,
             => unreachable, // types, not values
 
-            .undef => unreachable, // handled above
+            .undef => return o.builder.undefConst(try o.lowerType(ty)),
             .simple_value => |simple_value| switch (simple_value) {
                 .void => unreachable, // non-runtime value
                 .null => unreachable, // non-runtime value
@@ -3565,14 +3468,8 @@ pub const Object = struct {
                 .true => .true,
             },
             .enum_literal => unreachable, // non-runtime value
-            .@"extern" => |@"extern"| {
-                const function_index = try o.resolveLlvmFunction(@"extern".owner_nav);
-                return function_index.ptrConst(&o.builder).global.toConst();
-            },
-            .func => |func| {
-                const function_index = try o.resolveLlvmFunction(func.owner_nav);
-                return function_index.ptrConst(&o.builder).global.toConst();
-            },
+            .@"extern" => unreachable, // non-runtime value
+            .func => unreachable, // non-runtime value
             .int => {
                 var bigint_space: Value.BigIntSpace = undefined;
                 const bigint = val.toBigInt(&bigint_space, zcu);
@@ -3815,7 +3712,7 @@ pub const Object = struct {
                     comptime assert(struct_layout_version == 2);
                     var llvm_index: usize = 0;
                     var offset: u64 = 0;
-                    var big_align: InternPool.Alignment = .none;
+                    var big_align: InternPool.Alignment = .@"1";
                     var need_unnamed = false;
                     for (
                         tuple.types.get(ip),
@@ -4033,7 +3930,7 @@ pub const Object = struct {
         const offset: u64 = prev_offset + ptr.byte_offset;
         return switch (ptr.base_addr) {
             .nav => |nav| {
-                const base_ptr = try o.lowerNavRefValue(nav);
+                const base_ptr = try o.lowerNavRef(nav);
                 return o.builder.gepConst(.inbounds, .i8, base_ptr, null, &.{
                     try o.builder.intConst(.i64, offset),
                 });
@@ -4092,8 +3989,19 @@ pub const Object = struct {
         };
     }
 
-    /// This logic is very similar to `lowerNavRefValue` but for anonymous declarations.
-    /// Maybe the logic could be unified.
+    pub fn lowerPtrToVoid(
+        o: *Object,
+        /// Must not be `.none`.
+        @"align": InternPool.Alignment,
+        @"addrspace": std.builtin.AddressSpace,
+    ) Allocator.Error!Builder.Constant {
+        const addr: u64 = @"align".toByteUnits().?;
+        const llvm_usize = try o.lowerType(.usize);
+        const llvm_addr = try o.builder.intConst(llvm_usize, addr);
+        const llvm_ptr_ty = try o.builder.ptrType(toLlvmAddressSpace(@"addrspace", o.zcu.getTarget()));
+        return o.builder.castConst(.inttoptr, llvm_addr, llvm_ptr_ty);
+    }
+
     pub fn lowerUavRef(
         o: *Object,
         uav_val: InternPool.Index,
@@ -4105,6 +4013,8 @@ pub const Object = struct {
 
         const zcu = o.zcu;
         const ip = &zcu.intern_pool;
+        const gpa = zcu.comp.gpa;
+
         const uav_ty: Type = .fromInterned(ip.typeOf(uav_val));
 
         switch (ip.indexToKey(uav_val)) {
@@ -4118,63 +4028,63 @@ pub const Object = struct {
         }
 
         const llvm_addrspace = toLlvmAddressSpace(@"addrspace", zcu.getTarget());
-        const llvm_global = (try o.resolveGlobalUav(uav_val, llvm_addrspace, @"align")).ptrConst(&o.builder).global;
 
-        return o.builder.convConst(
-            llvm_global.toConst(),
-            try o.builder.ptrType(llvm_addrspace),
-        );
+        const gop = try o.uav_map.getOrPut(gpa, .{ .val = uav_val, .@"addrspace" = @"addrspace" });
+        if (gop.found_existing) {
+            // Keep the greater of the two alignments.
+            const llvm_variable = gop.value_ptr.*;
+            const old_align: InternPool.Alignment = .fromLlvm(llvm_variable.getAlignment(&o.builder));
+            llvm_variable.setAlignment(old_align.maxStrict(@"align").toLlvm(), &o.builder);
+            return llvm_variable.ptrConst(&o.builder).global.toConst();
+        }
+        errdefer assert(o.uav_map.remove(.{ .val = uav_val, .@"addrspace" = @"addrspace" }));
+
+        const llvm_ty = try o.lowerType(uav_ty);
+        const llvm_name = try o.builder.strtabStringFmt("__anon_{d}", .{@intFromEnum(uav_val)});
+        const llvm_variable = try o.builder.addVariable(llvm_name, llvm_ty, llvm_addrspace);
+        gop.value_ptr.* = llvm_variable;
+        try llvm_variable.setInitializer(try o.lowerValue(uav_val), &o.builder);
+        llvm_variable.setMutability(.constant, &o.builder);
+        llvm_variable.setAlignment(@"align".toLlvm(), &o.builder);
+        const llvm_global = llvm_variable.ptrConst(&o.builder).global;
+        llvm_global.setLinkage(if (o.builder.strip) .private else .internal, &o.builder);
+        llvm_global.setUnnamedAddr(.unnamed_addr, &o.builder);
+        return llvm_global.toConst();
     }
 
-    pub fn lowerNavRefValue(o: *Object, nav_index: InternPool.Nav.Index) Allocator.Error!Builder.Constant {
+    pub fn lowerNavRef(o: *Object, nav_id: InternPool.Nav.Index) Allocator.Error!Builder.Constant {
         const zcu = o.zcu;
         const ip = &zcu.intern_pool;
+        const gpa = zcu.comp.gpa;
 
-        const nav = ip.getNav(nav_index);
-
+        const nav = ip.getNav(nav_id);
         const nav_ty: Type = .fromInterned(nav.resolved.?.type);
-
-        if (nav.getExtern(ip) == null and !nav_ty.isRuntimeFnOrHasRuntimeBits(zcu)) {
-            return o.lowerPtrToVoid(nav.resolved.?.@"align", nav.resolved.?.@"addrspace");
+        if (!nav_ty.isRuntimeFnOrHasRuntimeBits(zcu) and nav.getExtern(ip) == null) {
+            const nav_align = switch (nav.resolved.?.@"align") {
+                .none => nav_ty.abiAlignment(zcu),
+                else => |a| a,
+            };
+            return o.lowerPtrToVoid(nav_align, nav.resolved.?.@"addrspace");
         }
 
-        const llvm_global = if (nav_ty.zigTypeTag(zcu) == .@"fn")
-            (try o.resolveLlvmFunction(nav_index)).ptrConst(&o.builder).global
-        else
-            (try o.resolveGlobalNav(nav_index)).ptrConst(&o.builder).global;
+        const gop = try o.nav_map.getOrPut(gpa, nav_id);
+        if (!gop.found_existing) {
+            errdefer assert(o.nav_map.remove(nav_id));
+            // The NAV hasn't been lowered yet, so generate a placeholder global whose details will
+            // be filled in later.
+            const llvm_name = try o.builder.strtabString(nav.fqn.toSlice(ip));
+            gop.value_ptr.* = try o.builder.addGlobal(llvm_name, .{
+                .type = .void, // placeholder; populated by `updateNav`/`updateFunc`
+                .kind = .{ .alias = .none }, // placeholder; populated by `updateNav`/`updateFunc`
+            });
+        }
+        const llvm_global = gop.value_ptr.*;
 
-        return try o.builder.convConst(
-            llvm_global.toConst(),
-            try o.builder.ptrType(toLlvmAddressSpace(nav.resolved.?.@"addrspace", zcu.getTarget())),
-        );
-    }
-
-    pub fn lowerPtrToVoid(
-        o: *Object,
-        @"align": InternPool.Alignment,
-        @"addrspace": std.builtin.AddressSpace,
-    ) Allocator.Error!Builder.Constant {
-        const target = o.zcu.getTarget();
-        // Even though we are pointing at something which has zero bits (e.g. `void`),
-        // Pointers are defined to have bits. So we must return something here.
-        // The value cannot be undefined, because we use the `nonnull` annotation
-        // for non-optional pointers. We also need to respect the alignment, even though
-        // the address will never be dereferenced.
-        const int: u64 = @"align".toByteUnits() orelse
-            // Note that these 0xaa values are appropriate even in release-optimized builds
-            // because we need a well-defined value that is not null, and LLVM does not
-            // have an "undef_but_not_null" attribute. As an example, if this `alloc` AIR
-            // instruction is followed by a `wrap_optional`, it will return this value
-            // verbatim, and the result should test as non-null.
-            switch (target.ptrBitWidth()) {
-                16 => 0xaaaa,
-                32 => 0xaaaaaaaa,
-                64 => 0xaaaaaaaa_aaaaaaaa,
-                else => unreachable,
-            };
-        const llvm_usize = try o.lowerType(.usize);
-        const llvm_ptr_ty = try o.builder.ptrType(toLlvmAddressSpace(@"addrspace", target));
-        return o.builder.castConst(.inttoptr, try o.builder.intConst(llvm_usize, int), llvm_ptr_ty);
+        // We need to make sure the global's address space is up to date, because that affects the
+        // type of a pointer to this global. But everything else about the global will be populated
+        // by `updateNav` or `updateFunc`.
+        llvm_global.ptr(&o.builder).addr_space = toLlvmAddressSpace(nav.resolved.?.@"addrspace", zcu.getTarget());
+        return llvm_global.toConst();
     }
 
     pub fn addByValParamAttrs(
@@ -4243,13 +4153,14 @@ pub const Object = struct {
         const name = try o.builder.strtabString("__zig_error_name_table");
         // TODO: Address space
         const variable_index = try o.builder.addVariable(name, .ptr, .default);
-        variable_index.setLinkage(.private, &o.builder);
         variable_index.setMutability(.constant, &o.builder);
-        variable_index.setUnnamedAddr(.unnamed_addr, &o.builder);
         variable_index.setAlignment(
             Type.slice_const_u8_sentinel_0.abiAlignment(o.zcu).toLlvm(),
             &o.builder,
         );
+        const global_index = variable_index.ptrConst(&o.builder).global;
+        global_index.setLinkage(.private, &o.builder);
+        global_index.setUnnamedAddr(.unnamed_addr, &o.builder);
 
         o.error_name_table = variable_index;
         return variable_index;
@@ -4261,10 +4172,11 @@ pub const Object = struct {
             const llvm_err_int_ty = try o.errorIntType();
             const name = try builder.strtabString("__zig_errors_len");
             const variable_index = try builder.addVariable(name, llvm_err_int_ty, .default);
-            variable_index.setLinkage(.private, builder);
             variable_index.setMutability(.constant, builder);
-            variable_index.setUnnamedAddr(.unnamed_addr, builder);
             variable_index.setAlignment(Type.errorAbiAlignment(o.zcu).toLlvm(), builder);
+            const global_index = variable_index.ptrConst(&o.builder).global;
+            global_index.setLinkage(.private, builder);
+            global_index.setUnnamedAddr(.unnamed_addr, builder);
             o.errors_len_variable = variable_index;
         }
         return o.errors_len_variable;
@@ -4332,16 +4244,16 @@ pub const Object = struct {
         for (0..loaded_enum.field_names.len) |field_index| {
             const name = try o.builder.stringNull(loaded_enum.field_names.get(ip)[field_index].toSlice(ip));
             const name_init = try o.builder.stringConst(name);
-            const name_variable_index =
-                try o.builder.addVariable(.empty, name_init.typeOf(&o.builder), .default);
+            const name_variable_index = try o.builder.addVariable(.empty, name_init.typeOf(&o.builder), .default);
             try name_variable_index.setInitializer(name_init, &o.builder);
-            name_variable_index.setLinkage(.private, &o.builder);
             name_variable_index.setMutability(.constant, &o.builder);
-            name_variable_index.setUnnamedAddr(.unnamed_addr, &o.builder);
             name_variable_index.setAlignment(comptime Builder.Alignment.fromByteUnits(1), &o.builder);
+            const name_global_index = name_variable_index.ptrConst(&o.builder).global;
+            name_global_index.setLinkage(.private, &o.builder);
+            name_global_index.setUnnamedAddr(.unnamed_addr, &o.builder);
 
             const name_val = try o.builder.structValue(llvm_ret_ty, &.{
-                name_variable_index.toConst(&o.builder),
+                name_global_index.toConst(),
                 try o.builder.intConst(llvm_usize_ty, name.slice(&o.builder).?.len - 1),
             });
 

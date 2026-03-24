@@ -581,8 +581,17 @@ fn airCall(self: *FuncGen, inst: Air.Inst.Index, modifier: std.builtin.CallModif
         else => unreachable,
     };
     const fn_info = zcu.typeToFunc(zig_fn_ty).?;
-    const return_type = Type.fromInterned(fn_info.return_type);
-    const llvm_fn = try self.resolveInst(air_call.callee);
+    const return_type: Type = .fromInterned(fn_info.return_type);
+    const llvm_fn = llvm_fn: {
+        // If the callee is a function *body*, we need to use a pointer to the global.
+        if (air_call.callee.toInterned()) |ip_index| switch (ip.indexToKey(ip_index)) {
+            .@"extern" => |e| break :llvm_fn (try o.lowerNavRef(e.owner_nav)).toValue(),
+            .func => |f| break :llvm_fn (try o.lowerNavRef(f.owner_nav)).toValue(),
+            else => {},
+        };
+        // Otherwise, the operand is already a function pointer (possibly runtime-known).
+        break :llvm_fn try self.resolveInst(air_call.callee);
+    };
     const target = zcu.getTarget();
     const sret = firstParamSRet(fn_info, zcu, target);
 
@@ -875,7 +884,9 @@ fn buildSimplePanic(fg: *FuncGen, panic_id: Zcu.SimplePanicId) Allocator.Error!v
     const target = zcu.getTarget();
     const panic_func = zcu.funcInfo(zcu.builtin_decl_values.get(panic_id.toBuiltin()));
     const fn_info = zcu.typeToFunc(.fromInterned(panic_func.ty)).?;
-    const panic_global = try o.resolveLlvmFunction(panic_func.owner_nav);
+    const llvm_panic_fn_ty = try o.lowerType(.fromInterned(panic_func.ty));
+
+    const llvm_panic_fn_ref = try o.lowerNavRef(panic_func.owner_nav);
 
     const has_err_trace = zcu.comp.config.any_error_tracing and fn_info.cc == .auto;
     if (has_err_trace) assert(fg.err_ret_trace != .none);
@@ -884,8 +895,8 @@ fn buildSimplePanic(fg: *FuncGen, panic_id: Zcu.SimplePanicId) Allocator.Error!v
         .normal,
         llvm.toLlvmCallConvTag(fn_info.cc, target).?,
         .none,
-        panic_global.typeOf(&o.builder),
-        panic_global.toValue(&o.builder),
+        llvm_panic_fn_ty,
+        llvm_panic_fn_ref.toValue(),
         if (has_err_trace) &.{fg.err_ret_trace} else &.{},
         "",
     );
@@ -1745,8 +1756,9 @@ fn airSwitchBr(self: *FuncGen, inst: Air.Inst.Index, is_dispatch_loop: bool) Tod
             .default,
         );
         try table_variable.setInitializer(table_val, &o.builder);
-        table_variable.setLinkage(if (o.builder.strip) .private else .internal, &o.builder);
-        table_variable.setUnnamedAddr(.unnamed_addr, &o.builder);
+        const table_global = table_variable.ptrConst(&o.builder).global;
+        table_global.setLinkage(if (o.builder.strip) .private else .internal, &o.builder);
+        table_global.setUnnamedAddr(.unnamed_addr, &o.builder);
 
         const table_includes_else = item_count != table_len;
 
@@ -1759,7 +1771,7 @@ fn airSwitchBr(self: *FuncGen, inst: Air.Inst.Index, is_dispatch_loop: bool) Tod
                 .likely => .likely,
                 .unlikely => .unlikely,
             },
-            .table = table_variable.toConst(&o.builder),
+            .table = table_global.toConst(),
             .table_includes_else = table_includes_else,
         };
     };
@@ -3255,8 +3267,8 @@ fn airWasmMemoryGrow(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Build
 fn airRuntimeNavPtr(fg: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
     const o = fg.object;
     const ty_nav = fg.air.instructions.items(.data)[@intFromEnum(inst)].ty_nav;
-    const llvm_ptr_const = try o.lowerNavRefValue(ty_nav.nav);
-    return llvm_ptr_const.toValue();
+    const llvm_ptr = try o.lowerNavRef(ty_nav.nav);
+    return llvm_ptr.toValue();
 }
 
 fn airMin(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
@@ -4636,29 +4648,27 @@ fn airAlloc(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value 
     const o = self.object;
     const zcu = o.zcu;
     const ptr_ty = self.typeOfIndex(inst);
-    const pointee_type = ptr_ty.childType(zcu);
-    if (!pointee_type.hasRuntimeBits(zcu)) {
-        const ptr_info = ptr_ty.ptrInfo(zcu);
-        return (try o.lowerPtrToVoid(ptr_info.flags.alignment, ptr_info.flags.address_space)).toValue();
+    const ptr_align = ptr_ty.ptrAlignment(zcu);
+    const elem_ty = ptr_ty.childType(zcu);
+    if (!elem_ty.hasRuntimeBits(zcu)) {
+        return (try o.lowerPtrToVoid(ptr_align, ptr_ty.ptrAddressSpace(zcu))).toValue();
     }
-    const pointee_llvm_ty = try o.lowerType(pointee_type);
-    const alignment = ptr_ty.ptrAlignment(zcu).toLlvm();
-    return self.buildAlloca(pointee_llvm_ty, alignment);
+    const llvm_elem_ty = try o.lowerType(elem_ty);
+    return self.buildAlloca(llvm_elem_ty, ptr_align.toLlvm());
 }
 
 fn airRetPtr(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {
+    if (self.ret_ptr != .none) return self.ret_ptr;
     const o = self.object;
     const zcu = o.zcu;
     const ptr_ty = self.typeOfIndex(inst);
-    const ret_ty = ptr_ty.childType(zcu);
-    if (!ret_ty.hasRuntimeBits(zcu)) {
-        const ptr_info = ptr_ty.ptrInfo(zcu);
-        return (try o.lowerPtrToVoid(ptr_info.flags.alignment, ptr_info.flags.address_space)).toValue();
+    const ptr_align = ptr_ty.ptrAlignment(zcu);
+    const elem_ty = ptr_ty.childType(zcu);
+    if (!elem_ty.hasRuntimeBits(zcu)) {
+        return (try o.lowerPtrToVoid(ptr_align, ptr_ty.ptrAddressSpace(zcu))).toValue();
     }
-    if (self.ret_ptr != .none) return self.ret_ptr;
-    const ret_llvm_ty = try o.lowerType(ret_ty);
-    const alignment = ptr_ty.ptrAlignment(zcu).toLlvm();
-    return self.buildAlloca(ret_llvm_ty, alignment);
+    const llvm_elem_ty = try o.lowerType(elem_ty);
+    return self.buildAlloca(llvm_elem_ty, ptr_align.toLlvm());
 }
 
 /// Use this instead of builder.buildAlloca, because this function makes sure to

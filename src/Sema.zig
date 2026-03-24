@@ -5751,7 +5751,6 @@ fn zirExport(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!void
     if (ptr_info.byte_offset != 0) {
         return sema.fail(block, ptr_src, "TODO: export pointer in middle of value", .{});
     }
-    if (zcu.llvm_object != null and options.linkage == .internal) return;
     try sema.exports.append(zcu.gpa, .{
         .opts = options,
         .src = src,

@@ -1910,14 +1910,7 @@ fn analyzeNavVal(
 
     try sema.flushExports();
 
-    queue_codegen: {
-        if (!queue_linker_work) break :queue_codegen;
-
-        if (!nav_ty.hasRuntimeBits(zcu)) {
-            if (comp.config.use_llvm) break :queue_codegen;
-            if (file.mod.?.strip) break :queue_codegen;
-        }
-
+    if (queue_linker_work) {
         comp.link_prog_node.increaseEstimatedTotalItems(1);
         try comp.link_queue.enqueueZcu(comp, pt.tid, .{ .link_nav = nav_id });
     }
