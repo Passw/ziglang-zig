@@ -7,6 +7,7 @@
 // https://git.musl-libc.org/cgit/musl/tree/src/math/__sindf.c
 // https://git.musl-libc.org/cgit/musl/tree/src/math/__tand.c
 // https://git.musl-libc.org/cgit/musl/tree/src/math/__tandf.c
+// https://git.musl-libc.org/cgit/musl/tree/src/math/__tanl.c
 
 /// kernel cos function on [-pi/4, pi/4], pi/4 ~ 0.785398164
 /// Input x is assumed to be bounded by ~pi/4 in magnitude.
@@ -270,4 +271,130 @@ pub fn __tandf(x: f64, odd: bool) f32 {
     const u = T[0] + z * T[1];
     const r0 = (x + s * u) + (s * w) * (t + w * r);
     return @floatCast(if (odd) -1.0 / r0 else r0);
+}
+
+pub fn __tanl(comptime T: type, x_: T, y_: T, odd: i32) T {
+    var x = x_;
+    var y = y_;
+    const impl = switch (T) {
+        f80 => struct {
+            const pio4: T = 0.785398163397448309628;
+            const pio4lo: T = -1.25413940316708300586e-20;
+
+            const T3: T = 0.333333333333333333180;
+            const T5: T = 0.133333333333333372290;
+            const T7: T = 0.0539682539682504975744;
+            const T9: f64 = 0.021869488536312216;
+            const T11: f64 = 0.0088632355256619590;
+            const T13: f64 = 0.0035921281113786528;
+            const T15: f64 = 0.0014558334756312418;
+            const T17: f64 = 0.00059003538700862256;
+            const T19: f64 = 0.00023907843576635544;
+            const T21: f64 = 0.000097154625656538905;
+            const T23: f64 = 0.000038440165747303162;
+            const T25: f64 = 0.000018082171885432524;
+            const T27: f64 = 0.0000024196006108814377;
+            const T29: f64 = 0.0000078293456938132840;
+            const T31: f64 = -0.0000032609076735050182;
+            const T33: f64 = 0.0000023261313142559411;
+
+            inline fn rpoly(w: T) T {
+                return T5 + w * (T9 + w * (T13 + w * (T17 + w * (T21 +
+                    w * (T25 + w * (T29 + w * T33))))));
+            }
+
+            inline fn vpoly(w: T) T {
+                return T7 + w * (T11 + w * (T15 + w * (T19 + w * (T23 +
+                    w * (T27 + w * T31)))));
+            }
+        },
+        f128 => struct {
+            const pio4: T = 0x1.921fb54442d18469898cc51701b8p-1;
+            const pio4lo: T = 0x1.cd129024e088a67cc74020bbea60p-116;
+
+            const T3: T = 0x1.5555555555555555555555555553p-2;
+            const T5: T = 0x1.1111111111111111111111111eb5p-3;
+            const T7: T = 0x1.ba1ba1ba1ba1ba1ba1ba1b694cd6p-5;
+            const T9: T = 0x1.664f4882c10f9f32d6bbe09d8bcdp-6;
+            const T11: T = 0x1.226e355e6c23c8f5b4f5762322eep-7;
+            const T13: T = 0x1.d6d3d0e157ddfb5fed8e84e27b37p-9;
+            const T15: T = 0x1.7da36452b75e2b5fce9ee7c2c92ep-10;
+            const T17: T = 0x1.355824803674477dfcf726649efep-11;
+            const T19: T = 0x1.f57d7734d1656e0aceb716f614c2p-13;
+            const T21: T = 0x1.967e18afcb180ed942dfdc518d6cp-14;
+            const T23: T = 0x1.497d8eea21e95bc7e2aa79b9f2cdp-15;
+            const T25: T = 0x1.0b132d39f055c81be49eff7afd50p-16;
+            const T27: T = 0x1.b0f72d33eff7bfa2fbc1059d90b6p-18;
+            const T29: T = 0x1.5ef2daf21d1113df38d0fbc00267p-19;
+            const T31: T = 0x1.1c77d6eac0234988cdaa04c96626p-20;
+            const T33: T = 0x1.cd2a5a292b180e0bdd701057dfe3p-22;
+            const T35: T = 0x1.75c7357d0298c01a31d0a6f7d518p-23;
+            const T37: T = 0x1.2f3190f4718a9a520f98f50081fcp-24;
+            const T39: f64 = 0.000000028443389121318352;
+            const T41: f64 = 0.000000011981013102001973;
+            const T43: f64 = 0.0000000038303578044958070;
+            const T45: f64 = 0.0000000034664378216909893;
+            const T47: f64 = -0.0000000015090641701997785;
+            const T49: f64 = 0.0000000029449552300483952;
+            const T51: f64 = -0.0000000022006995706097711;
+            const T53: f64 = 0.0000000015468200913196612;
+            const T55: f64 = -0.00000000061311613386849674;
+            const T57: f64 = 1.4912469681508012e-10;
+
+            inline fn rpoly(w: T) T {
+                return T5 + w * (T9 + w * (T13 + w * (T17 + w * (T21 +
+                    w * (T25 + w * (T29 + w * (T33 + w * (T37 + w * (T41 +
+                        w * (T45 + w * (T49 + w * (T53 + w * T57))))))))))));
+            }
+
+            inline fn vpoly(w: T) T {
+                return T7 + w * (T11 + w * (T15 + w * (T19 + w * (T23 +
+                    w * (T27 + w * (T31 + w * (T35 + w * (T39 + w * (T43 +
+                        w * (T47 + w * (T51 + w * T55)))))))))));
+            }
+        },
+        else => @compileError("__tanl supports only f80 and f128, got: " ++ @typeName(T)),
+    };
+
+    const big = @abs(x) >= 0.67434;
+    var sign: i8 = 0;
+
+    if (big) {
+        if (x < 0) {
+            sign = -1;
+            x = -x;
+            y = -y;
+        }
+        x = (impl.pio4 - x) + (impl.pio4lo - y);
+        y = 0.0;
+    }
+
+    var z = x * x;
+    var w = z * z;
+    var r = impl.rpoly(w);
+    var v = z * impl.vpoly(w);
+    var s = z * x;
+    r = y + z * (s * (r + v) + y) + impl.T3 * s;
+    w = x + r;
+
+    if (big) {
+        s = @as(T, @floatFromInt(1 - 2 * odd));
+        v = s - 2.0 * (x + (r - w * w / (w + s)));
+        return if (sign == -1) -v else v;
+    }
+
+    if (odd == 0) {
+        return w;
+    }
+
+    // if allow error up to 2 ulp, simply return
+    // -1.0 / (x+r) here
+    //
+    // compute -1.0 / (x+r) accurately
+    z = w + 0x1p32 - 0x1p32;
+    v = r - (z - x);
+    const a = -1.0 / w;
+    const t = a + 0x1p32 - 0x1p32;
+    s = 1.0 + t * z;
+    return t + a * (s + t * v);
 }
