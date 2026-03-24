@@ -1,6 +1,8 @@
 const std = @import("std");
 
 pub const U80 = std.meta.Int(.unsigned, 80);
+/// pi divided by 4
+pub const pi_4 = 0.78539816339744830962;
 
 /// Returns the sign + exponent bits of a `long double`
 pub fn ldSignExponent(x: anytype) u16 {

@@ -130,8 +130,7 @@ fn tanlGeneric(comptime T: type, x: T) T {
         return x - x;
     }
 
-    const pi_4 = 0.78539816339744830962;
-    if (@abs(x) < pi_4) {
+    if (@abs(x) < utils.pi_4) {
         if (se < 0x3fff - math.floatMantissaBits(T) / 2) {
             if (compiler_rt.want_float_exceptions) {
                 mem.doNotOptimizeAway(if (se == 0) x * 0x1p-120 else x + 0x1p120);

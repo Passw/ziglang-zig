@@ -3,17 +3,21 @@
 //!
 //! https://git.musl-libc.org/cgit/musl/tree/src/math/sinf.c
 //! https://git.musl-libc.org/cgit/musl/tree/src/math/sin.c
+//! https://git.musl-libc.org/cgit/musl/tree/src/math/sinl.c
 
 const std = @import("std");
 const math = std.math;
 const mem = std.mem;
 const expect = std.testing.expect;
+const expectApproxEqAbs = std.testing.expectApproxEqAbs;
 
 const compiler_rt = @import("../compiler_rt.zig");
 const symbol = @import("../compiler_rt.zig").symbol;
 const trig = @import("trig.zig");
 const rem_pio2 = @import("rem_pio2.zig").rem_pio2;
 const rem_pio2f = @import("rem_pio2f.zig").rem_pio2f;
+const rem_pio2l = @import("rem_pio2l.zig").rem_pio2l;
+const utils = @import("math_utils.zig");
 
 comptime {
     symbol(&__sinh, "__sinh");
@@ -128,14 +132,39 @@ pub fn sin(x: f64) callconv(.c) f64 {
     };
 }
 
+fn sinlGeneric(comptime T: type, x: T) T {
+    const se = utils.ldSignExponent(x) & 0x7fff;
+    if (se == 0x7fff) {
+        return x - x;
+    }
+
+    if (@abs(x) < utils.pi_4) {
+        if (se < 0x3fff - (math.floatMantissaBits(T) / 2)) {
+            // raise inexact if x!=0 and underflow if subnormal
+            if (compiler_rt.want_float_exceptions) {
+                mem.doNotOptimizeAway(if (se == 0) x * 0x1p-120 else x + 0x1p120);
+            }
+            return x;
+        }
+        return trig.__sinl(T, x, 0.0, 0);
+    }
+
+    var y: [2]T = undefined;
+    const n = rem_pio2l(T, x, &y);
+    return switch (n & 3) {
+        0 => trig.__sinl(T, y[0], y[1], 1),
+        1 => trig.__cosl(T, y[0], y[1]),
+        2 => -trig.__sinl(T, y[0], y[1], 1),
+        else => -trig.__cosl(T, y[0], y[1]),
+    };
+}
+
 pub fn __sinx(x: f80) callconv(.c) f80 {
-    // TODO: more efficient implementation
-    return @floatCast(sinq(x));
+    return sinlGeneric(f80, x);
 }
 
 pub fn sinq(x: f128) callconv(.c) f128 {
-    // TODO: more correct implementation
-    return sin(@floatCast(x));
+    return sinlGeneric(f128, x);
 }
 
 pub fn sinl(x: c_longdouble) callconv(.c) c_longdouble {
@@ -149,44 +178,80 @@ pub fn sinl(x: c_longdouble) callconv(.c) c_longdouble {
     }
 }
 
-test "sin32" {
-    const epsilon = 0.00001;
+fn testSinSpecial(comptime T: type) !void {
+    const f = switch (T) {
+        f32 => sinf,
+        f64 => sin,
+        f80 => __sinx,
+        f128 => sinq,
+        else => @compileError("unimplemented"),
+    };
 
-    try expect(math.approxEqAbs(f32, sinf(0.0), 0.0, epsilon));
-    try expect(math.approxEqAbs(f32, sinf(0.2), 0.198669, epsilon));
-    try expect(math.approxEqAbs(f32, sinf(0.8923), 0.778517, epsilon));
-    try expect(math.approxEqAbs(f32, sinf(1.5), 0.997495, epsilon));
-    try expect(math.approxEqAbs(f32, sinf(-1.5), -0.997495, epsilon));
-    try expect(math.approxEqAbs(f32, sinf(37.45), -0.246544, epsilon));
-    try expect(math.approxEqAbs(f32, sinf(89.123), 0.916166, epsilon));
+    try expect(math.isPositiveZero(f(0.0)));
+    try expect(math.isNegativeZero(f(-0.0)));
+    try expect(math.isNan(f(math.inf(T))));
+    try expect(math.isNan(f(-math.inf(T))));
+    try expect(math.isNan(f(math.nan(T))));
 }
 
-test "sin64" {
-    const epsilon = 0.000001;
-
-    try expect(math.approxEqAbs(f64, sin(0.0), 0.0, epsilon));
-    try expect(math.approxEqAbs(f64, sin(0.2), 0.198669, epsilon));
-    try expect(math.approxEqAbs(f64, sin(0.8923), 0.778517, epsilon));
-    try expect(math.approxEqAbs(f64, sin(1.5), 0.997495, epsilon));
-    try expect(math.approxEqAbs(f64, sin(-1.5), -0.997495, epsilon));
-    try expect(math.approxEqAbs(f64, sin(37.45), -0.246543, epsilon));
-    try expect(math.approxEqAbs(f64, sin(89.123), 0.916166, epsilon));
+test "sin32.normal" {
+    const epsilon = math.floatEps(f32);
+    try expectApproxEqAbs(@as(f32, 0.0), sinf(0.0), epsilon);
+    try expectApproxEqAbs(@as(f32, 0.19866933), sinf(0.2), epsilon);
+    try expectApproxEqAbs(@as(f32, 0.77851737), sinf(0.8923), epsilon);
+    try expectApproxEqAbs(@as(f32, 0.997495), sinf(1.5), epsilon);
+    try expectApproxEqAbs(@as(f32, -0.997495), sinf(-1.5), epsilon);
+    try expectApproxEqAbs(@as(f32, -0.24654257), sinf(37.45), epsilon);
+    try expectApproxEqAbs(@as(f32, 0.9161657), sinf(89.123), epsilon);
 }
 
 test "sin32.special" {
-    try expect(sinf(0.0) == 0.0);
-    try expect(sinf(-0.0) == -0.0);
-    try expect(math.isNan(sinf(math.inf(f32))));
-    try expect(math.isNan(sinf(-math.inf(f32))));
-    try expect(math.isNan(sinf(math.nan(f32))));
+    try testSinSpecial(f32);
+}
+
+test "sin64.normal" {
+    const epsilon = math.floatEps(f64);
+    try expectApproxEqAbs(@as(f64, 0.0), sin(0.0), epsilon);
+    try expectApproxEqAbs(@as(f64, 0.19866933079506122), sin(0.2), epsilon);
+    try expectApproxEqAbs(@as(f64, 0.7785173385577349), sin(0.8923), epsilon);
+    try expectApproxEqAbs(@as(f64, 0.9974949866040544), sin(1.5), epsilon);
+    try expectApproxEqAbs(@as(f64, -0.9974949866040544), sin(-1.5), epsilon);
+    try expectApproxEqAbs(@as(f64, -0.24654331551411082), sin(37.45), epsilon);
+    try expectApproxEqAbs(@as(f64, 0.9161652766622714), sin(89.123), epsilon);
 }
 
 test "sin64.special" {
-    try expect(sin(0.0) == 0.0);
-    try expect(sin(-0.0) == -0.0);
-    try expect(math.isNan(sin(math.inf(f64))));
-    try expect(math.isNan(sin(-math.inf(f64))));
-    try expect(math.isNan(sin(math.nan(f64))));
+    try testSinSpecial(f64);
+}
+
+test "sin80.normal" {
+    const epsilon = math.floatEps(f80);
+    try expectApproxEqAbs(@as(f80, 0.0), __sinx(0.0), epsilon);
+    try expectApproxEqAbs(@as(f80, 0.19866933079506121545941262711838975), __sinx(0.2), epsilon);
+    try expectApproxEqAbs(@as(f80, 0.77851733855773487830689285621486050), __sinx(0.8923), epsilon);
+    try expectApproxEqAbs(@as(f80, 0.99749498660405443094172337114148732), __sinx(1.5), epsilon);
+    try expectApproxEqAbs(@as(f80, -0.99749498660405443094172337114148732), __sinx(-1.5), epsilon);
+    try expectApproxEqAbs(@as(f80, -0.24654331551411356504), __sinx(37.45), epsilon);
+    try expectApproxEqAbs(@as(f80, 0.91616527666226951006), __sinx(89.123), epsilon);
+}
+
+test "sin80.special" {
+    try testSinSpecial(f80);
+}
+
+test "sin128.normal" {
+    const epsilon = math.floatEps(f128);
+    try expectApproxEqAbs(@as(f128, 0.0), sinq(0.0), epsilon);
+    try expectApproxEqAbs(@as(f128, 0.19866933079506121545941262711838975), sinq(0.2), epsilon);
+    try expectApproxEqAbs(@as(f128, 0.77851733855773487830689285621486050), sinq(0.8923), epsilon);
+    try expectApproxEqAbs(@as(f128, 0.99749498660405443094172337114148732), sinq(1.5), epsilon);
+    try expectApproxEqAbs(@as(f128, -0.99749498660405443094172337114148732), sinq(-1.5), epsilon);
+    try expectApproxEqAbs(@as(f128, -0.24654331551411356571238581321661085), sinq(37.45), epsilon);
+    try expectApproxEqAbs(@as(f128, 0.91616527666226951075019849560482170), sinq(89.123), epsilon);
+}
+
+test "sin128.special" {
+    try testSinSpecial(f128);
 }
 
 test "sin32 #9901" {

@@ -7,6 +7,8 @@
 // https://git.musl-libc.org/cgit/musl/tree/src/math/__sindf.c
 // https://git.musl-libc.org/cgit/musl/tree/src/math/__tand.c
 // https://git.musl-libc.org/cgit/musl/tree/src/math/__tandf.c
+// https://git.musl-libc.org/cgit/musl/tree/src/math/__sinl.c
+// https://git.musl-libc.org/cgit/musl/tree/src/math/__cosl.c
 // https://git.musl-libc.org/cgit/musl/tree/src/math/__tanl.c
 
 /// kernel cos function on [-pi/4, pi/4], pi/4 ~ 0.785398164
@@ -74,6 +76,52 @@ pub fn __cosdf(x: f64) f32 {
     return @floatCast(((1.0 + z * C0) + w * C1) + (w * z) * r);
 }
 
+pub fn __cosl(comptime T: type, x: T, y: T) T {
+    const impl = switch (T) {
+        f80 => struct {
+            const C1: T = 0.0416666666666666666136;
+
+            const C2: f64 = -0.0013888888888888874;
+            const C3: f64 = 0.000024801587301571716;
+            const C4: f64 = -0.00000027557319215507120;
+            const C5: f64 = 0.0000000020876754400407278;
+            const C6: f64 = -1.1470297442401303e-11;
+            const C7: f64 = 4.7383039476436467e-14;
+
+            inline fn poly(z: T) T {
+                return z * (C1 + z * (C2 + z * (C3 + z * (C4 +
+                    z * (C5 + z * (C6 + z * C7))))));
+            }
+        },
+        f128 => struct {
+            const C1: T = 0.04166666666666666666666666666666658424671;
+            const C2: T = -0.001388888888888888888888888888863490893732;
+            const C3: T = 0.00002480158730158730158730158600795304914210;
+            const C4: T = -0.2755731922398589065255474947078934284324e-6;
+            const C5: T = 0.2087675698786809897659225313136400793948e-8;
+            const C6: T = -0.1147074559772972315817149986812031204775e-10;
+            const C7: T = 0.4779477332386808976875457937252120293400e-13;
+
+            const C8: f64 = -0.1561920696721507929516718307820958119868e-15;
+            const C9: f64 = 0.4110317413744594971475941557607804508039e-18;
+            const C10: f64 = -0.8896592467191938803288521958313920156409e-21;
+            const C11: f64 = 0.1601061435794535138244346256065192782581e-23;
+
+            inline fn poly(z: T) T {
+                return z * (C1 + z * (C2 + z * (C3 + z * (C4 + z * (C5 + z * (C6 +
+                    z * (C7 + z * (C8 + z * (C9 + z * (C10 + z * C11))))))))));
+            }
+        },
+        else => @compileError("__cosl supports only f80 and f128, got: " ++ @typeName(T)),
+    };
+
+    const z = x * x;
+    const r = impl.poly(z);
+    const hz = 0.5 * z;
+    const w = 1.0 - hz;
+    return w + (((1.0 - w) - hz) + (z * r - x * y));
+}
+
 /// kernel sin function on ~[-pi/4, pi/4] (except on -0), pi/4 ~ 0.7854
 /// Input x is assumed to be bounded by ~pi/4 in magnitude.
 /// Input y is the tail of x.
@@ -118,6 +166,58 @@ pub fn __sin(x: f64, y: f64, iy: i32) f64 {
     } else {
         return x - ((z * (0.5 * y - v * r) - y) - v * S1);
     }
+}
+
+pub fn __sinl(comptime T: type, x: T, y: T, iy: i32) T {
+    const impl = switch (T) {
+        f80 => struct {
+            const S1: T = -0.166666666666666666671;
+
+            const S2: f64 = 0.0083333333333333332;
+            const S3: f64 = -0.00019841269841269427;
+            const S4: f64 = 0.0000027557319223597490;
+            const S5: f64 = -0.000000025052108218074604;
+            const S6: f64 = 1.6059006598854211e-10;
+            const S7: f64 = -7.6429779983024564e-13;
+            const S8: f64 = 2.6174587166648325e-15;
+
+            inline fn poly(z: T) T {
+                return S2 + z * (S3 + z * (S4 + z * (S5 +
+                    z * (S6 + z * (S7 + z * S8)))));
+            }
+        },
+        f128 => struct {
+            const S1: T = -0.16666666666666666666666666666666666606732416116558;
+            const S2: T = 0.0083333333333333333333333333333331135404851288270047;
+            const S3: T = -0.00019841269841269841269841269839935785325638310428717;
+            const S4: T = 0.27557319223985890652557316053039946268333231205686e-5;
+            const S5: T = -0.25052108385441718775048214826384312253862930064745e-7;
+            const S6: T = 0.16059043836821614596571832194524392581082444805729e-9;
+            const S7: T = -0.76471637318198151807063387954939213287488216303768e-12;
+            const S8: T = 0.28114572543451292625024967174638477283187397621303e-14;
+
+            const S9: f64 = -0.82206352458348947812512122163446202498005154296863e-17;
+            const S10: f64 = 0.19572940011906109418080609928334380560135358385256e-19;
+            const S11: f64 = -0.38680813379701966970673724299207480965452616911420e-22;
+            const S12: f64 = 0.64038150078671872796678569586315881020659912139412e-25;
+
+            inline fn poly(z: T) T {
+                return S2 + z * (S3 + z * (S4 + z * (S5 + z * (S6 + z * (S7 + z * (S8 +
+                    z * (S9 + z * (S10 + z * (S11 + z * S12)))))))));
+            }
+        },
+        else => @compileError("__sinl supports only f80 and f128, got: " ++ @typeName(T)),
+    };
+
+    const z = x * x;
+    const v = z * x;
+    const r = impl.poly(z);
+
+    if (iy == 0) {
+        return x + v * (impl.S1 + z * r);
+    }
+
+    return x - ((z * (0.5 * y - v * r) - y) - v * impl.S1);
 }
 
 pub fn __sindf(x: f64) f32 {
