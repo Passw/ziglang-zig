@@ -991,7 +991,7 @@ pub const EmitArtifact = enum {
     /// paths under the output directory, where those paths are named according to this function.
     /// Returned string is allocated with `gpa` and owned by the caller.
     pub fn cacheName(ea: EmitArtifact, gpa: Allocator, opts: BinNameOptions) Allocator.Error![]const u8 {
-        // hack for stage2_x86_64 + coff
+        // hack for stage2_x86_64 + coff. See Coff.flush.
         if (ea == .compiler_rt_dyn_lib) return "compiler_rt.dll";
         const suffix: []const u8 = switch (ea) {
             .bin => return binNameAlloc(gpa, opts),
