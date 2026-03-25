@@ -87,9 +87,22 @@ therefore lacking these features:
 - Ability to compile C, C++, Objective-C, and Objective-C++ files
 
 Even when built this way, Zig provides an LLVM backend that produces bitcode
-files, which may be optimized and compiled into object files via a system Clang
-package. This can be used to produce system packages of Zig applications
-without the Zig package dependency on LLVM.
+files, which may be optimized and compiled into object files via separately
+installed Clang. Similarly, Zig provides a C backend that produces C source
+code, which may be optimized and compiled into object files via a separately
+installed C compiler toolchain.
+
+From here you can tinker with `zig2` or you can proceed to installation using
+the build system as usual:
+
+```
+./zig2 build
+```
+
+However, due to the above listed caveats, it is recommended to not proceed to
+this step until this issue is resolved:
+
+[completely eliminate dependency on LLVM library API calls](https://github.com/ziglang/zig/issues/25492)
 
 ## Building from Source Using Prebuilt Zig
 
