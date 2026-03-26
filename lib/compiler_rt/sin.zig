@@ -21,6 +21,7 @@ const utils = @import("math_utils.zig");
 
 comptime {
     symbol(&__sinh, "__sinh");
+    symbol(&sinl, "__sinl");
     symbol(&sinf, "sinf");
     symbol(&sin, "sin");
     symbol(&__sinx, "__sinx");

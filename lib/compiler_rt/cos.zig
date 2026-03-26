@@ -21,6 +21,7 @@ const utils = @import("math_utils.zig");
 
 comptime {
     symbol(&__cosh, "__cosh");
+    symbol(&cosl, "__cosl");
     symbol(&cosf, "cosf");
     symbol(&cos, "cos");
     symbol(&__cosx, "__cosx");
