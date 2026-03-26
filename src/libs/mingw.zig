@@ -986,13 +986,9 @@ const mingw32_arm32_src = [_][]const u8{
     // mingwex
     "math" ++ path.sep_str ++ "arm" ++ path.sep_str ++ "s_rint.c",
     "math" ++ path.sep_str ++ "arm" ++ path.sep_str ++ "s_rintf.c",
-    "math" ++ path.sep_str ++ "arm" ++ path.sep_str ++ "sincos.S",
 };
 
-const mingw32_arm64_src = [_][]const u8{
-    // mingwex
-    "math" ++ path.sep_str ++ "arm64" ++ path.sep_str ++ "sincos.S",
-};
+const mingw32_arm64_src = [_][]const u8{};
 
 const mingw32_winpthreads_src = [_][]const u8{
     // winpthreads
