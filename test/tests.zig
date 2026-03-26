@@ -2370,17 +2370,6 @@ pub fn addModuleTests(b: *std.Build, options: ModuleTestOptions) *Step {
         const resolved_target = b.resolveTargetQuery(test_target.target);
         const target = &resolved_target.result;
 
-        if (test_target.link_libc == false and target.requiresLibC()) continue;
-        // If the target requires libc, there's no point building the cases that
-        // don't explicitly link libc as they'll just end up actually linking
-        // libc anyway, thus creating duplicate work and making -Dskip-libc not
-        // work as expected.
-        if (test_target.link_libc == null and target.requiresLibC()) continue;
-        // These targets don't strictly require libc, but we don't yet have a
-        // syscall layer for them, so the compiler links libc by default. They
-        // therefore get the same treatment here.
-        if (test_target.link_libc == null and (target.os.tag == .freebsd or target.os.tag == .netbsd or target.os.tag == .openbsd)) continue;
-
         if (!options.test_extra_targets and test_target.extra_target) continue;
 
         if (options.skip_non_native and !test_target.target.isNative())
