@@ -472,12 +472,7 @@ pub fn resolve(options: Options) ResolveError!Config {
             break :b true;
         }
         if (options.pie) |pie| break :b pie;
-        break :b if (options.output_mode == .Exe) switch (target.os.tag) {
-            .fuchsia,
-            .openbsd,
-            => true,
-            else => target.os.tag.isDarwin(),
-        } else false;
+        break :b if (options.output_mode == .Exe) target_util.defaultPie(target) else false;
     };
 
     const lto: std.zig.LtoMode = b: {
