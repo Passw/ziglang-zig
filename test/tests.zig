@@ -2379,7 +2379,7 @@ pub fn addModuleTests(b: *std.Build, options: ModuleTestOptions) *Step {
         // These targets don't strictly require libc, but we don't yet have a
         // syscall layer for them, so the compiler links libc by default. They
         // therefore get the same treatment here.
-        if (test_target.link_libc == null and (target.os.tag == .freebsd or target.os.tag == .netbsd)) continue;
+        if (test_target.link_libc == null and (target.os.tag == .freebsd or target.os.tag == .netbsd or target.os.tag == .openbsd)) continue;
 
         if (!options.test_extra_targets and test_target.extra_target) continue;
 
