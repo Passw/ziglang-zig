@@ -311,20 +311,12 @@ test "floating point VaList args" {
     if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_spirv) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_riscv64) return error.SkipZigTest;
-    if (builtin.zig_backend == .stage2_llvm and !builtin.os.tag.isDarwin() and builtin.cpu.arch.isAARCH64()) {
-        // https://github.com/ziglang/zig/issues/14096
-        return error.SkipZigTest;
-    }
-    if (builtin.cpu.arch == .x86_64 and builtin.zig_backend == .stage2_llvm) return error.SkipZigTest;
-    if (builtin.cpu.arch == .x86_64 and builtin.os.tag == .windows and builtin.zig_backend != .stage2_x86_64) {
-        // https://github.com/ziglang/zig/issues/16961
-        return error.SkipZigTest; // TODO
-    }
-    if (builtin.cpu.arch == .s390x and builtin.zig_backend == .stage2_llvm) return error.SkipZigTest; // https://github.com/ziglang/zig/issues/21350
-    if (builtin.cpu.arch.isSPARC() and builtin.zig_backend == .stage2_llvm) return error.SkipZigTest; // https://github.com/ziglang/zig/issues/23718
-    if (builtin.cpu.arch.isRISCV() and builtin.zig_backend == .stage2_llvm) return error.SkipZigTest; // https://github.com/ziglang/zig/issues/25064
+    if (builtin.zig_backend == .stage2_llvm) return error.SkipZigTest; // https://github.com/ziglang/zig/issues/16961
 
-    // Float register arguments are handled specially on cc == .x86_64_win, so it's important that we test all 4 slots
+    // Float register arguments are handled specially on cc == .x86_64_win, so it's important that we test all 4 slots,
+    // and pre-C23 doesn't allow a variadic function without at least one non-variadic argument.
+    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest;
+
     const S = struct {
         fn proxy(...) callconv(.c) void {
             var ap = @cVaStart();
