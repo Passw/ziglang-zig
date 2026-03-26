@@ -1889,6 +1889,7 @@ fn buildOutputType(
                 object,
                 assembly,
                 preprocessor,
+                version,
             };
             var c_out_mode: ?COutMode = null;
             var out_path: ?[]const u8 = null;
@@ -1917,6 +1918,10 @@ fn buildOutputType(
                     .c, .r => c_out_mode = .object, // -c or -r
                     .asm_only => c_out_mode = .assembly, // -S
                     .preprocess_only => c_out_mode = .preprocessor, // -E
+                    .version => {
+                        c_out_mode = .version; // --version
+                        disable_c_depfile = true;
+                    },
                     .emit_llvm => emit_llvm = true,
                     .x => {
                         const lang = mem.sliceTo(it.only_arg, 0);
@@ -2939,9 +2944,11 @@ fn buildOutputType(
             }
 
             // precompiled header syntax: "zig cc -x c-header test.h -o test.pch"
-            const emit_pch = ((file_ext == .h or file_ext == .hpp or file_ext == .hm or file_ext == .hmm) and c_out_mode == null);
-            if (emit_pch)
-                c_out_mode = .preprocessor;
+            const emit_pch = if (file_ext) |fe| switch (fe) {
+                .h, .hpp, .hm, .hmm => c_out_mode == null,
+                else => false,
+            } else false;
+            if (emit_pch) c_out_mode = .preprocessor;
 
             switch (c_out_mode orelse .link) {
                 .link => {
@@ -3007,6 +3014,20 @@ fn buildOutputType(
                             emit_bin = .no;
                             clang_preprocessor_mode = .stdout;
                         }
+                    }
+                },
+                .version => {
+                    // We can't allow control flow to reach the simpler logic
+                    // below because the -target argument has to be lowered to
+                    // clang syntax in Compilation.
+                    create_module.opts.output_mode = .Obj;
+                    clang_preprocessor_mode = .version;
+                    if (create_module.c_source_files.items.len == 0) {
+                        try create_module.c_source_files.append(arena, .{
+                            .owner = undefined,
+                            .src_path = "a.c", // dummy name
+                            .ext = .c,
+                        });
                     }
                 },
             }
