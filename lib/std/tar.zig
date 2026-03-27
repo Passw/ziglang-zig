@@ -588,8 +588,9 @@ pub const pipeToFileSystem = extract;
 /// Ingests tar file from `reader`, populating file contents within `dir`. If
 /// any file would be extracted outside of `dir`, an error is return instead.
 pub fn extract(io: Io, dir: Io.Dir, reader: *Io.Reader, options: ExtractOptions) !void {
-    var file_name_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    var link_name_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    var file_name_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
+    var link_name_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
+    var sanitize_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
     var file_contents_buffer: [1024]u8 = undefined;
     var it: Iterator = .init(reader, .{
         .file_name_buffer = &file_name_buffer,
@@ -598,14 +599,15 @@ pub fn extract(io: Io, dir: Io.Dir, reader: *Io.Reader, options: ExtractOptions)
     });
 
     while (try it.next()) |file| {
-        const file_name = stripComponents(file.name, options.strip_components);
-        if (file_name.len == 0 and file.kind != .directory) {
+        const n = sanitizePath(&sanitize_buffer, file.name, options.strip_components) catch 0;
+        if (n == 0 and file.kind != .directory) {
             const d = options.diagnostics orelse return error.TarComponentsOutsideStrippedPrefix;
             try d.errors.append(d.allocator, .{ .components_outside_stripped_prefix = .{
                 .file_name = try d.allocator.dupe(u8, file.name),
             } });
             continue;
         }
+        const file_name = sanitize_buffer[0..n];
         if (options.diagnostics) |d| {
             try d.findRoot(file.kind, file_name);
         }
@@ -671,27 +673,59 @@ fn createDirAndSymlink(io: Io, dir: Io.Dir, link_name: []const u8, file_name: []
     };
 }
 
-fn stripComponents(path: []const u8, count: u32) []const u8 {
+fn sanitizePath(buffer: []u8, path: []const u8, strip_components: u32) error{Invalid}!usize {
+    if (path.len == 0 or path[0] == '/') return error.Invalid;
     var i: usize = 0;
-    var c = count;
-    while (c > 0) : (c -= 1) {
-        if (std.mem.findScalarPos(u8, path, i, '/')) |pos| {
-            i = pos + 1;
-        } else {
-            i = path.len;
-            break;
+    var c = strip_components;
+    var it = std.mem.tokenizeScalar(u8, path, '/');
+    while (it.next()) |component| {
+        if (std.mem.eql(u8, component, ".")) continue;
+        if (std.mem.eql(u8, component, "..")) {
+            if (i == 0) return error.Invalid;
+            while (true) {
+                const ends_with_slash = buffer[i - 1] == '/';
+                i -= 1;
+                if (ends_with_slash or i == 0) break;
+            }
+            continue;
         }
+        if (c > 0) {
+            c -= 1;
+            continue;
+        }
+        if (i > 0) {
+            buffer[i] = '/';
+            i += 1;
+        }
+        @memcpy(buffer[i..][0..component.len], component);
+        i += component.len;
     }
-    return path[i..];
+    if (c > 0) return error.Invalid;
+    return i;
 }
 
-test stripComponents {
-    const expectEqualStrings = testing.expectEqualStrings;
-    try expectEqualStrings("a/b/c", stripComponents("a/b/c", 0));
-    try expectEqualStrings("b/c", stripComponents("a/b/c", 1));
-    try expectEqualStrings("c", stripComponents("a/b/c", 2));
-    try expectEqualStrings("", stripComponents("a/b/c", 3));
-    try expectEqualStrings("", stripComponents("a/b/c", 4));
+fn testSanitizePath(expected: []const u8, input: []const u8, strip: u32) !void {
+    var buffer: [Io.Dir.max_path_bytes]u8 = undefined;
+    const result = buffer[0..try sanitizePath(&buffer, input, strip)];
+    try testing.expectEqualStrings(expected, result);
+}
+
+fn testSanitizePathError(expected: anyerror, input: []const u8, strip: u32) !void {
+    var buffer: [Io.Dir.max_path_bytes]u8 = undefined;
+    try testing.expectError(expected, sanitizePath(&buffer, input, strip));
+}
+
+test sanitizePath {
+    try testSanitizePath("a/b/c", "a/b/c", 0);
+    try testSanitizePath("a/b/c", "a/x/y/../../b/c", 0);
+    try testSanitizePath("b/c", "a/b/c", 1);
+    try testSanitizePath("c", "a/b/c", 2);
+    try testSanitizePath("", "a/b/c", 3);
+    try testSanitizePath("", "a/b/c/../../..", 0);
+    try testSanitizePathError(error.Invalid, "a/b/c", 4);
+    try testSanitizePathError(error.Invalid, "..", 0);
+    try testSanitizePathError(error.Invalid, "a/b/../../..", 0);
+    try testSanitizePathError(error.Invalid, "a/b/../..", 1);
 }
 
 test PaxIterator {
