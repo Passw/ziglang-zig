@@ -1,6 +1,6 @@
 #!/bin/sh
 
-# Requires cmake ninja-build
+# Requires cmake ninja
 
 set -x
 set -e

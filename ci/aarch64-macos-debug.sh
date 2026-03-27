@@ -1,5 +1,7 @@
 #!/bin/sh
 
+# Requires cmake ninja
+
 set -x
 set -e
 
