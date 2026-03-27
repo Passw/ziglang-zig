@@ -4217,7 +4217,7 @@ fn dirCreateFilePosix(
     userdata: ?*anyopaque,
     dir: Dir,
     sub_path: []const u8,
-    flags: File.CreateFlags,
+    flags: Dir.CreateFileOptions,
 ) File.OpenError!File {
     const t: *Threaded = @ptrCast(@alignCast(userdata));
     _ = t;
@@ -4385,7 +4385,7 @@ fn dirCreateFileWindows(
     userdata: ?*anyopaque,
     dir: Dir,
     sub_path: []const u8,
-    flags: File.CreateFlags,
+    flags: Dir.CreateFileOptions,
 ) File.OpenError!File {
     const t: *Threaded = @ptrCast(@alignCast(userdata));
     _ = t;
@@ -4535,7 +4535,7 @@ fn dirCreateFileWasi(
     userdata: ?*anyopaque,
     dir: Dir,
     sub_path: []const u8,
-    flags: File.CreateFlags,
+    flags: Dir.CreateFileOptions,
 ) File.OpenError!File {
     const t: *Threaded = @ptrCast(@alignCast(userdata));
     _ = t;
@@ -4785,7 +4785,7 @@ fn dirOpenFilePosix(
     userdata: ?*anyopaque,
     dir: Dir,
     sub_path: []const u8,
-    flags: File.OpenFlags,
+    flags: Dir.OpenFileOptions,
 ) File.OpenError!File {
     const t: *Threaded = @ptrCast(@alignCast(userdata));
 
@@ -4979,7 +4979,7 @@ fn dirOpenFileWindows(
     userdata: ?*anyopaque,
     dir: Dir,
     sub_path: []const u8,
-    flags: File.OpenFlags,
+    flags: Dir.OpenFileOptions,
 ) File.OpenError!File {
     const t: *Threaded = @ptrCast(@alignCast(userdata));
     _ = t;
@@ -4992,7 +4992,7 @@ fn dirOpenFileWindows(
 pub fn dirOpenFileWtf16(
     dir_handle: ?windows.HANDLE,
     sub_path_w: []const u16,
-    flags: File.OpenFlags,
+    flags: Dir.OpenFileOptions,
 ) File.OpenError!File {
     const allow_directory = flags.allow_directory and !flags.isWrite();
     if (!allow_directory and std.mem.eql(u16, sub_path_w, &.{'.'})) return error.IsDir;
@@ -5129,7 +5129,7 @@ fn dirOpenFileWasi(
     userdata: ?*anyopaque,
     dir: Dir,
     sub_path: []const u8,
-    flags: File.OpenFlags,
+    flags: Dir.OpenFileOptions,
 ) File.OpenError!File {
     if (builtin.link_libc) return dirOpenFilePosix(userdata, dir, sub_path, flags);
     const t: *Threaded = @ptrCast(@alignCast(userdata));
@@ -10193,7 +10193,7 @@ fn posixSeekTo(fd: posix.fd_t, offset: u64) File.SeekError!void {
     }
 }
 
-fn processExecutableOpen(userdata: ?*anyopaque, flags: File.OpenFlags) process.OpenExecutableError!File {
+fn processExecutableOpen(userdata: ?*anyopaque, flags: Dir.OpenFileOptions) process.OpenExecutableError!File {
     const t: *Threaded = @ptrCast(@alignCast(userdata));
     switch (native_os) {
         .wasi => return error.OperationUnsupported,
