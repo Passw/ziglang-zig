@@ -2413,6 +2413,19 @@ pub fn addModuleTests(b: *std.Build, options: ModuleTestOptions) *Step {
         const would_use_llvm = wouldUseLlvm(test_target.use_llvm, test_target.target, test_target.optimize_mode);
         if (options.skip_llvm and would_use_llvm) continue;
 
+        if (would_use_llvm and (mem.eql(u8, options.name, "compiler-rt") or mem.eql(u8, options.name, "zigc"))) {
+            switch (test_target.optimize_mode) {
+                .Debug, .ReleaseSafe => {
+                    // LLVM 21 is affected by multiple bugs in safe builds of compiler-rt:
+                    // * https://codeberg.org/ziglang/zig/issues/31701
+                    // * https://codeberg.org/ziglang/zig/issues/31702
+                    // ...so for now, skip these tests.
+                    continue;
+                },
+                .ReleaseSmall, .ReleaseFast => {},
+            }
+        }
+
         const triple_txt = resolved_target.query.zigTriple(b.allocator) catch @panic("OOM");
 
         if (options.test_target_filters.len > 0) {
