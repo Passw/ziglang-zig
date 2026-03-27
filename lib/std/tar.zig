@@ -120,8 +120,10 @@ pub const Diagnostics = struct {
     }
 };
 
-/// pipeToFileSystem options
-pub const PipeOptions = struct {
+/// Deprecated, renamed to `ExtractOptions`.
+pub const PipeOptions = ExtractOptions;
+
+pub const ExtractOptions = struct {
     /// Number of directory levels to skip when extracting files.
     strip_components: u32 = 0,
     /// How to handle the "mode" property of files from within the tar file.
@@ -580,8 +582,12 @@ pub const PaxIterator = struct {
     }
 };
 
-/// Saves tar file content to the file systems.
-pub fn pipeToFileSystem(io: Io, dir: Io.Dir, reader: *Io.Reader, options: PipeOptions) !void {
+/// Deprecated, renamed to `extract`.
+pub const pipeToFileSystem = extract;
+
+/// Ingests tar file from `reader`, populating file contents within `dir`. If
+/// any file would be extracted outside of `dir`, an error is return instead.
+pub fn extract(io: Io, dir: Io.Dir, reader: *Io.Reader, options: ExtractOptions) !void {
     var file_name_buffer: [std.fs.max_path_bytes]u8 = undefined;
     var link_name_buffer: [std.fs.max_path_bytes]u8 = undefined;
     var file_contents_buffer: [1024]u8 = undefined;
@@ -958,7 +964,7 @@ test Iterator {
     }
 }
 
-test pipeToFileSystem {
+test extract {
     const io = testing.io;
     // Example tar file is created from this tree structure:
     // $ tree example
@@ -987,7 +993,7 @@ test pipeToFileSystem {
     const dir = tmp.dir;
 
     // Save tar from reader to the file system `dir`
-    pipeToFileSystem(io, dir, &reader, .{
+    extract(io, dir, &reader, .{
         .mode_mode = .ignore,
         .strip_components = 1,
         .exclude_empty_directories = true,
@@ -1009,7 +1015,7 @@ test pipeToFileSystem {
     );
 }
 
-test "pipeToFileSystem root_dir" {
+test "extract root_dir" {
     const io = testing.io;
     const data = @embedFile("tar/testdata/example.tar");
     var reader: Io.Reader = .fixed(data);
@@ -1021,7 +1027,7 @@ test "pipeToFileSystem root_dir" {
         var diagnostics: Diagnostics = .{ .allocator = testing.allocator };
         defer diagnostics.deinit();
 
-        pipeToFileSystem(io, tmp.dir, &reader, .{
+        extract(io, tmp.dir, &reader, .{
             .strip_components = 1,
             .diagnostics = &diagnostics,
         }) catch |err| {
@@ -1043,7 +1049,7 @@ test "pipeToFileSystem root_dir" {
         var diagnostics: Diagnostics = .{ .allocator = testing.allocator };
         defer diagnostics.deinit();
 
-        pipeToFileSystem(io, tmp.dir, &reader, .{
+        extract(io, tmp.dir, &reader, .{
             .strip_components = 0,
             .diagnostics = &diagnostics,
         }) catch |err| {
@@ -1068,7 +1074,7 @@ test "findRoot with single file archive" {
 
     var diagnostics: Diagnostics = .{ .allocator = testing.allocator };
     defer diagnostics.deinit();
-    try pipeToFileSystem(io, tmp.dir, &reader, .{ .diagnostics = &diagnostics });
+    try extract(io, tmp.dir, &reader, .{ .diagnostics = &diagnostics });
 
     try testing.expectEqualStrings("", diagnostics.root_dir);
 }
@@ -1083,12 +1089,12 @@ test "findRoot without explicit root dir" {
 
     var diagnostics: Diagnostics = .{ .allocator = testing.allocator };
     defer diagnostics.deinit();
-    try pipeToFileSystem(io, tmp.dir, &reader, .{ .diagnostics = &diagnostics });
+    try extract(io, tmp.dir, &reader, .{ .diagnostics = &diagnostics });
 
     try testing.expectEqualStrings("root", diagnostics.root_dir);
 }
 
-test "pipeToFileSystem strip_components" {
+test "extract strip_components" {
     const io = testing.io;
     const data = @embedFile("tar/testdata/example.tar");
     var reader: Io.Reader = .fixed(data);
@@ -1098,7 +1104,7 @@ test "pipeToFileSystem strip_components" {
     var diagnostics: Diagnostics = .{ .allocator = testing.allocator };
     defer diagnostics.deinit();
 
-    pipeToFileSystem(io, tmp.dir, &reader, .{
+    extract(io, tmp.dir, &reader, .{
         .strip_components = 3,
         .diagnostics = &diagnostics,
     }) catch |err| {
@@ -1120,7 +1126,7 @@ fn normalizePath(bytes: []u8) []u8 {
 }
 
 // File system mode based on tar header mode and mode_mode options.
-fn filePermissions(mode: u32, options: PipeOptions) Io.File.Permissions {
+fn filePermissions(mode: u32, options: ExtractOptions) Io.File.Permissions {
     return if (!Io.File.Permissions.has_executable_bit or options.mode_mode == .ignore or (mode & 0o100) == 0)
         .default_file
     else
@@ -1142,13 +1148,13 @@ test "executable bit" {
     const S = std.posix.S;
     const data = @embedFile("tar/testdata/example.tar");
 
-    for ([_]PipeOptions.ModeMode{ .ignore, .executable_bit_only }) |opt| {
+    for ([_]ExtractOptions.ModeMode{ .ignore, .executable_bit_only }) |opt| {
         var reader: Io.Reader = .fixed(data);
 
         var tmp = testing.tmpDir(.{ .follow_symlinks = false });
         //defer tmp.cleanup();
 
-        pipeToFileSystem(io, tmp.dir, &reader, .{
+        extract(io, tmp.dir, &reader, .{
             .strip_components = 1,
             .exclude_empty_directories = true,
             .mode_mode = opt,
