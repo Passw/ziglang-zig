@@ -9,7 +9,7 @@ const trig = @import("trig.zig");
 const rem_pio2 = @import("rem_pio2.zig").rem_pio2;
 const rem_pio2f = @import("rem_pio2f.zig").rem_pio2f;
 const rem_pio2l = @import("rem_pio2l.zig").rem_pio2l;
-const utils = @import("math_utils.zig");
+const ld = @import("long_double.zig");
 const compiler_rt = @import("../compiler_rt.zig");
 const symbol = compiler_rt.symbol;
 
@@ -197,7 +197,7 @@ fn sincoslGeneric(comptime T: type, x: T, r_sin: *T, r_cos: *T) void {
         @compileError("`sincoslGeneric` implemented only for `f80` and `f128`, got: " ++ @typeName(T));
     }
 
-    const se = utils.ldSignExponent(x) & 0x7fff;
+    const se = ld.signExponent(x) & 0x7fff;
     if (se == 0x7fff) {
         const result = x - x;
         r_sin.* = result;
@@ -205,7 +205,7 @@ fn sincoslGeneric(comptime T: type, x: T, r_sin: *T, r_cos: *T) void {
         return;
     }
 
-    if (@abs(x) < utils.pi_4) {
+    if (@abs(x) < trig.pi_4) {
         if (se < 0x3fff - math.floatMantissaBits(T)) {
             // raise underflow if subnormal
             if (compiler_rt.want_float_exceptions and se == 0) {

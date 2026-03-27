@@ -17,7 +17,7 @@ const trig = @import("trig.zig");
 const rem_pio2 = @import("rem_pio2.zig").rem_pio2;
 const rem_pio2f = @import("rem_pio2f.zig").rem_pio2f;
 const rem_pio2l = @import("rem_pio2l.zig").rem_pio2l;
-const utils = @import("math_utils.zig");
+const ld = @import("long_double.zig");
 
 comptime {
     symbol(&__cosh, "__cosh");
@@ -124,12 +124,12 @@ pub fn cos(x: f64) callconv(.c) f64 {
 }
 
 fn coslGeneric(comptime T: type, x: T) T {
-    const se = utils.ldSignExponent(x) & 0x7fff;
+    const se = ld.signExponent(x) & 0x7fff;
     if (se == 0x7fff) {
         return x - x;
     }
 
-    if (@abs(x) < utils.pi_4) {
+    if (@abs(x) < trig.pi_4) {
         if (se < 0x3fff - math.floatMantissaBits(T)) {
             // raise inexact if x!=0
             return 1.0 + x;

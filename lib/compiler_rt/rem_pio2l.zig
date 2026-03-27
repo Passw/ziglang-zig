@@ -6,7 +6,7 @@
 const std = @import("std");
 const math = std.math;
 
-const utils = @import("math_utils.zig");
+const ld = @import("long_double.zig");
 const rem_pio2_large = @import("rem_pio2_large.zig").rem_pio2_large;
 
 pub fn rem_pio2l(comptime T: type, x: T, y: *[2]T) i32 {
@@ -34,8 +34,8 @@ pub fn rem_pio2l(comptime T: type, x: T, y: *[2]T) i32 {
             const pio2_3: f64 = 6.36831716351370313614e-25; // 0x18a2e037074000.0p-133
 
             fn small(x_val: T) bool {
-                const se = utils.ldSignExponent(x_val);
-                const top = utils.ldMantissaTop(x_val);
+                const se = ld.signExponent(x_val);
+                const top = ld.mantissaTop(x_val);
                 const lhs = (@as(u32, se & 0x7fff) << 16) | top;
                 const rhs: u32 = ((0x3fff + 25) << 16) | 0x921f >> 1 | 0x8000;
                 return lhs < rhs;
@@ -62,8 +62,8 @@ pub fn rem_pio2l(comptime T: type, x: T, y: *[2]T) i32 {
             const pio2_3t: T = -2.5650587247459238361625433492959285e-65;
 
             fn small(x_val: T) bool {
-                const se = utils.ldSignExponent(x_val);
-                const top = utils.ldMantissaTop(x_val);
+                const se = ld.signExponent(x_val);
+                const top = ld.mantissaTop(x_val);
                 const lhs = (@as(u32, se & 0x7fff) << 16) | top;
                 const rhs: u32 = ((0x3fff + 45) << 16) | 0x921f;
                 return lhs < rhs;
@@ -77,7 +77,7 @@ pub fn rem_pio2l(comptime T: type, x: T, y: *[2]T) i32 {
         else => @compileError("rem_pio2l supports only f80 and f128, got: " ++ @typeName(T)),
     };
 
-    const x_se = utils.ldSignExponent(x);
+    const x_se = ld.signExponent(x);
     const ex: i32 = @intCast(x_se & 0x7fff);
 
     if (impl.small(x)) {
@@ -105,14 +105,14 @@ pub fn rem_pio2l(comptime T: type, x: T, y: *[2]T) i32 {
 
         y[0] = r - w;
 
-        const ey: i32 = @intCast(utils.ldSignExponent(y[0]) & 0x7fff);
+        const ey: i32 = @intCast(ld.signExponent(y[0]) & 0x7fff);
         if (ex - ey > impl.round1) {
             var t = r;
             w = fn_ * impl.pio2_2;
             r = t - w;
             w = fn_ * impl.pio2_2t - ((t - r) - w);
             y[0] = r - w;
-            const ey2: i32 = @intCast(utils.ldSignExponent(y[0]) & 0x7fff);
+            const ey2: i32 = @intCast(ld.signExponent(y[0]) & 0x7fff);
             if (ex - ey2 > impl.round2) {
                 t = r;
                 w = fn_ * impl.pio2_3;

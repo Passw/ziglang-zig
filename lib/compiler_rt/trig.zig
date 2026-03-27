@@ -11,6 +11,9 @@
 // https://git.musl-libc.org/cgit/musl/tree/src/math/__cosl.c
 // https://git.musl-libc.org/cgit/musl/tree/src/math/__tanl.c
 
+/// pi divided by 4
+pub const pi_4 = 0.78539816339744830962;
+
 /// kernel cos function on [-pi/4, pi/4], pi/4 ~ 0.785398164
 /// Input x is assumed to be bounded by ~pi/4 in magnitude.
 /// Input y is the tail of x.

@@ -1,11 +1,11 @@
+//! Utilities for dealing with the `long double` type (`f80` or `f128`)
+
 const std = @import("std");
 
 pub const U80 = std.meta.Int(.unsigned, 80);
-/// pi divided by 4
-pub const pi_4 = 0.78539816339744830962;
 
 /// Returns the sign + exponent bits of a `long double`
-pub fn ldSignExponent(x: anytype) u16 {
+pub fn signExponent(x: anytype) u16 {
     const T = @TypeOf(x);
     switch (T) {
         f80 => {
@@ -16,12 +16,12 @@ pub fn ldSignExponent(x: anytype) u16 {
             const bits: u128 = @bitCast(x);
             return @intCast(bits >> 112);
         },
-        else => @compileError("`ldSignExponent` supports only `f80` and `f128`, got: " ++ @typeName(T)),
+        else => @compileError("`signExponent` supports only `f80` and `f128`, got: " ++ @typeName(T)),
     }
 }
 
 /// Takes the top 16 bits of a `long double`'s mantissa
-pub fn ldMantissaTop(x: anytype) u16 {
+pub fn mantissaTop(x: anytype) u16 {
     const T = @TypeOf(x);
     switch (T) {
         f80 => {
@@ -32,6 +32,6 @@ pub fn ldMantissaTop(x: anytype) u16 {
             const bits: u128 = @bitCast(x);
             return @intCast((bits >> 96) & 0xFFFF);
         },
-        else => @compileError("`ldMantissaTop` supports only `f80` and `f128`, got: " ++ @typeName(T)),
+        else => @compileError("`mantissaTop` supports only `f80` and `f128`, got: " ++ @typeName(T)),
     }
 }
