@@ -549,6 +549,10 @@ pub const OpenFileOptions = struct {
     /// controlling TTY for the current process.
     allow_ctty: bool = false,
     follow_symlinks: bool = true,
+    /// If supported by the operating system, attempted path resolution that
+    /// would escape the directory instead returns `error.AccessDenied`. If
+    /// unsupported, this option is ignored.
+    resolve_beneath: bool = false,
 
     pub const Mode = enum { read_only, write_only, read_write };
 
@@ -570,13 +574,13 @@ pub const OpenFileOptions = struct {
 /// On Windows, `sub_path` should be encoded as [WTF-8](https://wtf-8.codeberg.page/).
 /// On WASI, `sub_path` should be encoded as valid UTF-8.
 /// On other platforms, `sub_path` is an opaque sequence of bytes with no particular encoding.
-pub fn openFile(dir: Dir, io: Io, sub_path: []const u8, flags: OpenFileOptions) File.OpenError!File {
-    return io.vtable.dirOpenFile(io.userdata, dir, sub_path, flags);
+pub fn openFile(dir: Dir, io: Io, sub_path: []const u8, options: OpenFileOptions) File.OpenError!File {
+    return io.vtable.dirOpenFile(io.userdata, dir, sub_path, options);
 }
 
-pub fn openFileAbsolute(io: Io, absolute_path: []const u8, flags: OpenFileOptions) File.OpenError!File {
+pub fn openFileAbsolute(io: Io, absolute_path: []const u8, options: OpenFileOptions) File.OpenError!File {
     assert(path.isAbsolute(absolute_path));
-    return openFile(.cwd(), io, absolute_path, flags);
+    return openFile(.cwd(), io, absolute_path, options);
 }
 
 pub const CreateFileOptions = struct {
@@ -618,6 +622,10 @@ pub const CreateFileOptions = struct {
     /// is available to proceed.
     lock_nonblocking: bool = false,
     permissions: Permissions = .default_file,
+    /// If supported by the operating system, attempted path resolution that
+    /// would escape the directory instead returns `error.AccessDenied`. If
+    /// unsupported, this option is ignored.
+    resolve_beneath: bool = false,
 };
 
 /// Creates, opens, or overwrites a file with write access.
