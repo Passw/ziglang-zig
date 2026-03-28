@@ -696,7 +696,9 @@ pub fn producesPdbFile(compile: *Compile) bool {
 
 pub fn producesCompilerRtDynLib(compile: *Compile) bool {
     if (compile.rootModuleTarget().ofmt != .coff) return false;
-    return compile.use_llvm == false;
+    if (compile.bundle_compiler_rt orelse (compile.kind == .exe or compile.isDynamicLibrary()))
+        return compile.use_llvm == false;
+    return false;
 }
 
 pub fn producesImplib(compile: *Compile) bool {
