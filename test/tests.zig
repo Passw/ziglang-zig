@@ -2647,12 +2647,19 @@ pub fn wouldUseLlvm(use_llvm: ?bool, query: std.Target.Query, optimize_mode: Opt
     }
     const cpu_arch = query.cpu_arch orelse builtin.cpu.arch;
     const os_tag = query.os_tag orelse builtin.os.tag;
+    const ofmt: std.Target.ObjectFormat = query.ofmt orelse .default(os_tag, cpu_arch);
     switch (cpu_arch) {
-        .x86_64 => if (os_tag.isBSD() or os_tag == .illumos or std.Target.ptrBitWidth_arch_abi(cpu_arch, query.abi orelse .none) != 64) return true,
+        .x86_64 => {
+            if (std.Target.ptrBitWidth_arch_abi(cpu_arch, query.abi orelse .none) != 64) return true;
+            if (os_tag.isBSD() or os_tag == .illumos) return true;
+            return switch (ofmt) {
+                .elf, .macho => return false,
+                else => return true,
+            };
+        },
         .spirv32, .spirv64 => return false,
         else => return true,
     }
-    return false;
 }
 
 const CAbiTestOptions = struct {
