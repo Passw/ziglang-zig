@@ -1147,6 +1147,11 @@ const LinuxThreadImpl = struct {
         /// Ported over from musl libc's pthread detached implementation:
         /// https://github.com/ifduyue/musl/search?q=__unmapself
         fn freeAndExit(self: *ThreadCompletion) noreturn {
+            // If we do not reset the child_tidptr to null here, the kernel would later write the
+            // value zero to that address, which is inside the block we're unmapping below, after
+            // our thread exits.  This can sometimes corrupt memory in other mmap blocks from
+            // unrelated concurrent threads.
+            _ = linux.set_tid_address(null);
             // If a signal were delivered between SYS_munmap and SYS_exit, any installed signal
             // handler would immediately segfault due to the stack being unmapped. To avoid this,
             // we need to mask all signals before entering the inline asm.
