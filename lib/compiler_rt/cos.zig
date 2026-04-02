@@ -20,11 +20,11 @@ const rem_pio2l = @import("rem_pio2l.zig").rem_pio2l;
 const ld = @import("long_double.zig");
 
 comptime {
-    symbol(&__cosh, "__cosh");
+    symbol(&cosh, "__cosh");
     symbol(&cosl, "__cosl");
     symbol(&cosf, "cosf");
     symbol(&cos, "cos");
-    symbol(&__cosx, "__cosx");
+    symbol(&cosx, "__cosx");
     if (compiler_rt.want_ppc_abi) {
         symbol(&cosq, "cosf128");
     }
@@ -32,7 +32,7 @@ comptime {
     symbol(&cosl, "cosl");
 }
 
-pub fn __cosh(a: f16) callconv(.c) f16 {
+pub fn cosh(a: f16) callconv(.c) f16 {
     // TODO: more efficient implementation
     return @floatCast(cosf(a));
 }
@@ -54,27 +54,27 @@ pub fn cosf(x: f32) callconv(.c) f32 {
             if (compiler_rt.want_float_exceptions) mem.doNotOptimizeAway(x + 0x1p120);
             return 1.0;
         }
-        return trig.__cosdf(x);
+        return trig.cosdf(x);
     }
     if (ix <= 0x407b53d1) { // |x| ~<= 5*pi/4
         if (ix > 0x4016cbe3) { // |x|  ~> 3*pi/4
-            return -trig.__cosdf(if (sign) x + c2pio2 else x - c2pio2);
+            return -trig.cosdf(if (sign) x + c2pio2 else x - c2pio2);
         } else {
             if (sign) {
-                return trig.__sindf(x + c1pio2);
+                return trig.sindf(x + c1pio2);
             } else {
-                return trig.__sindf(c1pio2 - x);
+                return trig.sindf(c1pio2 - x);
             }
         }
     }
     if (ix <= 0x40e231d5) { // |x| ~<= 9*pi/4
         if (ix > 0x40afeddf) { // |x| ~> 7*pi/4
-            return trig.__cosdf(if (sign) x + c4pio2 else x - c4pio2);
+            return trig.cosdf(if (sign) x + c4pio2 else x - c4pio2);
         } else {
             if (sign) {
-                return trig.__sindf(-x - c3pio2);
+                return trig.sindf(-x - c3pio2);
             } else {
-                return trig.__sindf(x - c3pio2);
+                return trig.sindf(x - c3pio2);
             }
         }
     }
@@ -87,10 +87,10 @@ pub fn cosf(x: f32) callconv(.c) f32 {
     var y: f64 = undefined;
     const n = rem_pio2f(x, &y);
     return switch (n & 3) {
-        0 => trig.__cosdf(y),
-        1 => trig.__sindf(-y),
-        2 => -trig.__cosdf(y),
-        else => trig.__sindf(y),
+        0 => trig.cosdf(y),
+        1 => trig.sindf(-y),
+        2 => -trig.cosdf(y),
+        else => trig.sindf(y),
     };
 }
 
@@ -105,7 +105,7 @@ pub fn cos(x: f64) callconv(.c) f64 {
             if (compiler_rt.want_float_exceptions) mem.doNotOptimizeAway(x + 0x1p120);
             return 1.0;
         }
-        return trig.__cos(x, 0);
+        return trig.cos(x, 0);
     }
 
     // cos(Inf or NaN) is NaN
@@ -116,10 +116,10 @@ pub fn cos(x: f64) callconv(.c) f64 {
     var y: [2]f64 = undefined;
     const n = rem_pio2(x, &y);
     return switch (n & 3) {
-        0 => trig.__cos(y[0], y[1]),
-        1 => -trig.__sin(y[0], y[1], 1),
-        2 => -trig.__cos(y[0], y[1]),
-        else => trig.__sin(y[0], y[1], 1),
+        0 => trig.cos(y[0], y[1]),
+        1 => -trig.sin(y[0], y[1], 1),
+        2 => -trig.cos(y[0], y[1]),
+        else => trig.sin(y[0], y[1], 1),
     };
 }
 
@@ -134,20 +134,20 @@ fn coslGeneric(comptime T: type, x: T) T {
             // raise inexact if x!=0
             return 1.0 + x;
         }
-        return trig.__cosl(T, x, 0.0);
+        return trig.cosl(T, x, 0.0);
     }
 
     var y: [2]T = undefined;
     const n = rem_pio2l(T, x, &y);
     return switch (n & 3) {
-        0 => trig.__cosl(T, y[0], y[1]),
-        1 => -trig.__sinl(T, y[0], y[1], 1),
-        2 => -trig.__cosl(T, y[0], y[1]),
-        else => trig.__sinl(T, y[0], y[1], 1),
+        0 => trig.cosl(T, y[0], y[1]),
+        1 => -trig.sinl(T, y[0], y[1], 1),
+        2 => -trig.cosl(T, y[0], y[1]),
+        else => trig.sinl(T, y[0], y[1], 1),
     };
 }
 
-pub fn __cosx(x: f80) callconv(.c) f80 {
+pub fn cosx(x: f80) callconv(.c) f80 {
     return coslGeneric(f80, x);
 }
 
@@ -157,10 +157,10 @@ pub fn cosq(x: f128) callconv(.c) f128 {
 
 pub fn cosl(x: c_longdouble) callconv(.c) c_longdouble {
     switch (@typeInfo(c_longdouble).float.bits) {
-        16 => return __cosh(x),
+        16 => return cosh(x),
         32 => return cosf(x),
         64 => return cos(x),
-        80 => return __cosx(x),
+        80 => return cosx(x),
         128 => return cosq(x),
         else => @compileError("unreachable"),
     }
@@ -170,7 +170,7 @@ fn testCosSpecial(comptime T: type) !void {
     const f = switch (T) {
         f32 => cosf,
         f64 => cos,
-        f80 => __cosx,
+        f80 => cosx,
         f128 => cosq,
         else => @compileError("unimplemented"),
     };
@@ -214,13 +214,13 @@ test "cos64.special" {
 
 test "cos80.normal" {
     const epsilon = math.floatEps(f80);
-    try expectApproxEqAbs(@as(f80, 1.0), __cosx(0.0), epsilon);
-    try expectApproxEqAbs(@as(f80, 0.98006657784124163112419651674816888), __cosx(0.2), epsilon);
-    try expectApproxEqAbs(@as(f80, 0.62762309833608037003563995939286067), __cosx(0.8923), epsilon);
-    try expectApproxEqAbs(@as(f80, 0.070737201667702910088189851434268747), __cosx(1.5), epsilon);
-    try expectApproxEqAbs(@as(f80, 0.070737201667702910088189851434268747), __cosx(-1.5), epsilon);
-    try expectApproxEqAbs(@as(f80, 0.9691317730707771246), __cosx(37.45), epsilon);
-    try expectApproxEqAbs(@as(f80, 0.4008006809354834001), __cosx(89.123), epsilon);
+    try expectApproxEqAbs(@as(f80, 1.0), cosx(0.0), epsilon);
+    try expectApproxEqAbs(@as(f80, 0.98006657784124163112419651674816888), cosx(0.2), epsilon);
+    try expectApproxEqAbs(@as(f80, 0.62762309833608037003563995939286067), cosx(0.8923), epsilon);
+    try expectApproxEqAbs(@as(f80, 0.070737201667702910088189851434268747), cosx(1.5), epsilon);
+    try expectApproxEqAbs(@as(f80, 0.070737201667702910088189851434268747), cosx(-1.5), epsilon);
+    try expectApproxEqAbs(@as(f80, 0.9691317730707771246), cosx(37.45), epsilon);
+    try expectApproxEqAbs(@as(f80, 0.4008006809354834001), cosx(89.123), epsilon);
 }
 
 test "cos80.special" {

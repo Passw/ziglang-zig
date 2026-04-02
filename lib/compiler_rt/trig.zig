@@ -11,8 +11,9 @@
 // https://git.musl-libc.org/cgit/musl/tree/src/math/__cosl.c
 // https://git.musl-libc.org/cgit/musl/tree/src/math/__tanl.c
 
-/// pi divided by 4
-pub const pi_4 = 0.78539816339744830962;
+const std = @import("std");
+
+pub const pi_4 = std.math.pi / 4.0;
 
 /// kernel cos function on [-pi/4, pi/4], pi/4 ~ 0.785398164
 /// Input x is assumed to be bounded by ~pi/4 in magnitude.
@@ -49,7 +50,7 @@ pub const pi_4 = 0.78539816339744830962;
 ///         expression for cos().  Retention happens in all cases tested
 ///         under FreeBSD, so don't pessimize things by forcibly clipping
 ///         any extra precision in w.
-pub fn __cos(x: f64, y: f64) f64 {
+pub fn cos(x: f64, y: f64) f64 {
     const C1 = 4.16666666666666019037e-02; // 0x3FA55555, 0x5555554C
     const C2 = -1.38888888888741095749e-03; // 0xBF56C16C, 0x16C15177
     const C3 = 2.48015872894767294178e-05; // 0x3EFA01A0, 0x19CB1590
@@ -65,7 +66,7 @@ pub fn __cos(x: f64, y: f64) f64 {
     return w + (((1.0 - w) - hz) + (z * r - x * y));
 }
 
-pub fn __cosdf(x: f64) f32 {
+pub fn cosdf(x: f64) f32 {
     // |cos(x) - c(x)| < 2**-34.1 (~[-5.37e-11, 5.295e-11]).
     const C0 = -0x1ffffffd0c5e81.0p-54; // -0.499999997251031003120
     const C1 = 0x155553e1053a42.0p-57; //  0.0416666233237390631894
@@ -79,7 +80,7 @@ pub fn __cosdf(x: f64) f32 {
     return @floatCast(((1.0 + z * C0) + w * C1) + (w * z) * r);
 }
 
-pub fn __cosl(comptime T: type, x: T, y: T) T {
+pub fn cosl(comptime T: type, x: T, y: T) T {
     const impl = switch (T) {
         f80 => struct {
             const C1: T = 0.0416666666666666666136;
@@ -115,7 +116,7 @@ pub fn __cosl(comptime T: type, x: T, y: T) T {
                     z * (C7 + z * (C8 + z * (C9 + z * (C10 + z * C11))))))))));
             }
         },
-        else => @compileError("__cosl supports only f80 and f128, got: " ++ @typeName(T)),
+        else => @compileError("cosl supports only f80 and f128, got: " ++ @typeName(T)),
     };
 
     const z = x * x;
@@ -152,7 +153,7 @@ pub fn __cosl(comptime T: type, x: T, y: T) T {
 ///              r = x *(S2+x *(S3+x *(S4+x *(S5+x *S6))))
 ///         then                   3    2
 ///              sin(x) = x + (S1*x + (x *(r-y/2)+y))
-pub fn __sin(x: f64, y: f64, iy: i32) f64 {
+pub fn sin(x: f64, y: f64, iy: i32) f64 {
     const S1 = -1.66666666666666324348e-01; // 0xBFC55555, 0x55555549
     const S2 = 8.33333333332248946124e-03; // 0x3F811111, 0x1110F8A6
     const S3 = -1.98412698298579493134e-04; // 0xBF2A01A0, 0x19C161D5
@@ -171,7 +172,7 @@ pub fn __sin(x: f64, y: f64, iy: i32) f64 {
     }
 }
 
-pub fn __sinl(comptime T: type, x: T, y: T, iy: i32) T {
+pub fn sinl(comptime T: type, x: T, y: T, iy: i32) T {
     const impl = switch (T) {
         f80 => struct {
             const S1: T = -0.166666666666666666671;
@@ -209,7 +210,7 @@ pub fn __sinl(comptime T: type, x: T, y: T, iy: i32) T {
                     z * (S9 + z * (S10 + z * (S11 + z * S12)))))))));
             }
         },
-        else => @compileError("__sinl supports only f80 and f128, got: " ++ @typeName(T)),
+        else => @compileError("sinl supports only f80 and f128, got: " ++ @typeName(T)),
     };
 
     const z = x * x;
@@ -223,7 +224,7 @@ pub fn __sinl(comptime T: type, x: T, y: T, iy: i32) T {
     return x - ((z * (0.5 * y - v * r) - y) - v * impl.S1);
 }
 
-pub fn __sindf(x: f64) f32 {
+pub fn sindf(x: f64) f32 {
     // |sin(x)/x - s(x)| < 2**-37.5 (~[-4.89e-12, 4.824e-12]).
     const S1 = -0x15555554cbac77.0p-55; // -0.166666666416265235595
     const S2 = 0x111110896efbb2.0p-59; //  0.0083333293858894631756
@@ -270,7 +271,7 @@ pub fn __sindf(x: f64) f32 {
 ///      4. For x in [0.67434,pi/4],  let y = pi/4 - x, then
 ///              tan(x) = tan(pi/4-y) = (1-tan(y))/(1+tan(y))
 ///                     = 1 - 2*(tan(y) - (tan(y)^2)/(1+tan(y)))
-pub fn __tan(x_: f64, y_: f64, odd: bool) f64 {
+pub fn tan(x_: f64, y_: f64, odd: bool) f64 {
     var x = x_;
     var y = y_;
 
@@ -343,7 +344,7 @@ pub fn __tan(x_: f64, y_: f64, odd: bool) f64 {
     return a0 + a * (1.0 + a0 * w0 + a0 * v);
 }
 
-pub fn __tandf(x: f64, odd: bool) f32 {
+pub fn tandf(x: f64, odd: bool) f32 {
     // |tan(x)/x - t(x)| < 2**-25.5 (~[-2e-08, 2e-08]).
     const T = [_]f64{
         0x15554d3418c99f.0p-54, // 0.333331395030791399758
@@ -376,7 +377,7 @@ pub fn __tandf(x: f64, odd: bool) f32 {
     return @floatCast(if (odd) -1.0 / r0 else r0);
 }
 
-pub fn __tanl(comptime T: type, x_: T, y_: T, odd: i32) T {
+pub fn tanl(comptime T: type, x_: T, y_: T, odd: i32) T {
     var x = x_;
     var y = y_;
     const impl = switch (T) {
@@ -456,7 +457,7 @@ pub fn __tanl(comptime T: type, x_: T, y_: T, odd: i32) T {
                         w * (T47 + w * (T51 + w * T55)))))))))));
             }
         },
-        else => @compileError("__tanl supports only f80 and f128, got: " ++ @typeName(T)),
+        else => @compileError("tanl supports only f80 and f128, got: " ++ @typeName(T)),
     };
 
     const big = @abs(x) >= 0.67434;

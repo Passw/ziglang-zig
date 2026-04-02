@@ -14,10 +14,10 @@ const compiler_rt = @import("../compiler_rt.zig");
 const symbol = compiler_rt.symbol;
 
 comptime {
-    symbol(&__sincosh, "__sincosh");
+    symbol(&sincosh, "__sincosh");
     symbol(&sincosf, "sincosf");
     symbol(&sincos, "sincos");
-    symbol(&__sincosx, "__sincosx");
+    symbol(&sincosx, "__sincosx");
     if (compiler_rt.want_ppc_abi) {
         symbol(&sincosq, "sincosf128");
     }
@@ -25,7 +25,7 @@ comptime {
     symbol(&sincosl, "sincosl");
 }
 
-pub fn __sincosh(x: f16, r_sin: *f16, r_cos: *f16) callconv(.c) void {
+pub fn sincosh(x: f16, r_sin: *f16, r_cos: *f16) callconv(.c) void {
     // TODO: more efficient implementation
     var big_sin: f32 = undefined;
     var big_cos: f32 = undefined;
@@ -60,8 +60,8 @@ pub fn sincosf(x: f32, r_sin: *f32, r_cos: *f32) callconv(.c) void {
             r_cos.* = 1.0;
             return;
         }
-        r_sin.* = trig.__sindf(x);
-        r_cos.* = trig.__cosdf(x);
+        r_sin.* = trig.sindf(x);
+        r_cos.* = trig.cosdf(x);
         return;
     }
 
@@ -70,17 +70,17 @@ pub fn sincosf(x: f32, r_sin: *f32, r_cos: *f32) callconv(.c) void {
         // |x| ~<= 3pi/4
         if (ix <= 0x4016cbe3) {
             if (sign) {
-                r_sin.* = -trig.__cosdf(x + sc1pio2);
-                r_cos.* = trig.__sindf(x + sc1pio2);
+                r_sin.* = -trig.cosdf(x + sc1pio2);
+                r_cos.* = trig.sindf(x + sc1pio2);
             } else {
-                r_sin.* = trig.__cosdf(sc1pio2 - x);
-                r_cos.* = trig.__sindf(sc1pio2 - x);
+                r_sin.* = trig.cosdf(sc1pio2 - x);
+                r_cos.* = trig.sindf(sc1pio2 - x);
             }
             return;
         }
         //  -sin(x+c) is not correct if x+c could be 0: -0 vs +0
-        r_sin.* = -trig.__sindf(if (sign) x + sc2pio2 else x - sc2pio2);
-        r_cos.* = -trig.__cosdf(if (sign) x + sc2pio2 else x - sc2pio2);
+        r_sin.* = -trig.sindf(if (sign) x + sc2pio2 else x - sc2pio2);
+        r_cos.* = -trig.cosdf(if (sign) x + sc2pio2 else x - sc2pio2);
         return;
     }
 
@@ -89,16 +89,16 @@ pub fn sincosf(x: f32, r_sin: *f32, r_cos: *f32) callconv(.c) void {
         // |x| ~<= 7*pi/4
         if (ix <= 0x40afeddf) {
             if (sign) {
-                r_sin.* = trig.__cosdf(x + sc3pio2);
-                r_cos.* = -trig.__sindf(x + sc3pio2);
+                r_sin.* = trig.cosdf(x + sc3pio2);
+                r_cos.* = -trig.sindf(x + sc3pio2);
             } else {
-                r_sin.* = -trig.__cosdf(x - sc3pio2);
-                r_cos.* = trig.__sindf(x - sc3pio2);
+                r_sin.* = -trig.cosdf(x - sc3pio2);
+                r_cos.* = trig.sindf(x - sc3pio2);
             }
             return;
         }
-        r_sin.* = trig.__sindf(if (sign) x + sc4pio2 else x - sc4pio2);
-        r_cos.* = trig.__cosdf(if (sign) x + sc4pio2 else x - sc4pio2);
+        r_sin.* = trig.sindf(if (sign) x + sc4pio2 else x - sc4pio2);
+        r_cos.* = trig.cosdf(if (sign) x + sc4pio2 else x - sc4pio2);
         return;
     }
 
@@ -113,8 +113,8 @@ pub fn sincosf(x: f32, r_sin: *f32, r_cos: *f32) callconv(.c) void {
     // general argument reduction needed
     var y: f64 = undefined;
     const n = rem_pio2f(x, &y);
-    const s = trig.__sindf(y);
-    const c = trig.__cosdf(y);
+    const s = trig.sindf(y);
+    const c = trig.cosdf(y);
     switch (n & 3) {
         0 => {
             r_sin.* = s;
@@ -154,8 +154,8 @@ pub fn sincos(x: f64, r_sin: *f64, r_cos: *f64) callconv(.c) void {
             r_cos.* = 1.0;
             return;
         }
-        r_sin.* = trig.__sin(x, 0.0, 0);
-        r_cos.* = trig.__cos(x, 0.0);
+        r_sin.* = trig.sin(x, 0.0, 0);
+        r_cos.* = trig.cos(x, 0.0);
         return;
     }
 
@@ -170,8 +170,8 @@ pub fn sincos(x: f64, r_sin: *f64, r_cos: *f64) callconv(.c) void {
     // argument reduction needed
     var y: [2]f64 = undefined;
     const n = rem_pio2(x, &y);
-    const s = trig.__sin(y[0], y[1], 1);
-    const c = trig.__cos(y[0], y[1]);
+    const s = trig.sin(y[0], y[1], 1);
+    const c = trig.cos(y[0], y[1]);
     switch (n & 3) {
         0 => {
             r_sin.* = s;
@@ -216,15 +216,15 @@ fn sincoslGeneric(comptime T: type, x: T, r_sin: *T, r_cos: *T) void {
             r_cos.* = 1.0 + x;
             return;
         }
-        r_sin.* = trig.__sinl(T, x, 0.0, 0);
-        r_cos.* = trig.__cosl(T, x, 0.0);
+        r_sin.* = trig.sinl(T, x, 0.0, 0);
+        r_cos.* = trig.cosl(T, x, 0.0);
         return;
     }
 
     var y: [2]T = undefined;
     const n = rem_pio2l(T, x, &y);
-    const s = trig.__sinl(T, y[0], y[1], 1);
-    const c = trig.__cosl(T, y[0], y[1]);
+    const s = trig.sinl(T, y[0], y[1], 1);
+    const c = trig.cosl(T, y[0], y[1]);
     switch (n & 3) {
         0 => {
             r_sin.* = s;
@@ -245,7 +245,7 @@ fn sincoslGeneric(comptime T: type, x: T, r_sin: *T, r_cos: *T) void {
     }
 }
 
-pub fn __sincosx(x: f80, r_sin: *f80, r_cos: *f80) callconv(.c) void {
+pub fn sincosx(x: f80, r_sin: *f80, r_cos: *f80) callconv(.c) void {
     return sincoslGeneric(f80, x, r_sin, r_cos);
 }
 
@@ -255,10 +255,10 @@ pub fn sincosq(x: f128, r_sin: *f128, r_cos: *f128) callconv(.c) void {
 
 pub fn sincosl(x: c_longdouble, r_sin: *c_longdouble, r_cos: *c_longdouble) callconv(.c) void {
     switch (@typeInfo(c_longdouble).float.bits) {
-        16 => return __sincosh(x, r_sin, r_cos),
+        16 => return sincosh(x, r_sin, r_cos),
         32 => return sincosf(x, r_sin, r_cos),
         64 => return sincos(x, r_sin, r_cos),
-        80 => return __sincosx(x, r_sin, r_cos),
+        80 => return sincosx(x, r_sin, r_cos),
         128 => return sincosq(x, r_sin, r_cos),
         else => @compileError("unreachable"),
     }
@@ -268,7 +268,7 @@ fn testSincosSpecial(comptime T: type) !void {
     const f = switch (T) {
         f32 => sincosf,
         f64 => sincos,
-        f80 => __sincosx,
+        f80 => sincosx,
         f128 => sincosq,
         else => @compileError("unimplemented"),
     };
@@ -378,31 +378,31 @@ test "sincos80.normal" {
     var s: f80 = undefined;
     var c: f80 = undefined;
 
-    __sincosx(0.0, &s, &c);
+    sincosx(0.0, &s, &c);
     try expectApproxEqAbs(@as(f80, 0.0), s, epsilon);
     try expectApproxEqAbs(@as(f80, 1.0), c, epsilon);
 
-    __sincosx(0.2, &s, &c);
+    sincosx(0.2, &s, &c);
     try expectApproxEqAbs(@as(f80, 0.19866933079506121545941262711838975), s, epsilon);
     try expectApproxEqAbs(@as(f80, 0.98006657784124163112419651674816888), c, epsilon);
 
-    __sincosx(0.8923, &s, &c);
+    sincosx(0.8923, &s, &c);
     try expectApproxEqAbs(@as(f80, 0.77851733855773487830689285621486050), s, epsilon);
     try expectApproxEqAbs(@as(f80, 0.62762309833608037003563995939286067), c, epsilon);
 
-    __sincosx(1.5, &s, &c);
+    sincosx(1.5, &s, &c);
     try expectApproxEqAbs(@as(f80, 0.99749498660405443094172337114148732), s, epsilon);
     try expectApproxEqAbs(@as(f80, 0.070737201667702910088189851434268747), c, epsilon);
 
-    __sincosx(-1.5, &s, &c);
+    sincosx(-1.5, &s, &c);
     try expectApproxEqAbs(@as(f80, -0.99749498660405443094172337114148732), s, epsilon);
     try expectApproxEqAbs(@as(f80, 0.070737201667702910088189851434268747), c, epsilon);
 
-    __sincosx(37.45, &s, &c);
+    sincosx(37.45, &s, &c);
     try expectApproxEqAbs(@as(f80, -0.24654331551411356504), s, epsilon);
     try expectApproxEqAbs(@as(f80, 0.9691317730707771246), c, epsilon);
 
-    __sincosx(89.123, &s, &c);
+    sincosx(89.123, &s, &c);
     try expectApproxEqAbs(@as(f80, 0.91616527666226951006), s, epsilon);
     try expectApproxEqAbs(@as(f80, 0.4008006809354834001), c, epsilon);
 }
