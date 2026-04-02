@@ -123,36 +123,52 @@ pub fn cos(x: f64) callconv(.c) f64 {
     };
 }
 
-fn coslGeneric(comptime T: type, x: T) T {
+pub fn cosx(x: f80) callconv(.c) f80 {
     const se = ld.signExponent(x) & 0x7fff;
     if (se == 0x7fff) {
         return x - x;
     }
 
     if (@abs(x) < trig.pi_4) {
-        if (se < 0x3fff - math.floatMantissaBits(T)) {
+        if (se < 0x3fff - math.floatMantissaBits(f80)) {
             // raise inexact if x!=0
             return 1.0 + x;
         }
-        return trig.cosl(T, x, 0.0);
+        return trig.cosx(x, 0.0);
     }
 
-    var y: [2]T = undefined;
-    const n = rem_pio2l(T, x, &y);
+    var y: [2]f80 = undefined;
+    const n = rem_pio2l(f80, x, &y);
     return switch (n & 3) {
-        0 => trig.cosl(T, y[0], y[1]),
-        1 => -trig.sinl(T, y[0], y[1], 1),
-        2 => -trig.cosl(T, y[0], y[1]),
-        else => trig.sinl(T, y[0], y[1], 1),
+        0 => trig.cosx(y[0], y[1]),
+        1 => -trig.sinx(y[0], y[1], 1),
+        2 => -trig.cosx(y[0], y[1]),
+        else => trig.sinx(y[0], y[1], 1),
     };
 }
 
-pub fn cosx(x: f80) callconv(.c) f80 {
-    return coslGeneric(f80, x);
-}
-
 pub fn cosq(x: f128) callconv(.c) f128 {
-    return coslGeneric(f128, x);
+    const se = ld.signExponent(x) & 0x7fff;
+    if (se == 0x7fff) {
+        return x - x;
+    }
+
+    if (@abs(x) < trig.pi_4) {
+        if (se < 0x3fff - math.floatMantissaBits(f128)) {
+            // raise inexact if x!=0
+            return 1.0 + x;
+        }
+        return trig.cosq(x, 0.0);
+    }
+
+    var y: [2]f128 = undefined;
+    const n = rem_pio2l(f128, x, &y);
+    return switch (n & 3) {
+        0 => trig.cosq(y[0], y[1]),
+        1 => -trig.sinq(y[0], y[1], 1),
+        2 => -trig.cosq(y[0], y[1]),
+        else => trig.sinq(y[0], y[1], 1),
+    };
 }
 
 pub fn cosl(x: c_longdouble) callconv(.c) c_longdouble {

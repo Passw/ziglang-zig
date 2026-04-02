@@ -120,37 +120,46 @@ pub fn tan(x: f64) callconv(.c) f64 {
     return kernel.tan(y[0], y[1], n & 1 != 0);
 }
 
-fn tanlGeneric(comptime T: type, x: T) T {
-    if (!(T == f80 or T == f128)) {
-        @compileError("`tanlGeneric` implemented only for `f80` and `f128`, got: " ++ T);
-    }
-
+pub fn tanx(x: f80) callconv(.c) f80 {
     const se = ld.signExponent(x) & 0x7fff;
     if (se == 0x7fff) {
         return x - x;
     }
 
     if (@abs(x) < kernel.pi_4) {
-        if (se < 0x3fff - math.floatMantissaBits(T) / 2) {
+        if (se < 0x3fff - math.floatMantissaBits(f80) / 2) {
             if (compiler_rt.want_float_exceptions) {
                 mem.doNotOptimizeAway(if (se == 0) x * 0x1p-120 else x + 0x1p120);
             }
             return x;
         }
-        return kernel.tanl(T, x, 0.0, 0);
+        return kernel.tanx(x, 0.0, 0);
     }
 
-    var y: [2]T = undefined;
-    const n = rem_pio2l(T, x, &y);
-    return kernel.tanl(T, y[0], y[1], n & 1);
-}
-
-pub fn tanx(x: f80) callconv(.c) f80 {
-    return tanlGeneric(f80, x);
+    var y: [2]f80 = undefined;
+    const n = rem_pio2l(f80, x, &y);
+    return kernel.tanx(y[0], y[1], n & 1);
 }
 
 pub fn tanq(x: f128) callconv(.c) f128 {
-    return tanlGeneric(f128, x);
+    const se = ld.signExponent(x) & 0x7fff;
+    if (se == 0x7fff) {
+        return x - x;
+    }
+
+    if (@abs(x) < kernel.pi_4) {
+        if (se < 0x3fff - math.floatMantissaBits(f128) / 2) {
+            if (compiler_rt.want_float_exceptions) {
+                mem.doNotOptimizeAway(if (se == 0) x * 0x1p-120 else x + 0x1p120);
+            }
+            return x;
+        }
+        return kernel.tanq(x, 0.0, 0);
+    }
+
+    var y: [2]f128 = undefined;
+    const n = rem_pio2l(f128, x, &y);
+    return kernel.tanq(y[0], y[1], n & 1);
 }
 
 pub fn tanl(x: c_longdouble) callconv(.c) c_longdouble {

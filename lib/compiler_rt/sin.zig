@@ -133,39 +133,58 @@ pub fn sin(x: f64) callconv(.c) f64 {
     };
 }
 
-fn sinlGeneric(comptime T: type, x: T) T {
+fn sinx(x: f80) callconv(.c) f80 {
     const se = ld.signExponent(x) & 0x7fff;
     if (se == 0x7fff) {
         return x - x;
     }
 
     if (@abs(x) < trig.pi_4) {
-        if (se < 0x3fff - (math.floatMantissaBits(T) / 2)) {
+        if (se < 0x3fff - (math.floatMantissaBits(f80) / 2)) {
             // raise inexact if x!=0 and underflow if subnormal
             if (compiler_rt.want_float_exceptions) {
                 mem.doNotOptimizeAway(if (se == 0) x * 0x1p-120 else x + 0x1p120);
             }
             return x;
         }
-        return trig.sinl(T, x, 0.0, 0);
+        return trig.sinx(x, 0.0, 0);
     }
 
-    var y: [2]T = undefined;
-    const n = rem_pio2l(T, x, &y);
+    var y: [2]f80 = undefined;
+    const n = rem_pio2l(f80, x, &y);
     return switch (n & 3) {
-        0 => trig.sinl(T, y[0], y[1], 1),
-        1 => trig.cosl(T, y[0], y[1]),
-        2 => -trig.sinl(T, y[0], y[1], 1),
-        else => -trig.cosl(T, y[0], y[1]),
+        0 => trig.sinx(y[0], y[1], 1),
+        1 => trig.cosx(y[0], y[1]),
+        2 => -trig.sinx(y[0], y[1], 1),
+        else => -trig.cosx(y[0], y[1]),
     };
 }
 
-pub fn sinx(x: f80) callconv(.c) f80 {
-    return sinlGeneric(f80, x);
-}
-
 pub fn sinq(x: f128) callconv(.c) f128 {
-    return sinlGeneric(f128, x);
+    const se = ld.signExponent(x) & 0x7fff;
+    if (se == 0x7fff) {
+        return x - x;
+    }
+
+    if (@abs(x) < trig.pi_4) {
+        if (se < 0x3fff - (math.floatMantissaBits(f128) / 2)) {
+            // raise inexact if x!=0 and underflow if subnormal
+            if (compiler_rt.want_float_exceptions) {
+                mem.doNotOptimizeAway(if (se == 0) x * 0x1p-120 else x + 0x1p120);
+            }
+            return x;
+        }
+        return trig.sinq(x, 0.0, 0);
+    }
+
+    var y: [2]f128 = undefined;
+    const n = rem_pio2l(f128, x, &y);
+    return switch (n & 3) {
+        0 => trig.sinq(y[0], y[1], 1),
+        1 => trig.cosq(y[0], y[1]),
+        2 => -trig.sinq(y[0], y[1], 1),
+        else => -trig.cosq(y[0], y[1]),
+    };
 }
 
 pub fn sinl(x: c_longdouble) callconv(.c) c_longdouble {

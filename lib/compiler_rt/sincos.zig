@@ -192,11 +192,7 @@ pub fn sincos(x: f64, r_sin: *f64, r_cos: *f64) callconv(.c) void {
     }
 }
 
-fn sincoslGeneric(comptime T: type, x: T, r_sin: *T, r_cos: *T) void {
-    if (T != f80 and T != f128) {
-        @compileError("`sincoslGeneric` implemented only for `f80` and `f128`, got: " ++ @typeName(T));
-    }
-
+pub fn sincosx(x: f80, r_sin: *f80, r_cos: *f80) callconv(.c) void {
     const se = ld.signExponent(x) & 0x7fff;
     if (se == 0x7fff) {
         const result = x - x;
@@ -206,7 +202,7 @@ fn sincoslGeneric(comptime T: type, x: T, r_sin: *T, r_cos: *T) void {
     }
 
     if (@abs(x) < trig.pi_4) {
-        if (se < 0x3fff - math.floatMantissaBits(T)) {
+        if (se < 0x3fff - math.floatMantissaBits(f80)) {
             // raise underflow if subnormal
             if (compiler_rt.want_float_exceptions and se == 0) {
                 mem.doNotOptimizeAway(x * 0x1p-120);
@@ -216,15 +212,15 @@ fn sincoslGeneric(comptime T: type, x: T, r_sin: *T, r_cos: *T) void {
             r_cos.* = 1.0 + x;
             return;
         }
-        r_sin.* = trig.sinl(T, x, 0.0, 0);
-        r_cos.* = trig.cosl(T, x, 0.0);
+        r_sin.* = trig.sinx(x, 0.0, 0);
+        r_cos.* = trig.cosx(x, 0.0);
         return;
     }
 
-    var y: [2]T = undefined;
-    const n = rem_pio2l(T, x, &y);
-    const s = trig.sinl(T, y[0], y[1], 1);
-    const c = trig.cosl(T, y[0], y[1]);
+    var y: [2]f80 = undefined;
+    const n = rem_pio2l(f80, x, &y);
+    const s = trig.sinx(y[0], y[1], 1);
+    const c = trig.cosx(y[0], y[1]);
     switch (n & 3) {
         0 => {
             r_sin.* = s;
@@ -245,12 +241,53 @@ fn sincoslGeneric(comptime T: type, x: T, r_sin: *T, r_cos: *T) void {
     }
 }
 
-pub fn sincosx(x: f80, r_sin: *f80, r_cos: *f80) callconv(.c) void {
-    return sincoslGeneric(f80, x, r_sin, r_cos);
-}
-
 pub fn sincosq(x: f128, r_sin: *f128, r_cos: *f128) callconv(.c) void {
-    return sincoslGeneric(f128, x, r_sin, r_cos);
+    const se = ld.signExponent(x) & 0x7fff;
+    if (se == 0x7fff) {
+        const result = x - x;
+        r_sin.* = result;
+        r_cos.* = result;
+        return;
+    }
+
+    if (@abs(x) < trig.pi_4) {
+        if (se < 0x3fff - math.floatMantissaBits(f128)) {
+            // raise underflow if subnormal
+            if (compiler_rt.want_float_exceptions and se == 0) {
+                mem.doNotOptimizeAway(x * 0x1p-120);
+            }
+            r_sin.* = x;
+            // raise inexact if x!=0
+            r_cos.* = 1.0 + x;
+            return;
+        }
+        r_sin.* = trig.sinq(x, 0.0, 0);
+        r_cos.* = trig.cosq(x, 0.0);
+        return;
+    }
+
+    var y: [2]f128 = undefined;
+    const n = rem_pio2l(f128, x, &y);
+    const s = trig.sinq(y[0], y[1], 1);
+    const c = trig.cosq(y[0], y[1]);
+    switch (n & 3) {
+        0 => {
+            r_sin.* = s;
+            r_cos.* = c;
+        },
+        1 => {
+            r_sin.* = c;
+            r_cos.* = -s;
+        },
+        2 => {
+            r_sin.* = -s;
+            r_cos.* = -c;
+        },
+        else => {
+            r_sin.* = -c;
+            r_cos.* = s;
+        },
+    }
 }
 
 pub fn sincosl(x: c_longdouble, r_sin: *c_longdouble, r_cos: *c_longdouble) callconv(.c) void {
