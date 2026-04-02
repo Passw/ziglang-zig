@@ -530,7 +530,6 @@ const libc_bottom_half_src_files = [_][]const u8{
     "wasi/libc-bottom-half/sources/math/math-builtins.c",
     "wasi/libc-bottom-half/sources/posix.c",
     "wasi/libc-bottom-half/sources/preopens.c",
-    "wasi/libc-bottom-half/sources/reallocarray.c",
     "wasi/libc-bottom-half/sources/sbrk.c",
     "wasi/libc-bottom-half/sources/truncate.c",
     "wasi/libc-bottom-half/sources/__wasilibc_dt.c",

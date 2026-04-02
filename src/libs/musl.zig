@@ -694,7 +694,6 @@ const src_files = [_][]const u8{
     "musl/src/legacy/lutimes.c",
     "musl/src/legacy/ulimit.c",
     "musl/src/legacy/utmpx.c",
-    "musl/src/legacy/valloc.c",
     "musl/src/linux/adjtime.c",
     "musl/src/linux/adjtimex.c",
     "musl/src/linux/arch_prctl.c",
