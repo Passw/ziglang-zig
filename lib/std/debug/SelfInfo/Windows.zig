@@ -62,7 +62,8 @@ pub const SymbolIterator = struct {
                 const pdb = if (di.pdb) |*pdb| pdb else unreachable;
 
                 // Get the next inlinee if it exists
-                if (info.inlinees.next(info.module)) |site| {
+                while (info.inlinees.next(info.module)) |site| {
+                    const parent: *align(1) const std.pdb.RecordPrefix  = @ptrCast(&info.module.symbols[site.parent - @sizeOf(u16) * 2]);
                     if (pdb.getInlineeInfo(info.module, site.inlinee) catch null) |loc| {
                         if (info.proc_sym) |proc_sym| {
                             const offset_in_func = info.addr - proc_sym.code_offset;
