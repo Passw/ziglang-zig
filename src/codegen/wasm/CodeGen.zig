@@ -2629,7 +2629,17 @@ fn intAnd(cg: *CodeGen, ty: IntType, lhs: WValue, rhs: WValue) InnerError!WValue
 
             return result;
         },
-        else => return cg.fail("TODO: Support intAnd for integer bitsize: {d}", .{ty.bits}),
+        else => {
+            const result = try cg.allocInt(ty);
+
+            try cg.lowerToStack(result);
+            try cg.lowerToStack(lhs);
+            try cg.lowerToStack(rhs);
+            try cg.addImm32(ty.bits);
+            try cg.addCallIntrinsic(.__and_limb64);
+
+            return result;
+        },
     }
 }
 
@@ -2663,7 +2673,17 @@ fn intOr(cg: *CodeGen, ty: IntType, lhs: WValue, rhs: WValue) InnerError!WValue 
 
             return result;
         },
-        else => return cg.fail("TODO: Support intOr for integer bitsize: {d}", .{ty.bits}),
+        else => {
+            const result = try cg.allocInt(ty);
+
+            try cg.lowerToStack(result);
+            try cg.lowerToStack(lhs);
+            try cg.lowerToStack(rhs);
+            try cg.addImm32(ty.bits);
+            try cg.addCallIntrinsic(.__or_limb64);
+
+            return result;
+        },
     }
 }
 
@@ -2697,7 +2717,17 @@ fn intXor(cg: *CodeGen, ty: IntType, lhs: WValue, rhs: WValue) InnerError!WValue
 
             return result;
         },
-        else => return cg.fail("TODO: Support intXor for integer bitsize: {d}", .{ty.bits}),
+        else => {
+            const result = try cg.allocInt(ty);
+
+            try cg.lowerToStack(result);
+            try cg.lowerToStack(lhs);
+            try cg.lowerToStack(rhs);
+            try cg.addImm32(ty.bits);
+            try cg.addCallIntrinsic(.__xor_limb64);
+
+            return result;
+        },
     }
 }
 
@@ -2755,11 +2785,22 @@ fn intNot(cg: *CodeGen, ty: IntType, operand: WValue) InnerError!WValue {
 
             return result;
         },
-        else => return cg.fail("TODO: Support intNot for integer bitsize: {d}", .{ty.bits}),
+        else => {
+            const result = try cg.allocInt(ty);
+
+            try cg.lowerToStack(result);
+            try cg.lowerToStack(operand);
+            try cg.addImm32(@intFromBool(ty.is_signed));
+            try cg.addImm32(ty.bits);
+            try cg.addCallIntrinsic(.__not_limb64);
+
+            return result;
+        },
     }
 }
 
 // rhs is a shift count, pointing to i32 value
+// does not perform wrapping, padding bits does not satisfy invariant
 fn intShl(cg: *CodeGen, ty: IntType, lhs: WValue, rhs: WValue) InnerError!WValue {
     switch (ty.bits) {
         0 => unreachable,
@@ -2777,7 +2818,19 @@ fn intShl(cg: *CodeGen, ty: IntType, lhs: WValue, rhs: WValue) InnerError!WValue
             return .stack;
         },
         65...128 => return cg.callIntrinsic(.__ashlti3, &.{ .i128_type, .i32_type }, Type.i128, &.{ lhs, rhs }),
-        else => return cg.fail("TODO: Support intShl for integer bitsize: {d}", .{ty.bits}),
+        else => {
+            const result = try cg.allocInt(ty);
+
+            try cg.lowerToStack(result);
+            try cg.lowerToStack(lhs);
+            try cg.lowerToStack(rhs);
+            try cg.addImm32(@intFromBool(ty.is_signed));
+            try cg.addImm32(ty.bits);
+            try cg.addCallIntrinsic(.__shlo_limb64);
+            try cg.addTag(.drop);
+
+            return result;
+        },
     }
 }
 
@@ -2805,7 +2858,18 @@ fn intShr(cg: *CodeGen, ty: IntType, lhs: WValue, rhs: WValue) InnerError!WValue
                 return cg.callIntrinsic(.__lshrti3, &.{ .i128_type, .i32_type }, Type.i128, &.{ lhs, rhs });
             }
         },
-        else => return cg.fail("TODO: Support intShr for integer bitsize: {d}", .{ty.bits}),
+        else => {
+            const result = try cg.allocInt(ty);
+
+            try cg.lowerToStack(result);
+            try cg.lowerToStack(lhs);
+            try cg.lowerToStack(rhs);
+            try cg.addImm32(@intFromBool(ty.is_signed));
+            try cg.addImm32(ty.bits);
+            try cg.addCallIntrinsic(.__shr_limb64);
+
+            return result;
+        },
     }
 }
 
@@ -2932,7 +2996,13 @@ fn intClz(cg: *CodeGen, ty: IntType, operand: WValue) InnerError!WValue {
             try cg.addTag(.i32_wrap_i64);
             return .stack;
         },
-        else => return cg.fail("TODO: Support intClz for integer bitsize: {d}", .{ty.bits}),
+        else => {
+            try cg.lowerToStack(operand);
+            try cg.addImm32(ty.bits);
+            try cg.addCallIntrinsic(.__clz_limb64);
+
+            return .stack;
+        },
     }
 }
 
@@ -2978,7 +3048,13 @@ fn intCtz(cg: *CodeGen, ty: IntType, operand: WValue) InnerError!WValue {
             try cg.addTag(.i32_wrap_i64);
             return .stack;
         },
-        else => return cg.fail("TODO: Support intCtz for integer bitsize: {d}", .{ty.bits}),
+        else => {
+            try cg.lowerToStack(operand);
+            try cg.addImm32(ty.bits);
+            try cg.addCallIntrinsic(.__ctz_limb64);
+
+            return .stack;
+        },
     }
 }
 
@@ -3018,7 +3094,13 @@ fn intPopCount(cg: *CodeGen, ty: IntType, operand: WValue) InnerError!WValue {
             try cg.addTag(.i32_wrap_i64);
             return .stack;
         },
-        else => return cg.fail("TODO: Support intPopCount for integer bitsize: {d}", .{ty.bits}),
+        else => {
+            try cg.lowerToStack(operand);
+            try cg.addImm32(ty.bits);
+            try cg.addCallIntrinsic(.__popcount_limb64);
+
+            return .stack;
+        },
     }
 }
 
@@ -3077,7 +3159,17 @@ fn intBitReverse(cg: *CodeGen, ty: IntType, operand: WValue) InnerError!WValue {
                 return tmp;
             }
         },
-        else => return cg.fail("TODO: Support intBitReverse for integer bitsize: {d}", .{ty.bits}),
+        else => {
+            const result = try cg.allocInt(ty);
+
+            try cg.lowerToStack(result);
+            try cg.lowerToStack(operand);
+            try cg.addImm32(@intFromBool(ty.is_signed));
+            try cg.addImm32(ty.bits);
+            try cg.addCallIntrinsic(.__bitreverse_limb64);
+
+            return result;
+        },
     }
 }
 
@@ -3133,7 +3225,17 @@ fn intByteSwap(cg: *CodeGen, ty: IntType, operand: WValue) InnerError!WValue {
                 return tmp;
             }
         },
-        else => return cg.fail("TODO: Support intByteSwap for integer bitsize: {d}", .{ty.bits}),
+        else => {
+            const result = try cg.allocInt(ty);
+
+            try cg.lowerToStack(result);
+            try cg.lowerToStack(operand);
+            try cg.addImm32(@intFromBool(ty.is_signed));
+            try cg.addImm32(ty.bits);
+            try cg.addCallIntrinsic(.__byteswap_limb64);
+
+            return result;
+        },
     }
 }
 
@@ -3191,7 +3293,30 @@ fn intWrap(cg: *CodeGen, ty: IntType, operand: WValue) InnerError!WValue {
             return result;
         },
         128 => return operand,
-        else => return cg.fail("TODO: Support intWrap for integer bitsize: {d}", .{ty.bits}),
+        else => {
+            const bits = mem.alignForward(u16, ty.bits, 64);
+            if (ty.bits == bits) return operand;
+
+            const result = try cg.allocInt(ty);
+
+            const len = bits / 8;
+            try cg.memcpy(result, operand, .{ .imm32 = len - 8 });
+
+            try cg.emitWValue(result);
+            _ = try cg.load(operand, Type.u64, len - 8);
+            if (ty.is_signed) {
+                try cg.addImm64(bits - ty.bits);
+                try cg.addTag(.i64_shl);
+                try cg.addImm64(bits - ty.bits);
+                try cg.addTag(.i64_shr_s);
+            } else {
+                try cg.addImm64(~@as(u64, 0) >> @intCast(bits - ty.bits));
+                try cg.addTag(.i64_and);
+            }
+            try cg.store(.stack, .stack, Type.u64, result.offset() + len - 8);
+
+            return result;
+        },
     }
 }
 
@@ -3633,20 +3758,31 @@ fn intMulOverflow(cg: *CodeGen, int_ty: IntType, lhs: WValue, rhs: WValue) Inner
     return .{ .result = result_val, .ov = .{ .local = overflow_bit.local } };
 }
 
-fn intShlOverflow(cg: *CodeGen, int_ty: IntType, lhs: WValue, rhs: WValue) InnerError!OverflowResult {
-    switch (int_ty.bits) {
+fn intShlOverflow(cg: *CodeGen, ty: IntType, lhs: WValue, rhs: WValue) InnerError!OverflowResult {
+    switch (ty.bits) {
         0 => unreachable,
         1...128 => {
-            const raw_shl = try cg.intShl(int_ty, lhs, rhs);
-            const wrapped_shl = try cg.intWrap(int_ty, raw_shl);
-            const shl_tmp = try cg.toLocalInt(wrapped_shl, int_ty);
+            const raw_shl = try cg.intShl(ty, lhs, rhs);
+            const wrapped_shl = try cg.intWrap(ty, raw_shl);
+            const shl_tmp = try cg.toLocalInt(wrapped_shl, ty);
 
-            const shr = try cg.intShr(int_ty, shl_tmp, rhs);
-            const overflow_bit = try cg.intCmp(int_ty, .neq, shr, lhs);
+            const shr = try cg.intShr(ty, shl_tmp, rhs);
+            const overflow_bit = try cg.intCmp(ty, .neq, shr, lhs);
 
             return .{ .result = shl_tmp, .ov = overflow_bit };
         },
-        else => return cg.fail("TODO: Support intShlOverflow for integer bitsize: {d}", .{int_ty.bits}),
+        else => {
+            const result = try cg.allocInt(ty);
+
+            try cg.lowerToStack(result);
+            try cg.lowerToStack(lhs);
+            try cg.lowerToStack(rhs);
+            try cg.addImm32(@intFromBool(ty.is_signed));
+            try cg.addImm32(ty.bits);
+            try cg.addCallIntrinsic(.__shlo_limb64);
+
+            return .{ .result = result, .ov = .stack };
+        },
     }
 }
 
@@ -3654,17 +3790,13 @@ fn intCast(cg: *CodeGen, dest_ty: IntType, src_ty: IntType, operand: WValue) Inn
     const src_bits: u16 = switch (src_ty.bits) {
         0 => unreachable,
         1...32 => 32,
-        33...64 => 64,
-        65...128 => 128,
-        else => unreachable,
+        else => mem.alignForward(u16, src_ty.bits, 64),
     };
 
     const dest_bits: u16 = switch (dest_ty.bits) {
         0 => unreachable,
         1...32 => 32,
-        33...64 => 64,
-        65...128 => 128,
-        else => unreachable,
+        else => mem.alignForward(u16, dest_ty.bits, 64),
     };
 
     if (src_bits == dest_bits) {
@@ -3677,34 +3809,78 @@ fn intCast(cg: *CodeGen, dest_ty: IntType, src_ty: IntType, operand: WValue) Inn
         return .stack;
     } else if (src_bits == 32 and dest_bits == 64) {
         try cg.emitWValue(operand);
-        try cg.addTag(if (dest_ty.is_signed) .i64_extend_i32_s else .i64_extend_i32_u);
+        try cg.addTag(if (src_ty.is_signed) .i64_extend_i32_s else .i64_extend_i32_u);
         return .stack;
-    } else if (dest_bits == 128) {
-        const stack_ptr = try cg.allocStack(Type.u128);
-        try cg.emitWValue(stack_ptr);
+    } else if (dest_bits >= 128) {
+        const result = try cg.allocInt(dest_ty);
 
-        const lhs = if (src_bits == 32) blk: {
-            const sign_ty: IntType = .{ .is_signed = dest_ty.is_signed, .bits = 64 };
-            break :blk try (try cg.intCast(sign_ty, src_ty, operand)).toLocal(cg, Type.u64);
-        } else operand;
+        const dest_len = dest_bits / 8;
 
-        try cg.store(.stack, lhs, Type.u64, stack_ptr.offset());
-
-        if (dest_ty.is_signed) {
-            try cg.emitWValue(stack_ptr);
-            const shr = try cg.intShr(IntType.i64, lhs, .{ .imm32 = 63 });
-            try cg.store(.stack, shr, Type.u64, 8 + stack_ptr.offset());
+        if (dest_bits <= src_bits) {
+            assert(src_bits >= 128);
+            try cg.memcpy(result, operand, .{ .imm32 = dest_len });
         } else {
-            try cg.store(stack_ptr, .{ .imm64 = 0 }, Type.u64, 8);
+            var src_len: u32 = undefined;
+            if (src_bits == 32) {
+                try cg.emitWValue(result);
+                try cg.emitWValue(operand);
+                try cg.addTag(if (src_ty.is_signed) .i64_extend_i32_s else .i64_extend_i32_u);
+                try cg.store(.stack, .stack, Type.u64, result.offset());
+                src_len = 8;
+            } else if (src_bits == 64) {
+                try cg.emitWValue(result);
+                try cg.emitWValue(operand);
+                try cg.store(.stack, .stack, Type.u64, result.offset());
+                src_len = 8;
+            } else {
+                src_len = src_bits / 8;
+                try cg.memcpy(result, operand, .{ .imm32 = src_len });
+            }
+
+            if (dest_bits == 128) {
+                if (src_ty.is_signed) {
+                    try cg.emitWValue(result);
+                    if (src_bits == 32) {
+                        try cg.emitWValue(operand);
+                        try cg.addTag(if (dest_ty.is_signed) .i64_extend_i32_s else .i64_extend_i32_u);
+                    } else if (src_bits == 64) {
+                        try cg.emitWValue(operand);
+                    } else unreachable;
+                    const shr = try cg.intShr(IntType.i64, .stack, .{ .imm32 = 63 });
+                    try cg.store(.stack, shr, Type.u64, 8 + result.offset());
+                } else {
+                    try cg.store(result, .{ .imm64 = 0 }, Type.u64, 8);
+                }
+            } else {
+                var pad = result;
+                pad.stack_offset.value += src_len;
+                const memset_len = dest_len - src_len;
+                if (src_ty.is_signed) {
+                    if (src_bits == 32) {
+                        try cg.emitWValue(operand);
+                        _ = try cg.intShr(IntType.i32, .stack, .{ .imm32 = 31 });
+                    } else if (src_bits == 64) {
+                        try cg.emitWValue(operand);
+                        _ = try cg.intShr(IntType.i64, .stack, .{ .imm32 = 63 });
+                        try cg.addTag(.i32_wrap_i64);
+                    } else {
+                        _ = try cg.load(operand, Type.u64, src_len - 8);
+                        _ = try cg.intShr(IntType.i64, .stack, .{ .imm32 = 63 });
+                        try cg.addTag(.i32_wrap_i64);
+                    }
+                    var sign_byte = try @as(WValue, .stack).toLocal(cg, Type.u32);
+                    try cg.memset(Type.u8, pad, .{ .imm32 = memset_len }, sign_byte);
+                    sign_byte.free(cg);
+                } else {
+                    try cg.memset(Type.u8, pad, .{ .imm32 = memset_len }, .{ .imm32 = 0 });
+                }
+            }
         }
 
-        if (src_bits == 32) {
-            var tmp_lhs = lhs;
-            tmp_lhs.free(cg);
-        }
-
-        return stack_ptr;
+        return result;
     } else {
+        assert(dest_bits <= 64);
+        assert(src_bits >= 128);
         const load_ty = if (dest_bits == 32) Type.u32 else Type.u64;
         return cg.load(operand, load_ty, 0);
     }
@@ -3716,9 +3892,7 @@ fn intTrunc(cg: *CodeGen, dest_ty: IntType, src_ty: IntType, operand: WValue) In
     const dest_wasm_bits: u16 = switch (dest_ty.bits) {
         0 => unreachable,
         1...32 => 32,
-        33...64 => 64,
-        65...128 => 128,
-        else => return cg.fail("TODO: Implement wasm integer truncation for integer bitsize: {d}", .{dest_ty.bits}),
+        else => mem.alignForward(u16, dest_ty.bits, 64),
     };
 
     if (dest_wasm_bits != dest_ty.bits) {

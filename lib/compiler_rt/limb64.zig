@@ -7,6 +7,7 @@ const divCeil = std.math.divCeil;
 
 const builtin = @import("builtin");
 const compiler_rt = @import("../compiler_rt.zig");
+const symbol = @import("../compiler_rt.zig").symbol;
 
 const endian = builtin.cpu.arch.endian();
 
@@ -55,7 +56,7 @@ fn limbWrap(limb: u64, is_signed: bool, bits: u16) u64 {
 }
 
 comptime {
-    @export(&__addo_limb64, .{ .name = "__addo_limb64", .linkage = compiler_rt.linkage, .visibility = compiler_rt.visibility });
+    symbol(&__addo_limb64, "__addo_limb64");
 }
 
 fn __addo_limb64(out_ptr: [*]u64, a_ptr: [*]const u64, b_ptr: [*]const u64, is_signed: bool, bits: u16) callconv(.c) bool {
@@ -127,7 +128,7 @@ test __addo_limb64 {
 }
 
 comptime {
-    @export(&__subo_limb64, .{ .name = "__subo_limb64", .linkage = compiler_rt.linkage, .visibility = compiler_rt.visibility });
+    symbol(&__subo_limb64, "__subo_limb64");
 }
 
 fn __subo_limb64(out_ptr: [*]u64, a_ptr: [*]const u64, b_ptr: [*]const u64, is_signed: bool, bits: u16) callconv(.c) bool {
@@ -198,7 +199,7 @@ test __subo_limb64 {
 }
 
 comptime {
-    @export(&__cmp_limb64, .{ .name = "__cmp_limb64", .linkage = compiler_rt.linkage, .visibility = compiler_rt.visibility });
+    symbol(&__cmp_limb64, "__cmp_limb64");
 }
 
 // a < b  -> -1
@@ -263,4 +264,578 @@ test __cmp_limb64 {
     try test__cmp_limb64(i255, -3, 2, -1);
     try test__cmp_limb64(i255, -5, -5, 0);
     try test__cmp_limb64(i255, 2, -3, 1);
+}
+
+comptime {
+    symbol(&__and_limb64, "__and_limb64");
+}
+
+fn __and_limb64(out_ptr: [*]u64, a_ptr: [*]const u64, b_ptr: [*]const u64, bits: u16) callconv(.c) void {
+    const limb_cnt = limbCount(bits);
+    const out = out_ptr[0..limb_cnt];
+    const a = a_ptr[0..limb_cnt];
+    const b = b_ptr[0..limb_cnt];
+
+    var i: usize = 0;
+    while (i < limb_cnt) : (i += 1) {
+        limbSet(out, i, limbGet(a, i) & limbGet(b, i));
+    }
+}
+
+fn test__and_limb64(comptime T: type, a: T, b: T, expected: T) !void {
+    const int_info = @typeInfo(T).int;
+
+    var a_limbs = asLimbs(a);
+    var b_limbs = asLimbs(b);
+    var out: Limbs(T) = undefined;
+    __and_limb64(&out, &a_limbs, &b_limbs, int_info.bits);
+
+    const expected_limbs = asLimbs(expected);
+    try testing.expectEqual(expected_limbs, out);
+}
+
+test __and_limb64 {
+    try test__and_limb64(u64, 1, 2, 0);
+    try test__and_limb64(u64, maxInt(u64), 2, 2);
+    try test__and_limb64(u65, maxInt(u65), 2, 2);
+    try test__and_limb64(u255, maxInt(u255), 7, 7);
+
+    try test__and_limb64(i64, 1, 2, 0);
+    try test__and_limb64(i64, -1, 2, 2);
+    try test__and_limb64(i65, minInt(i65), -1, minInt(i65));
+    try test__and_limb64(i255, -1, 2, 2);
+}
+
+comptime {
+    symbol(&__or_limb64, "__or_limb64");
+}
+
+fn __or_limb64(out_ptr: [*]u64, a_ptr: [*]const u64, b_ptr: [*]const u64, bits: u16) callconv(.c) void {
+    const limb_cnt = limbCount(bits);
+    const out = out_ptr[0..limb_cnt];
+    const a = a_ptr[0..limb_cnt];
+    const b = b_ptr[0..limb_cnt];
+
+    var i: usize = 0;
+    while (i < limb_cnt) : (i += 1) {
+        limbSet(out, i, limbGet(a, i) | limbGet(b, i));
+    }
+}
+
+fn test__or_limb64(comptime T: type, a: T, b: T, expected: T) !void {
+    const int_info = @typeInfo(T).int;
+
+    var a_limbs = asLimbs(a);
+    var b_limbs = asLimbs(b);
+    var out: Limbs(T) = undefined;
+    __or_limb64(&out, &a_limbs, &b_limbs, int_info.bits);
+
+    const expected_limbs = asLimbs(expected);
+    try testing.expectEqual(expected_limbs, out);
+}
+
+test __or_limb64 {
+    try test__or_limb64(u64, 1, 2, 3);
+    try test__or_limb64(u64, maxInt(u64), 2, maxInt(u64));
+    try test__or_limb64(u65, maxInt(u65), 2, maxInt(u65));
+    try test__or_limb64(u255, 1, 2, 3);
+
+    try test__or_limb64(i64, 1, 2, 3);
+    try test__or_limb64(i64, -1, 2, -1);
+    try test__or_limb64(i65, minInt(i65), 1, minInt(i65) + 1);
+    try test__or_limb64(i255, -3, 2, -1);
+}
+
+comptime {
+    symbol(&__xor_limb64, "__xor_limb64");
+}
+
+fn __xor_limb64(out_ptr: [*]u64, a_ptr: [*]const u64, b_ptr: [*]const u64, bits: u16) callconv(.c) void {
+    const limb_cnt = limbCount(bits);
+    const out = out_ptr[0..limb_cnt];
+    const a = a_ptr[0..limb_cnt];
+    const b = b_ptr[0..limb_cnt];
+
+    var i: usize = 0;
+    while (i < limb_cnt) : (i += 1) {
+        limbSet(out, i, limbGet(a, i) ^ limbGet(b, i));
+    }
+}
+
+fn test__xor_limb64(comptime T: type, a: T, b: T, expected: T) !void {
+    const int_info = @typeInfo(T).int;
+
+    var a_limbs = asLimbs(a);
+    var b_limbs = asLimbs(b);
+    var out: Limbs(T) = undefined;
+    __xor_limb64(&out, &a_limbs, &b_limbs, int_info.bits);
+
+    const expected_limbs = asLimbs(expected);
+    try testing.expectEqual(expected_limbs, out);
+}
+
+test __xor_limb64 {
+    try test__xor_limb64(u64, 1, 2, 3);
+    try test__xor_limb64(u64, 3, 2, 1);
+    try test__xor_limb64(u65, maxInt(u65), 2, maxInt(u65) - 2);
+    try test__xor_limb64(u255, 7, 3, 4);
+
+    try test__xor_limb64(i64, 3, 2, 1);
+    try test__xor_limb64(i64, -1, 2, -3);
+    try test__xor_limb64(i65, minInt(i65), -1, maxInt(i65));
+    try test__xor_limb64(i255, -3, 2, -1);
+}
+
+comptime {
+    symbol(&__not_limb64, "__not_limb64");
+}
+
+fn __not_limb64(out_ptr: [*]u64, a_ptr: [*]const u64, is_signed: bool, bits: u16) callconv(.c) void {
+    const limb_cnt = limbCount(bits);
+    const out = out_ptr[0..limb_cnt];
+    const a = a_ptr[0..limb_cnt];
+
+    var i: usize = 0;
+    while (i < limb_cnt - 1) : (i += 1) {
+        limbSet(out, i, ~limbGet(a, i));
+    }
+
+    var limb: u64 = ~limbGet(a, i);
+    if (!is_signed and bits % 64 != 0) {
+        limb = limbWrap(limb, is_signed, bits);
+    }
+    limbSet(out, i, limb);
+}
+
+fn test__not_limb64(comptime T: type, a: T, expected: T) !void {
+    const int_info = @typeInfo(T).int;
+    const is_signed = int_info.signedness == .signed;
+
+    var a_limbs = asLimbs(a);
+    var out: Limbs(T) = undefined;
+    __not_limb64(&out, &a_limbs, is_signed, int_info.bits);
+
+    const expected_limbs = asLimbs(expected);
+    try testing.expectEqual(expected_limbs, out);
+}
+
+test __not_limb64 {
+    try test__not_limb64(u64, 1, maxInt(u64) - 1);
+    try test__not_limb64(u64, 3, maxInt(u64) - 3);
+    try test__not_limb64(u65, maxInt(u65), 0);
+    try test__not_limb64(u255, 7, maxInt(u255) - 7);
+
+    try test__not_limb64(i64, 3, -4);
+    try test__not_limb64(i64, -1, 0);
+    try test__not_limb64(i65, minInt(i65), maxInt(i65));
+    try test__not_limb64(i255, -3, 2);
+}
+
+comptime {
+    symbol(&__shlo_limb64, "__shlo_limb64");
+}
+
+fn __shlo_limb64(out_ptr: [*]u64, a_ptr: [*]const u64, shift: u16, is_signed: bool, bits: u16) callconv(.c) bool {
+    const limb_cnt = limbCount(bits);
+    const out = out_ptr[0..limb_cnt];
+    const a = a_ptr[0..limb_cnt];
+
+    assert(shift < bits);
+
+    const limb_shift = shift / 64;
+    const bit_shift = shift % 64;
+
+    var carry: u64 = 0;
+    var i: usize = 0;
+    while (i < limb_cnt - 1) : (i += 1) {
+        if (i < limb_shift) {
+            limbSet(out, i, 0);
+        } else {
+            const limb = limbGet(a, i - limb_shift);
+            limbSet(out, i, (limb << @intCast(bit_shift)) | carry);
+            carry = if (bit_shift != 0) (limb >> @intCast(64 - bit_shift)) else 0;
+        }
+    }
+
+    const limb = limbGet(a, i - limb_shift);
+    const raw_last = (limb << @intCast(bit_shift)) | carry;
+    carry = if (bit_shift != 0) (limb >> @intCast(64 - bit_shift)) else 0;
+
+    const last = if (bits % 64 == 0) raw_last else limbWrap(raw_last, is_signed, bits);
+    limbSet(out, i, last);
+
+    const sign_extend: u64 = if (is_signed and (last >> 63) == 1) ~@as(u64, 0) else 0;
+    const expected_carry: u64 = if (bit_shift == 0) 0 else sign_extend >> @intCast(64 - bit_shift);
+
+    var overflow = carry != expected_carry;
+    if (bits % 64 != 0) {
+        overflow = overflow or raw_last != last;
+    }
+
+    var j = limb_cnt - limb_shift;
+    while (j < limb_cnt) : (j += 1) {
+        overflow = overflow or limbGet(a, j) != sign_extend;
+    }
+
+    return overflow;
+}
+
+fn test__shlo_limb64(comptime T: type, a: T, shift: u16, expected: struct { T, bool }) !void {
+    const int_info = @typeInfo(T).int;
+    const is_signed = int_info.signedness == .signed;
+
+    var a_limbs = asLimbs(a);
+    var out: Limbs(T) = undefined;
+    const overflow = __shlo_limb64(&out, &a_limbs, shift, is_signed, int_info.bits);
+
+    const expected_limbs = asLimbs(expected[0]);
+    try testing.expectEqual(expected_limbs, out);
+    try testing.expectEqual(expected[1], overflow);
+}
+
+test __shlo_limb64 {
+    try test__shlo_limb64(u64, 0x1234_5678_9ABC_DEF0, 4, .{ 0x2345_6789_ABCD_EF00, true });
+    try test__shlo_limb64(u64, 0x8000_0000_0000_0001, 63, .{ 0x8000_0000_0000_0000, true });
+    try test__shlo_limb64(u65, 1, 64, .{ 0x1_0000_0000_0000_0000, false });
+    try test__shlo_limb64(u65, 0x1_0000_0000_0000_0000, 1, .{ 0, true });
+    try test__shlo_limb64(u128, 0x1234_5678_9ABC_DEF0_1234_5678_9ABC_DEF0, 4, .{ 0x2345_6789_ABCD_EF01_2345_6789_ABCD_EF00, true });
+    try test__shlo_limb64(u255, maxInt(u255), 1, .{ maxInt(u255) - 1, true });
+    try test__shlo_limb64(u633, 1 << 299, 333, .{ 1 << 632, false });
+    try test__shlo_limb64(u633, 1 << 300, 333, .{ 0, true });
+    try test__shlo_limb64(u633, 1 << 298, 333, .{ 1 << 631, false });
+
+    try test__shlo_limb64(i64, -2, 1, .{ -4, false });
+    try test__shlo_limb64(i64, minInt(i64), 1, .{ 0, true });
+    try test__shlo_limb64(i64, minInt(i64), 63, .{ 0, true });
+    try test__shlo_limb64(i65, minInt(i63), 1, .{ minInt(i64), false });
+    try test__shlo_limb64(i65, -1, 17, .{ -1 << 17, false });
+    try test__shlo_limb64(i65, -3, 64, .{ -1 << 64, true });
+    try test__shlo_limb64(i128, -0x1234_5678_9ABC_DEF0_1234_5678_9ABC_DEF0, 4, .{ -0x2345_6789_ABCD_EF01_2345_6789_ABCD_EF00, true });
+    try test__shlo_limb64(i255, -3, 1, .{ -6, false });
+    try test__shlo_limb64(i633, 1 << 298, 333, .{ 1 << 631, false });
+    try test__shlo_limb64(i633, 1 << 299, 333, .{ minInt(i633), true });
+    try test__shlo_limb64(i633, 1 << 300, 333, .{ 0, true });
+    try test__shlo_limb64(i633, 1 << 297, 333, .{ 1 << 630, false });
+    try test__shlo_limb64(i633, -1 << 299, 333, .{ -1 << 632, false });
+    try test__shlo_limb64(i633, -1 << 300, 333, .{ 0, true });
+    try test__shlo_limb64(i633, -1 << 298, 333, .{ -1 << 631, false });
+}
+
+comptime {
+    symbol(&__shr_limb64, "__shr_limb64");
+}
+
+fn __shr_limb64(out_ptr: [*]u64, a_ptr: [*]const u64, shift: u16, is_signed: bool, bits: u16) callconv(.c) void {
+    const limb_cnt = limbCount(bits);
+    const out = out_ptr[0..limb_cnt];
+    const a = a_ptr[0..limb_cnt];
+
+    assert(shift < bits);
+
+    const limb_shift = shift / 64;
+    const bit_shift = shift % 64;
+
+    const ms = limbGet(a, limb_cnt - 1);
+    const sign_extend: u64 = if (is_signed and (ms >> 63) == 1) ~@as(u64, 0) else 0;
+
+    var carry: u64 = if (bit_shift != 0) (sign_extend << @intCast(64 - bit_shift)) else 0;
+    var i: usize = 0;
+    while (i < limb_cnt) : (i += 1) {
+        const j = limb_cnt - 1 - i;
+        if (i < limb_shift) {
+            limbSet(out, j, sign_extend);
+        } else {
+            const limb = limbGet(a, j + limb_shift);
+            limbSet(out, j, (limb >> @intCast(bit_shift)) | carry);
+            carry = if (bit_shift != 0) (limb << @intCast(64 - bit_shift)) else 0;
+        }
+    }
+}
+
+fn test__shr_limb64(comptime T: type, a: T, shift: u16, expected: T) !void {
+    const int_info = @typeInfo(T).int;
+    const is_signed = int_info.signedness == .signed;
+
+    var a_limbs = asLimbs(a);
+    var out: Limbs(T) = undefined;
+    __shr_limb64(&out, &a_limbs, shift, is_signed, int_info.bits);
+
+    const expected_limbs = asLimbs(expected);
+    try testing.expectEqual(expected_limbs, out);
+}
+
+test __shr_limb64 {
+    try test__shr_limb64(u64, 0x1234_5678_9ABC_DEF0, 4, 0x0123_4567_89AB_CDEF);
+    try test__shr_limb64(u64, 0x8000_0000_0000_0001, 63, 1);
+    try test__shr_limb64(u65, 0x1_0000_0000_0000_0000, 64, 1);
+    try test__shr_limb64(u65, 0x1_0000_0000_0000_0001, 1, 0x0_8000_0000_0000_0000);
+    try test__shr_limb64(u128, 0x1234_5678_9ABC_DEF0_1234_5678_9ABC_DEF0, 4, 0x0123_4567_89AB_CDEF_0123_4567_89AB_CDEF);
+    try test__shr_limb64(u255, maxInt(u255), 1, maxInt(u254));
+    try test__shr_limb64(u633, 1 << 333, 333, 1);
+    try test__shr_limb64(u633, 1 << 334, 333, 2);
+    try test__shr_limb64(u633, 1 << 332, 333, 0);
+
+    try test__shr_limb64(i64, -2, 1, -1);
+    try test__shr_limb64(i64, minInt(i64), 63, -1);
+    try test__shr_limb64(i65, minInt(i65), 1, minInt(i65) | (1 << 63));
+    try test__shr_limb64(i65, -1, 17, -1);
+    try test__shr_limb64(i128, -0x1234_5678_9ABC_DEF0_1234_5678_9ABC_DEF0, 4, -0x0123_4567_89AB_CDEF_0123_4567_89AB_CDEF);
+    try test__shr_limb64(i255, -3, 1, -2);
+    try test__shr_limb64(i633, 1 << 333, 333, 1);
+    try test__shr_limb64(i633, 1 << 334, 333, 2);
+    try test__shr_limb64(i633, 1 << 332, 333, 0);
+    try test__shr_limb64(i633, -1 << 333, 333, -1);
+    try test__shr_limb64(i633, -1 << 334, 333, -2);
+    try test__shr_limb64(i633, -1 << 332, 333, -1);
+}
+
+comptime {
+    symbol(&__clz_limb64, "__clz_limb64");
+}
+
+fn __clz_limb64(a_ptr: [*]const u64, bits: u16) callconv(.c) u16 {
+    const limb_cnt = limbCount(bits);
+    const a = a_ptr[0..limb_cnt];
+
+    var res: u16 = 0;
+    var i: usize = 0;
+
+    if (bits % 64 != 0) {
+        const limb = limbGet(a, limb_cnt - 1);
+        if (limb == 0) {
+            res += bits % 64;
+        } else {
+            return @clz(limb << @intCast(64 - bits % 64));
+        }
+        i += 1;
+    }
+
+    while (i < limb_cnt) : (i += 1) {
+        const j = limb_cnt - 1 - i;
+        const limb = limbGet(a, j);
+        if (limb == 0) {
+            res += 64;
+        } else {
+            res += @clz(limb);
+            break;
+        }
+    }
+
+    return res;
+}
+
+fn test__clz_limb64(comptime T: type, a: T, expected: u16) !void {
+    const int_info = @typeInfo(T).int;
+
+    var a_limbs = asLimbs(a);
+    const out = __clz_limb64(&a_limbs, int_info.bits);
+
+    try testing.expectEqual(expected, out);
+}
+
+test __clz_limb64 {
+    try test__clz_limb64(u64, 0, 64);
+    try test__clz_limb64(u65, 1 << 64, 0);
+    try test__clz_limb64(u65, 1 << 9, 55);
+    try test__clz_limb64(u128, 1 << 31, 96);
+    try test__clz_limb64(u255, 1 << 62, 192);
+
+    try test__clz_limb64(i64, -1, 0);
+    try test__clz_limb64(i65, minInt(i65), 0);
+    try test__clz_limb64(i65, 1 << 32, 32);
+    try test__clz_limb64(i128, 0, 128);
+    try test__clz_limb64(i255, 1 << 130, 124);
+}
+
+comptime {
+    symbol(&__ctz_limb64, "__ctz_limb64");
+}
+
+fn __ctz_limb64(a_ptr: [*]const u64, bits: u16) callconv(.c) u16 {
+    const limb_cnt = limbCount(bits);
+    const a = a_ptr[0..limb_cnt];
+
+    var res: u16 = 0;
+    var i: usize = 0;
+    while (i < limb_cnt - 1) : (i += 1) {
+        const limb = limbGet(a, i);
+        if (limb == 0) {
+            res += 64;
+        } else {
+            res += @ctz(limb);
+            return res;
+        }
+    }
+
+    const limb = limbGet(a, i);
+    if (bits % 64 != 0 and limb == 0) {
+        res += bits % 64;
+    } else {
+        res += @ctz(limb);
+    }
+
+    return res;
+}
+
+fn test__ctz_limb64(comptime T: type, a: T, expected: u16) !void {
+    const int_info = @typeInfo(T).int;
+
+    var a_limbs = asLimbs(a);
+    const out = __ctz_limb64(&a_limbs, int_info.bits);
+
+    try testing.expectEqual(expected, out);
+}
+
+test __ctz_limb64 {
+    try test__ctz_limb64(u64, 1 << 17, 17);
+    try test__ctz_limb64(u65, 1 << 64, 64);
+    try test__ctz_limb64(u65, 0, 65);
+    try test__ctz_limb64(u128, 1 << 100, 100);
+    try test__ctz_limb64(u255, 1 << 200, 200);
+
+    try test__ctz_limb64(i64, -1 << 9, 9);
+    try test__ctz_limb64(i65, minInt(i65), 64);
+    try test__ctz_limb64(i65, 0, 65);
+    try test__ctz_limb64(i128, -1 << 73, 73);
+    try test__ctz_limb64(i255, 1 << 130, 130);
+}
+
+comptime {
+    symbol(&__popcount_limb64, "__popcount_limb64");
+}
+
+fn __popcount_limb64(a_ptr: [*]const u64, bits: u16) callconv(.c) u16 {
+    const limb_cnt = limbCount(bits);
+    const a = a_ptr[0..limb_cnt];
+
+    var res: u16 = 0;
+    var i: usize = 0;
+    while (i < limb_cnt - 1) : (i += 1) {
+        res += @popCount(limbGet(a, i));
+    }
+
+    var limb = limbGet(a, i);
+    if (bits % 64 != 0) {
+        limb <<= @intCast(64 - bits % 64);
+    }
+    res += @popCount(limb);
+
+    return res;
+}
+
+fn test__popcount_limb64(comptime T: type, a: T, expected: u16) !void {
+    const int_info = @typeInfo(T).int;
+
+    var a_limbs = asLimbs(a);
+    const out = __popcount_limb64(&a_limbs, int_info.bits);
+
+    try testing.expectEqual(expected, out);
+}
+
+test __popcount_limb64 {
+    try test__popcount_limb64(u64, 0xF0F0_0000_0000_0001, 9);
+    try test__popcount_limb64(u65, 1 << 64, 1);
+    try test__popcount_limb64(u65, maxInt(u65), 65);
+    try test__popcount_limb64(u128, (1 << 100) | (1 << 5) | 1, 3);
+    try test__popcount_limb64(u255, maxInt(u255), 255);
+
+    try test__popcount_limb64(i64, -1, 64);
+    try test__popcount_limb64(i65, minInt(i65), 1);
+    try test__popcount_limb64(i65, -1, 65);
+    try test__popcount_limb64(i128, -1 << 7, 121);
+    try test__popcount_limb64(i255, -1 << 200, 55);
+}
+
+comptime {
+    symbol(&__bitreverse_limb64, "__bitreverse_limb64");
+}
+
+fn __bitreverse_limb64(out_ptr: [*]u64, a_ptr: [*]const u64, is_signed: bool, bits: u16) callconv(.c) void {
+    const limb_cnt = limbCount(bits);
+    const out = out_ptr[0..limb_cnt];
+    const a = a_ptr[0..limb_cnt];
+
+    var i: usize = 0;
+    while (i < limb_cnt) : (i += 1) {
+        const j = limb_cnt - 1 - i;
+        limbSet(out, j, @bitReverse(limbGet(a, i)));
+    }
+
+    if (bits % 64 != 0) {
+        __shr_limb64(out_ptr, out_ptr, 64 - bits % 64, is_signed, bits);
+    }
+}
+
+fn test__bitreverse_limb64(comptime T: type, a: T, expected: T) !void {
+    const int_info = @typeInfo(T).int;
+    const is_signed = int_info.signedness == .signed;
+
+    var a_limbs = asLimbs(a);
+    var out: Limbs(T) = undefined;
+    __bitreverse_limb64(&out, &a_limbs, is_signed, int_info.bits);
+
+    const expected_limbs = asLimbs(expected);
+    try testing.expectEqual(expected_limbs, out);
+}
+
+test __bitreverse_limb64 {
+    try test__bitreverse_limb64(u64, 1 << 7, 1 << 56);
+    try test__bitreverse_limb64(u65, 1 << 64, 1);
+    try test__bitreverse_limb64(u65, 1 << 9, 1 << 55);
+    try test__bitreverse_limb64(u128, 1 << 100, 1 << 27);
+    try test__bitreverse_limb64(u255, 1 << 200, 1 << 54);
+
+    try test__bitreverse_limb64(i64, -1, -1);
+    try test__bitreverse_limb64(i65, 1 << 32, 1 << 32);
+    try test__bitreverse_limb64(i65, minInt(i65), 1);
+    try test__bitreverse_limb64(i128, 1 << 63, 1 << 64);
+    try test__bitreverse_limb64(i255, 1 << 130, 1 << 124);
+}
+
+comptime {
+    symbol(&__byteswap_limb64, "__byteswap_limb64");
+}
+
+fn __byteswap_limb64(out_ptr: [*]u64, a_ptr: [*]const u64, is_signed: bool, bits: u16) callconv(.c) void {
+    const limb_cnt = limbCount(bits);
+    const out = out_ptr[0..limb_cnt];
+    const a = a_ptr[0..limb_cnt];
+
+    assert(bits % 8 == 0);
+
+    var i: usize = 0;
+    while (i < limb_cnt) : (i += 1) {
+        const j = limb_cnt - 1 - i;
+        limbSet(out, j, @byteSwap(limbGet(a, i)));
+    }
+
+    if (bits % 64 != 0) {
+        __shr_limb64(out_ptr, out_ptr, 64 - bits % 64, is_signed, bits);
+    }
+}
+
+fn test__byteswap_limb64(comptime T: type, a: T, expected: T) !void {
+    const int_info = @typeInfo(T).int;
+    const is_signed = int_info.signedness == .signed;
+
+    var a_limbs = asLimbs(a);
+    var out: Limbs(T) = undefined;
+    __byteswap_limb64(&out, &a_limbs, is_signed, int_info.bits);
+
+    const expected_limbs = asLimbs(expected);
+    try testing.expectEqual(expected_limbs, out);
+}
+
+test __byteswap_limb64 {
+    try test__byteswap_limb64(u64, 0x0123_4567_89AB_CDEF, 0xEFCD_AB89_6745_2301);
+    try test__byteswap_limb64(u72, 0x01_23_45_67_89_AB_CD_EF_11, 0x11_EF_CD_AB_89_67_45_23_01);
+    try test__byteswap_limb64(u128, 1 << 72, 1 << 48);
+    try test__byteswap_limb64(u248, 1, 1 << 240);
+    try test__byteswap_limb64(u256, 1 << 120, 1 << 128);
+
+    try test__byteswap_limb64(i64, minInt(i64), 128);
+    try test__byteswap_limb64(i72, 1, 1 << 64);
+    try test__byteswap_limb64(i72, -1, -1);
+    try test__byteswap_limb64(i128, 1 << 56, 1 << 64);
+    try test__byteswap_limb64(i248, minInt(i248), 128);
 }
