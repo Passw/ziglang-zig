@@ -4413,7 +4413,34 @@ fn intFromFloat(cg: *CodeGen, dest_ty: IntType, src_ty: FloatType, operand: WVal
                 return cg.callIntrinsic(intrinsic, &.{.f128_type}, Type.u128, &.{operand});
             },
         },
-        else => return cg.fail("TODO: Support intFromFloat for integer bitsize: {d}", .{dest_ty.bits}),
+        else => {
+            const result = try cg.allocInt(dest_ty);
+
+            switch (src_ty) {
+                .f16 => {
+                    const intrinsic: Mir.Intrinsic = if (dest_ty.is_signed) .__fixhfei else .__fixunshfei;
+                    _ = try cg.callIntrinsic(intrinsic, &.{ .usize_type, .usize_type, .f16_type }, .void, &.{ result, .{ .imm32 = dest_ty.bits }, operand });
+                },
+                .f32 => {
+                    const intrinsic: Mir.Intrinsic = if (dest_ty.is_signed) .__fixsfei else .__fixunssfei;
+                    _ = try cg.callIntrinsic(intrinsic, &.{ .usize_type, .usize_type, .f32_type }, .void, &.{ result, .{ .imm32 = dest_ty.bits }, operand });
+                },
+                .f64 => {
+                    const intrinsic: Mir.Intrinsic = if (dest_ty.is_signed) .__fixdfei else .__fixunsdfei;
+                    _ = try cg.callIntrinsic(intrinsic, &.{ .usize_type, .usize_type, .f64_type }, .void, &.{ result, .{ .imm32 = dest_ty.bits }, operand });
+                },
+                .f80 => {
+                    const intrinsic: Mir.Intrinsic = if (dest_ty.is_signed) .__fixxfei else .__fixunsxfei;
+                    _ = try cg.callIntrinsic(intrinsic, &.{ .usize_type, .usize_type, .f80_type }, .void, &.{ result, .{ .imm32 = dest_ty.bits }, operand });
+                },
+                .f128 => {
+                    const intrinsic: Mir.Intrinsic = if (dest_ty.is_signed) .__fixtfei else .__fixunstfei;
+                    _ = try cg.callIntrinsic(intrinsic, &.{ .usize_type, .usize_type, .f128_type }, .void, &.{ result, .{ .imm32 = dest_ty.bits }, operand });
+                },
+            }
+
+            return result;
+        },
     }
 }
 
@@ -4433,7 +4460,10 @@ fn floatFromInt(cg: *CodeGen, dest_ty: FloatType, src_ty: IntType, operand: WVal
                 const intrinsic: Mir.Intrinsic = if (src_ty.is_signed) .__floattihf else .__floatuntihf;
                 return cg.callIntrinsic(intrinsic, &.{.i128_type}, Type.f16, &.{operand});
             },
-            else => return cg.fail("TODO: Support floatFromInt for {d}-bit int to 16-bit float", .{src_ty.bits}),
+            else => {
+                const intrinsic: Mir.Intrinsic = if (src_ty.is_signed) .__floateihf else .__floatuneihf;
+                return cg.callIntrinsic(intrinsic, &.{ .usize_type, .usize_type }, Type.f16, &.{ operand, .{ .imm32 = src_ty.bits }});
+            },
         },
         .f32 => switch (src_ty.bits) {
             0 => unreachable,
@@ -4451,7 +4481,10 @@ fn floatFromInt(cg: *CodeGen, dest_ty: FloatType, src_ty: IntType, operand: WVal
                 const intrinsic: Mir.Intrinsic = if (src_ty.is_signed) .__floattisf else .__floatuntisf;
                 return cg.callIntrinsic(intrinsic, &.{.i128_type}, Type.f32, &.{operand});
             },
-            else => return cg.fail("TODO: Support floatFromInt for {d}-bit int to 32-bit float", .{src_ty.bits}),
+            else => {
+                const intrinsic: Mir.Intrinsic = if (src_ty.is_signed) .__floateisf else .__floatuneisf;
+                return cg.callIntrinsic(intrinsic, &.{ .usize_type, .usize_type }, Type.f32, &.{ operand, .{ .imm32 = src_ty.bits }});
+            },
         },
         .f64 => switch (src_ty.bits) {
             0 => unreachable,
@@ -4469,7 +4502,10 @@ fn floatFromInt(cg: *CodeGen, dest_ty: FloatType, src_ty: IntType, operand: WVal
                 const intrinsic: Mir.Intrinsic = if (src_ty.is_signed) .__floattidf else .__floatuntidf;
                 return cg.callIntrinsic(intrinsic, &.{.i128_type}, Type.f64, &.{operand});
             },
-            else => return cg.fail("TODO: Support floatFromInt for {d}-bit int to 64-bit float", .{src_ty.bits}),
+            else => {
+                const intrinsic: Mir.Intrinsic = if (src_ty.is_signed) .__floateidf else .__floatuneidf;
+                return cg.callIntrinsic(intrinsic, &.{ .usize_type, .usize_type }, Type.f64, &.{ operand, .{ .imm32 = src_ty.bits }});
+            },
         },
         .f80 => switch (src_ty.bits) {
             0 => unreachable,
@@ -4485,7 +4521,10 @@ fn floatFromInt(cg: *CodeGen, dest_ty: FloatType, src_ty: IntType, operand: WVal
                 const intrinsic: Mir.Intrinsic = if (src_ty.is_signed) .__floattixf else .__floatuntixf;
                 return cg.callIntrinsic(intrinsic, &.{.i128_type}, Type.f80, &.{operand});
             },
-            else => return cg.fail("TODO: Support floatFromInt for {d}-bit int to 80-bit float", .{src_ty.bits}),
+            else => {
+                const intrinsic: Mir.Intrinsic = if (src_ty.is_signed) .__floateixf else .__floatuneixf;
+                return cg.callIntrinsic(intrinsic, &.{ .usize_type, .usize_type }, Type.f80, &.{ operand, .{ .imm32 = src_ty.bits }});
+            },
         },
         .f128 => switch (src_ty.bits) {
             0 => unreachable,
@@ -4501,7 +4540,10 @@ fn floatFromInt(cg: *CodeGen, dest_ty: FloatType, src_ty: IntType, operand: WVal
                 const intrinsic: Mir.Intrinsic = if (src_ty.is_signed) .__floattitf else .__floatuntitf;
                 return cg.callIntrinsic(intrinsic, &.{.i128_type}, Type.f128, &.{operand});
             },
-            else => return cg.fail("TODO: Support floatFromInt for {d}-bit int to 128-bit float", .{src_ty.bits}),
+            else => {
+                const intrinsic: Mir.Intrinsic = if (src_ty.is_signed) .__floateitf else .__floatuneitf;
+                return cg.callIntrinsic(intrinsic, &.{ .usize_type, .usize_type }, Type.f128, &.{ operand, .{ .imm32 = src_ty.bits }});
+            },
         },
     }
 }
