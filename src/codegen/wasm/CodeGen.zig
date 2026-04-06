@@ -2480,7 +2480,19 @@ fn intMul(cg: *CodeGen, ty: IntType, lhs: WValue, rhs: WValue) InnerError!WValue
             return .stack;
         },
         65...128 => return cg.callIntrinsic(.__multi3, &.{ .i128_type, .i128_type }, Type.i128, &.{ lhs, rhs }),
-        else => return cg.fail("TODO: Support intMul for integer bitsize: {d}", .{ty.bits}),
+        else => {
+            const result = try cg.allocInt(ty);
+
+            try cg.lowerToStack(result);
+            try cg.lowerToStack(lhs);
+            try cg.lowerToStack(rhs);
+            try cg.addImm32(@intFromBool(ty.is_signed));
+            try cg.addImm32(ty.bits);
+            try cg.addCallIntrinsic(.__mulo_limb64);
+            try cg.addTag(.drop);
+
+            return result;
+        },
     }
 }
 
@@ -3680,68 +3692,6 @@ fn intMulOverflow(cg: *CodeGen, int_ty: IntType, lhs: WValue, rhs: WValue) Inner
         _ = try cg.intCmp(new_ty, .neq, res_upcast, bin_op);
         try cg.addLocal(.local_set, overflow_bit.local.value);
         break :blk res_tmp;
-    } else if (int_ty.bits == 128 and !int_ty.is_signed) blk: {
-        var lhs_lsb = try (try cg.load(lhs, Type.u64, 0)).toLocal(cg, Type.u64);
-        defer lhs_lsb.free(cg);
-        var lhs_msb = try (try cg.load(lhs, Type.u64, 8)).toLocal(cg, Type.u64);
-        defer lhs_msb.free(cg);
-        var rhs_lsb = try (try cg.load(rhs, Type.u64, 0)).toLocal(cg, Type.u64);
-        defer rhs_lsb.free(cg);
-        var rhs_msb = try (try cg.load(rhs, Type.u64, 8)).toLocal(cg, Type.u64);
-        defer rhs_msb.free(cg);
-
-        const zero: WValue = .{ .imm64 = 0 };
-
-        const cross_1 = try cg.callIntrinsic(
-            .__multi3,
-            &[_]InternPool.Index{.i64_type} ** 4,
-            Type.i128,
-            &.{ lhs_msb, zero, rhs_lsb, zero },
-        );
-        const cross_2 = try cg.callIntrinsic(
-            .__multi3,
-            &[_]InternPool.Index{.i64_type} ** 4,
-            Type.i128,
-            &.{ rhs_msb, zero, lhs_lsb, zero },
-        );
-        const mul_lsb = try cg.callIntrinsic(
-            .__multi3,
-            &[_]InternPool.Index{.i64_type} ** 4,
-            Type.i128,
-            &.{ rhs_lsb, zero, lhs_lsb, zero },
-        );
-
-        const rhs_msb_not_zero = try cg.intCmp(.u64, .neq, rhs_msb, zero);
-        const lhs_msb_not_zero = try cg.intCmp(.u64, .neq, lhs_msb, zero);
-        const both_msb_not_zero = try cg.intAnd(.u32, rhs_msb_not_zero, lhs_msb_not_zero);
-
-        const cross_1_msb = try cg.load(cross_1, .u64, 8);
-        const cross_1_msb_not_zero = try cg.intCmp(.u64, .neq, cross_1_msb, zero);
-        const cond_1 = try cg.intOr(.u32, both_msb_not_zero, cross_1_msb_not_zero);
-
-        const cross_2_msb = try cg.load(cross_2, Type.u64, 8);
-        const cross_2_msb_not_zero = try cg.intCmp(.u64, .neq, cross_2_msb, zero);
-        const cond_2 = try cg.intOr(.u32, cond_1, cross_2_msb_not_zero);
-
-        const cross_1_lsb = try cg.load(cross_1, Type.u64, 0);
-        const cross_2_lsb = try cg.load(cross_2, Type.u64, 0);
-        const cross_add = try cg.intAdd(.u64, cross_1_lsb, cross_2_lsb);
-
-        var mul_lsb_msb = try (try cg.load(mul_lsb, Type.u64, 8)).toLocal(cg, Type.u64);
-        defer mul_lsb_msb.free(cg);
-        var all_add = try (try cg.intAdd(.u64, cross_add, mul_lsb_msb)).toLocal(cg, Type.u64);
-        defer all_add.free(cg);
-        const add_overflow = try cg.intCmp(.u64, .lt, all_add, mul_lsb_msb);
-
-        _ = try cg.intOr(.u32, cond_2, add_overflow);
-        try cg.addLocal(.local_set, overflow_bit.local.value);
-
-        const tmp_result = try cg.allocStack(Type.u128);
-        try cg.emitWValue(tmp_result);
-        const mul_lsb_lsb = try cg.load(mul_lsb, Type.u64, 0);
-        try cg.store(.stack, mul_lsb_lsb, Type.u64, tmp_result.offset());
-        try cg.store(tmp_result, all_add, Type.u64, 8);
-        break :blk tmp_result;
     } else if (int_ty.bits == 128 and int_ty.is_signed) blk: {
         const overflow_ret = try cg.allocStack(Type.i32);
         const res = try cg.callIntrinsic(
@@ -3753,7 +3703,18 @@ fn intMulOverflow(cg: *CodeGen, int_ty: IntType, lhs: WValue, rhs: WValue) Inner
         _ = try cg.load(overflow_ret, Type.i32, 0);
         try cg.addLocal(.local_set, overflow_bit.local.value);
         break :blk res;
-    } else return cg.fail("TODO: intMulOverflow for bitsize {d}", .{int_ty.bits});
+    } else {
+        const result = try cg.allocInt(int_ty);
+
+        try cg.lowerToStack(result);
+        try cg.lowerToStack(lhs);
+        try cg.lowerToStack(rhs);
+        try cg.addImm32(@intFromBool(int_ty.is_signed));
+        try cg.addImm32(int_ty.bits);
+        try cg.addCallIntrinsic(.__mulo_limb64);
+
+        return .{ .result = result, .ov = .stack };
+    };
 
     return .{ .result = result_val, .ov = .{ .local = overflow_bit.local } };
 }

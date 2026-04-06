@@ -839,3 +839,141 @@ test __byteswap_limb64 {
     try test__byteswap_limb64(i128, 1 << 56, 1 << 64);
     try test__byteswap_limb64(i248, minInt(i248), 128);
 }
+
+comptime {
+    symbol(&__mulo_limb64, "__mulo_limb64");
+}
+
+inline fn add3(x: *[3]u64, start: usize, v0: u64) void {
+    var i = start;
+    var v = v0;
+    while (i < 3) : (i += 1) {
+        const s = @addWithOverflow(x[i], v);
+        x[i] = s[0];
+        if (s[1] == 0) break;
+        v = 1;
+    }
+}
+
+fn mulwide(a: u64, b: u64) [2]u64 {
+    const muldXi = @import("mulXi3.zig").muldXi;
+    return @bitCast(muldXi(u64, a, b));
+}
+
+fn __mulo_limb64(out_ptr: [*]u64, a_ptr: [*]const u64, b_ptr: [*]const u64, is_signed: bool, bits: u16) callconv(.c) bool {
+    const limb_cnt = limbCount(bits);
+
+    const out = out_ptr[0..limb_cnt];
+    const a = a_ptr[0..limb_cnt];
+    const b = b_ptr[0..limb_cnt];
+
+    @memset(out, 0);
+
+    const all_ones = ~@as(u64, 0);
+    const a_neg = is_signed and ((limbGet(a, limb_cnt - 1) >> 63) != 0);
+    const b_neg = is_signed and ((limbGet(b, limb_cnt - 1) >> 63) != 0);
+
+    var carry: [3]u64 = @splat(0);
+    var hi_zero = true;
+    var hi_ones = true;
+    var hi_borrow: u1 = 0;
+    var raw_last: u64 = 0;
+
+    var k: usize = 0;
+    while (k < 2 * limb_cnt) : (k += 1) {
+        var acc = carry;
+
+        var i: usize = if (k < limb_cnt) 0 else k - (limb_cnt - 1);
+        while (i < limb_cnt and i <= k) : (i += 1) {
+            const j = k - i;
+            if (j >= limb_cnt) continue;
+
+            const p = mulwide(limbGet(a, i), limbGet(b, j));
+            add3(&acc, 0, p[0]);
+            add3(&acc, 1, p[1]);
+        }
+
+        var limb = acc[0];
+        if (k < limb_cnt) {
+            limbSet(out, k, limb);
+            if (k == limb_cnt - 1) raw_last = limb;
+        } else {
+            if (is_signed) {
+                const h = k - limb_cnt;
+
+                const s0 = @subWithOverflow(limb, if (a_neg) limbGet(b, h) else 0);
+                const s1 = @subWithOverflow(s0[0], if (b_neg) limbGet(a, h) else 0);
+                const s2 = @subWithOverflow(s1[0], hi_borrow);
+
+                limb = s2[0];
+                hi_borrow = @intFromBool(s0[1] != 0 or s1[1] != 0 or s2[1] != 0);
+            }
+
+            hi_zero = hi_zero and limb == 0;
+            hi_ones = hi_ones and limb == all_ones;
+        }
+
+        carry = .{ acc[1], acc[2], 0 };
+    }
+
+    const last = if (bits % 64 == 0) raw_last else limbWrap(raw_last, is_signed, bits);
+    if (bits % 64 != 0) {
+        limbSet(out, limb_cnt - 1, last);
+    }
+
+    if (!is_signed) {
+        return !hi_zero or raw_last != last;
+    }
+
+    const sign_extend: u64 = if ((last >> 63) == 1) all_ones else 0;
+    return (raw_last != last) or if (sign_extend == 0) !hi_zero else !hi_ones;
+}
+
+fn test__mulo_limb64(comptime T: type, a: T, b: T, expected: struct { T, bool }) !void {
+    const int_info = @typeInfo(T).int;
+    const is_signed = int_info.signedness == .signed;
+
+    var a_limbs = asLimbs(a);
+    var b_limbs = asLimbs(b);
+    var out: Limbs(T) = undefined;
+    const overflow = __mulo_limb64(&out, &a_limbs, &b_limbs, is_signed, int_info.bits);
+
+    const expected_limbs = asLimbs(expected[0]);
+    try testing.expectEqual(expected_limbs, out);
+    try testing.expectEqual(expected[1], overflow);
+}
+
+test __mulo_limb64 {
+    try test__mulo_limb64(u64, 3, 5, .{ 15, false });
+    try test__mulo_limb64(u64, maxInt(u64), 2, .{ maxInt(u64) - 1, true });
+    try test__mulo_limb64(u65, 1 << 32, 1 << 32, .{ 1 << 64, false });
+    try test__mulo_limb64(u65, 1 << 64, 2, .{ 0, true });
+    try test__mulo_limb64(u128, 1 << 80, 1 << 40, .{ 1 << 120, false });
+    try test__mulo_limb64(u128, 1 << 100, 1 << 40, .{ 0, true });
+    try test__mulo_limb64(u255, 7, 9, .{ 63, false });
+    try test__mulo_limb64(u255, maxInt(u255), 2, .{ maxInt(u255) - 1, true });
+
+    try test__mulo_limb64(i64, -3, 2, .{ -6, false });
+    try test__mulo_limb64(i64, maxInt(i64), 2, .{ -2, true });
+    try test__mulo_limb64(i65, 1 << 63, 2, .{ minInt(i65), true });
+    try test__mulo_limb64(i65, -1 << 32, 1 << 16, .{ -1 << 48, false });
+    try test__mulo_limb64(i128, 1 << 100, 1 << 27, .{ minInt(i128), true });
+    try test__mulo_limb64(i128, -1 << 80, 1 << 40, .{ -1 << 120, false });
+    try test__mulo_limb64(i255, -3, 2, .{ -6, false });
+    try test__mulo_limb64(i255, maxInt(i255), 2, .{ -2, true });
+
+    try test__mulo_limb64(u200, 0, maxInt(u200), .{ 0, false });
+    try test__mulo_limb64(u200, 1, maxInt(u200), .{ maxInt(u200), false });
+    try test__mulo_limb64(u200, 1 << 100, 1 << 99, .{ 1 << 199, false });
+    try test__mulo_limb64(u200, 1 << 100, 1 << 100, .{ 0, true });
+    try test__mulo_limb64(u200, maxInt(u200), maxInt(u200), .{ 1, true });
+
+    try test__mulo_limb64(i200, 0, -1, .{ 0, false });
+    try test__mulo_limb64(i200, -1, -1, .{ 1, false });
+    try test__mulo_limb64(i200, -1, minInt(i200), .{ minInt(i200), true });
+    try test__mulo_limb64(i200, maxInt(i200), 2, .{ -2, true });
+    try test__mulo_limb64(i200, 1 << 100, 1 << 98, .{ 1 << 198, false });
+    try test__mulo_limb64(i200, 1 << 100, 1 << 99, .{ minInt(i200), true });
+    try test__mulo_limb64(i200, maxInt(i200), maxInt(i200), .{ 1, true });
+    try test__mulo_limb64(i200, minInt(i200), minInt(i200), .{ 0, true });
+}

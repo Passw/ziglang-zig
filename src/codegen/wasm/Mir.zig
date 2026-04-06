@@ -1018,4 +1018,5 @@ pub const Intrinsic = enum(u32) {
     __popcount_limb64,
     __bitreverse_limb64,
     __byteswap_limb64,
+    __mulo_limb64,
 };

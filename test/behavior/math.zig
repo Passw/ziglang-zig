@@ -1100,10 +1100,37 @@ test "@mulWithOverflow bitsize 128 bits" {
     try testMulWithOverflow(i128, -1 << 63, -1 << 64, -1 << 127, 1);
 }
 
+test "@mulWithOverflow > 128 bits" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+
+    try testMulWithOverflow(u140, 0, maxInt(u140), 0, 0);
+    try testMulWithOverflow(u140, 1, maxInt(u140), maxInt(u140), 0);
+    try testMulWithOverflow(u140, 1 << 70, 1 << 69, 1 << 139, 0);
+    try testMulWithOverflow(u140, 1 << 70, 1 << 70, 0, 1);
+
+    try testMulWithOverflow(u200, 1 << 100, 1 << 99, 1 << 199, 0);
+    try testMulWithOverflow(u200, 1 << 100, 1 << 100, 0, 1);
+    try testMulWithOverflow(u200, maxInt(u200), maxInt(u200), 1, 1);
+    try testMulWithOverflow(u200, maxInt(u200) - 1, 2, maxInt(u200) - 3, 1);
+
+    try testMulWithOverflow(i140, 0, -1, 0, 0);
+    try testMulWithOverflow(i140, -1, -1, 1, 0);
+    try testMulWithOverflow(i140, 1 << 69, 1 << 69, 1 << 138, 0);
+    try testMulWithOverflow(i140, 1 << 69, 1 << 70, minInt(i140), 1);
+    try testMulWithOverflow(i140, -1 << 70, 1 << 20, -1 << 90, 0);
+    try testMulWithOverflow(i140, minInt(i140), -1, minInt(i140), 1);
+
+    try testMulWithOverflow(i200, 1 << 100, 1 << 98, 1 << 198, 0);
+    try testMulWithOverflow(i200, 1 << 100, 1 << 99, minInt(i200), 1);
+    try testMulWithOverflow(i200, -1 << 120, 1 << 30, -1 << 150, 0);
+    try testMulWithOverflow(i200, minInt(i200), minInt(i200), 0, 1);
+    try testMulWithOverflow(i200, maxInt(i200), 2, -2, 1);
+    try testMulWithOverflow(i200, maxInt(i200), maxInt(i200), 1, 1);
+}
+
 test "@mulWithOverflow bitsize 256 bits" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_c) return error.SkipZigTest;
-    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_spirv) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_riscv64) return error.SkipZigTest;
 
