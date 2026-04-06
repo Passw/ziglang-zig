@@ -11,6 +11,9 @@ pub const assembly = @import("builtin/assembly.zig");
 pub const StackTrace = struct {
     index: usize,
     instruction_addresses: []usize,
+    /// Set to true if inlined frames are given their own entries in `instruction_addresses`,
+    /// otherwise set to false.
+    includes_inlined_frames: bool,
 };
 
 /// This data structure is used by the Zig language code generation and

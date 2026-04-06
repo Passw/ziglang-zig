@@ -626,7 +626,11 @@ pub const StackUnwindOptions = struct {
 ///
 /// See `writeCurrentStackTrace` to immediately print the trace instead of capturing it.
 pub noinline fn captureCurrentStackTrace(options: StackUnwindOptions, addr_buf: []usize) StackTrace {
-    const empty_trace: StackTrace = .{ .index = 0, .instruction_addresses = &.{} };
+    const empty_trace: StackTrace = .{
+        .index = 0,
+        .instruction_addresses = &.{},
+        .includes_inlined_frames = false,
+    };
     if (!std.options.allow_stack_tracing) return empty_trace;
     var it: StackIterator = .init(options.context);
     defer it.deinit();
@@ -661,6 +665,7 @@ pub noinline fn captureCurrentStackTrace(options: StackUnwindOptions, addr_buf: 
     return .{
         .index = index,
         .instruction_addresses = addr_buf[0..index],
+        .includes_inlined_frames = false,
     };
 }
 /// Write the current stack trace to `writer`, annotated with source locations.
@@ -745,7 +750,10 @@ pub noinline fn writeCurrentStackTrace(options: StackUnwindOptions, t: Io.Termin
             }
             // `ret_addr` is the return address, which is *after* the function call.
             // Subtract 1 to get an address *in* the function call for a better source location.
-            try printSourceAtAddress(io, di, t, ret_addr -| StackIterator.ra_call_offset);
+            try printSourceAtAddress(io, di, t, .{
+                .address = ret_addr -| StackIterator.ra_call_offset,
+                .print_inlines = true,
+            });
             printed_any_frame = true;
         },
     };
@@ -805,7 +813,10 @@ pub fn writeStackTrace(st: *const StackTrace, t: Io.Terminal) Writer.Error!void 
     for (st.instruction_addresses[0..captured_frames]) |ret_addr| {
         // `ret_addr` is the return address, which is *after* the function call.
         // Subtract 1 to get an address *in* the function call for a better source location.
-        try printSourceAtAddress(io, di, t, ret_addr -| StackIterator.ra_call_offset);
+        try printSourceAtAddress(io, di, t, .{
+            .address = ret_addr -| StackIterator.ra_call_offset,
+            .print_inlines = !st.includes_inlined_frames,
+        });
     }
     if (n_frames > captured_frames) {
         t.setColor(.bold) catch {};
@@ -1111,8 +1122,18 @@ pub inline fn stripInstructionPtrAuthCode(ptr: usize) usize {
     return ptr;
 }
 
-fn printSourceAtAddress(io: Io, debug_info: *SelfInfo, t: Io.Terminal, address: usize) Writer.Error!void {
-    var symbols: SelfInfo.SymbolIterator = debug_info.getSymbols(io, address);
+const PrintSourceAddressOptions = struct {
+    address: usize,
+    print_inlines: bool,
+};
+
+fn printSourceAtAddress(
+    io: Io,
+    debug_info: *SelfInfo,
+    t: Io.Terminal,
+    options: PrintSourceAddressOptions,
+) Writer.Error!void {
+    var symbols: SelfInfo.SymbolIterator = debug_info.getSymbols(io, options.address);
     defer symbols.deinit(io);
     while (symbols.next()) |curr| {
         const symbol: Symbol = curr catch |err| switch (err) {
@@ -1138,10 +1159,11 @@ fn printSourceAtAddress(io: Io, debug_info: *SelfInfo, t: Io.Terminal, address: 
             io,
             t,
             symbol.source_location,
-            address,
+            options.address,
             symbol.name orelse "???",
-            symbol.compile_unit_name orelse debug_info.getModuleName(io, address) catch "???",
+            symbol.compile_unit_name orelse debug_info.getModuleName(io, options.address) catch "???",
         );
+        if (!options.print_inlines) break;
     }
 }
 fn printLineInfo(
@@ -1608,7 +1630,10 @@ test "manage resources correctly" {
     var di: SelfInfo = .init;
     defer di.deinit(io);
     const t: Io.Terminal = .{ .writer = &discarding.writer, .mode = .no_color };
-    try printSourceAtAddress(io, &di, t, S.showMyTrace());
+    try printSourceAtAddress(io, &di, t, .{
+        .address = S.showMyTrace(),
+        .inlines = true,
+    });
 }
 
 /// This API helps you track where a value originated and where it was mutated,
@@ -1679,6 +1704,7 @@ pub fn ConfigurableTrace(comptime size: usize, comptime stack_frame_count: usize
                 const stack_trace: StackTrace = .{
                     .index = frames.len,
                     .instruction_addresses = frames,
+                    .includes_inlined_frames = false,
                 };
                 writeStackTrace(&stack_trace, stderr) catch return;
             }
