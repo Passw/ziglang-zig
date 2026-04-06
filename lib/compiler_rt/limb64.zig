@@ -977,3 +977,53 @@ test __mulo_limb64 {
     try test__mulo_limb64(i200, maxInt(i200), maxInt(i200), .{ 1, true });
     try test__mulo_limb64(i200, minInt(i200), minInt(i200), .{ 0, true });
 }
+
+comptime {
+    symbol(&__abs_limb64, "__abs_limb64");
+}
+
+fn __abs_limb64(out_ptr: [*]u64, a_ptr: [*]const u64, bits: u16) callconv(.c) void {
+    const limb_cnt = limbCount(bits);
+    const out = out_ptr[0..limb_cnt];
+    const a = a_ptr[0..limb_cnt];
+
+    const ms = limbGet(a, limb_cnt - 1);
+    if ((ms >> 63) == 0) {
+        @memcpy(out, a);
+        return;
+    }
+
+    var carry: u1 = 1;
+    var i: usize = 0;
+    while (i < limb_cnt) : (i += 1) {
+        const s = @addWithOverflow(~limbGet(a, i), carry);
+        limbSet(out, i, s[0]);
+        carry = s[1];
+    }
+}
+
+fn test__abs_limb64(comptime T: type, a: T, expected: @Int(.unsigned, @typeInfo(T).int.bits)) !void {
+    const int_info = @typeInfo(T).int;
+    comptime assert(int_info.signedness == .signed);
+
+    var a_limbs = asLimbs(a);
+    var out: Limbs(@TypeOf(expected)) = undefined;
+    __abs_limb64(&out, &a_limbs, int_info.bits);
+
+    const expected_limbs = asLimbs(expected);
+    try testing.expectEqual(expected_limbs, out);
+}
+
+test __abs_limb64 {
+    try test__abs_limb64(i64, 0, 0);
+    try test__abs_limb64(i64, -1, 1);
+    try test__abs_limb64(i64, minInt(i64), 1 << 63);
+    try test__abs_limb64(i65, -1, 1);
+    try test__abs_limb64(i65, minInt(i65), 1 << 64);
+    try test__abs_limb64(i65, maxInt(i65), maxInt(i65));
+    try test__abs_limb64(i128, -1 << 80, 1 << 80);
+    try test__abs_limb64(i128, 1 << 64, 1 << 64);
+    try test__abs_limb64(i200, -1 << 198, 1 << 198);
+    try test__abs_limb64(i255, -5, 5);
+    try test__abs_limb64(i255, minInt(i255), 1 << 254);
+}

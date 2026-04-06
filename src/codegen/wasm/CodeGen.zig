@@ -2941,7 +2941,16 @@ fn intAbs(cg: *CodeGen, ty: IntType, operand: WValue) InnerError!WValue {
             const b = try cg.intSub(u128_ty, a, mask);
             return b;
         },
-        else => return cg.fail("TODO: Support intAbs for integer bitsize: {d}", .{ty.bits}),
+        else => {
+            const result = try cg.allocInt(ty);
+
+            try cg.lowerToStack(result);
+            try cg.lowerToStack(operand);
+            try cg.addImm32(ty.bits);
+            try cg.addCallIntrinsic(.__abs_limb64);
+
+            return result;
+        },
     }
 }
 

@@ -1657,6 +1657,85 @@ test "@byteSwap > 128 bits" {
     try testByteSwap(i256, 1 << 120, 1 << 128);
 }
 
+fn testMax(comptime T: type, a: T, b: T, expected: T) !void {
+    try expect(@max(a, b) == expected);
+}
+
+test "@max > 128 bits" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+
+    try testMax(u140, 0, maxInt(u140), maxInt(u140));
+    try testMax(u140, 1 << 139, 1 << 138, 1 << 139);
+    try testMax(u140, (1 << 100) + 7, (1 << 100) + 3, (1 << 100) + 7);
+    try testMax(u140, maxInt(u140) - 1, maxInt(u140), maxInt(u140));
+
+    try testMax(u200, 1 << 199, 1 << 198, 1 << 199);
+    try testMax(u200, (1 << 150) + (1 << 17), (1 << 150) + (1 << 18), (1 << 150) + (1 << 18));
+    try testMax(u200, 0, 1 << 123, 1 << 123);
+    try testMax(u200, maxInt(u200), maxInt(u200) - 1, maxInt(u200));
+
+    try testMax(i140, -1, 0, 0);
+    try testMax(i140, minInt(i140), maxInt(i140), maxInt(i140));
+    try testMax(i140, -1 << 70, -1 << 69, -1 << 69);
+    try testMax(i140, (1 << 100) - 1, 1 << 100, 1 << 100);
+
+    try testMax(i200, -1, minInt(i200), -1);
+    try testMax(i200, -1 << 150, -1 << 149, -1 << 149);
+    try testMax(i200, 1 << 198, (1 << 198) - 1, 1 << 198);
+    try testMax(i200, maxInt(i200), 0, maxInt(i200));
+}
+
+fn testMin(comptime T: type, a: T, b: T, expected: T) !void {
+    try expect(@min(a, b) == expected);
+}
+
+test "@min > 128 bits" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+
+    try testMin(u140, 0, maxInt(u140), 0);
+    try testMin(u140, 1 << 139, 1 << 138, 1 << 138);
+    try testMin(u140, (1 << 100) + 7, (1 << 100) + 3, (1 << 100) + 3);
+    try testMin(u140, maxInt(u140) - 1, maxInt(u140), maxInt(u140) - 1);
+
+    try testMin(u200, 1 << 199, 1 << 198, 1 << 198);
+    try testMin(u200, (1 << 150) + (1 << 17), (1 << 150) + (1 << 18), (1 << 150) + (1 << 17));
+    try testMin(u200, 0, 1 << 123, 0);
+    try testMin(u200, maxInt(u200), maxInt(u200) - 1, maxInt(u200) - 1);
+
+    try testMin(i140, -1, 0, -1);
+    try testMin(i140, minInt(i140), maxInt(i140), minInt(i140));
+    try testMin(i140, -1 << 70, -1 << 69, -1 << 70);
+    try testMin(i140, (1 << 100) - 1, 1 << 100, (1 << 100) - 1);
+
+    try testMin(i200, -1, minInt(i200), minInt(i200));
+    try testMin(i200, -1 << 150, -1 << 149, -1 << 150);
+    try testMin(i200, 1 << 198, (1 << 198) - 1, (1 << 198) - 1);
+    try testMin(i200, maxInt(i200), 0, 0);
+}
+
+fn testAbs(comptime T: type, a: T, expected: anytype) !void {
+    try expect(@abs(a) == expected);
+}
+
+test "@abs > 128 bits" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+
+    try testAbs(u140, 0, 0);
+    try testAbs(u140, 1 << 139, 1 << 139);
+    try testAbs(u200, 123456789, 123456789);
+    try testAbs(u200, maxInt(u200), maxInt(u200));
+
+    try testAbs(i140, 0, 0);
+    try testAbs(i140, 1, 1);
+    try testAbs(i140, -1, 1);
+    try testAbs(i140, minInt(i140), 1 << 139);
+
+    try testAbs(i200, 1 << 198, 1 << 198);
+    try testAbs(i200, -1 << 198, 1 << 198);
+    try testAbs(i200, maxInt(i200), maxInt(i200));
+    try testAbs(i200, minInt(i200), 1 << 199);
+}
+
 test "overflow arithmetic with u0 values" {
     if (builtin.zig_backend == .stage2_spirv) return error.SkipZigTest;
 
