@@ -312,7 +312,7 @@ pub const BinaryAnnotation = union(enum) {
 
         const PartialRange = struct {
             line_offset: u32,
-            file_offset: u32,
+            file_id: ?u32,
             code_offset: u32,
             code_length: ?u32,
         };
@@ -322,7 +322,7 @@ pub const BinaryAnnotation = union(enum) {
                 .annotations = annotations,
                 .curr = .{
                     .line_offset = 0,
-                    .file_offset = 0,
+                    .file_id  = null,
                     .code_offset = 0,
                     .code_length = null,
                 },
@@ -332,7 +332,7 @@ pub const BinaryAnnotation = union(enum) {
 
         pub const Range = struct {
             line_offset: u32,
-            file_offset: u32,
+            file_id: ?u32,
             code_offset: u32,
             code_length: u32,
 
@@ -352,7 +352,11 @@ pub const BinaryAnnotation = union(enum) {
                         if (self.prev) |*prev| prev.code_length = prev.code_length orelse length;
                         self.curr.code_offset += length;
                     },
-                    .change_file => @panic("unimplemented"),
+                    // LLVM has code to emit these, but I wasn't able to figure out how trigger it
+                    // so this logic is untested.
+                    .change_file => |file_id| {
+                        self.curr.file_id = file_id;
+                    },
                     // LLVM never emits this opcode, but it's clear enough how to interpret it so we may as
                     // well in case they use it in the future
                     .change_code_length_and_code_offset => |info| {
@@ -402,7 +406,7 @@ pub const BinaryAnnotation = union(enum) {
                     .code_offset = self.curr.code_offset,
                     .code_length = self.curr.code_length,
                     .line_offset = self.curr.line_offset,
-                    .file_offset = self.curr.file_offset,
+                    .file_id = self.curr.file_id,
                 };
                 const prev = self.prev orelse continue;
                 const prev_code_length = prev.code_length orelse continue;
@@ -410,7 +414,7 @@ pub const BinaryAnnotation = union(enum) {
                     .code_offset = prev.code_offset,
                     .code_length = prev_code_length,
                     .line_offset = prev.line_offset,
-                    .file_offset = prev.file_offset,
+                    .file_id = prev.file_id,
                 };
             }
 
@@ -421,7 +425,7 @@ pub const BinaryAnnotation = union(enum) {
                 .code_offset = prev.code_offset,
                 .code_length = prev_code_length,
                 .line_offset = prev.line_offset,
-                .file_offset = prev.file_offset,
+                .file_id = prev.file_id,
             };
         }
     };
@@ -588,21 +592,44 @@ pub fn getBinaryAnnotations(self: *Pdb, site: *align(1) const pdb.InlineSiteSym)
     return .{ .reader = Io.Reader.fixed(slice) };
 }
 
-pub fn calculateOffset(
+pub fn getInlineSiteSourceLocation(
     self: *Pdb,
+    mod: *Module,
     site: *align(1) const pdb.InlineSiteSym,
-    loc: std.debug.SourceLocation,
+    inlinee_src_line: *align(1) const pdb.InlineeSourceLine,
     offset_in_func: usize,
-) error{InvalidDebugInfo, MissingDebugInfo, ReadFailed}!?std.debug.SourceLocation {
+) !?std.debug.SourceLocation {
     var ranges: BinaryAnnotation.RangeIterator = .init(self.getBinaryAnnotations(site));
     while (try ranges.next()) |range| {
-        if (range.contains(offset_in_func)) {
-            var result: std.debug.SourceLocation = loc;
-            result.line += range.line_offset;
-            return result;
-        }
+        if (!range.contains(offset_in_func)) continue;
+
+        const file_id = range.file_id orelse inlinee_src_line.file_id;
+        const file_name = try self.getFileName(mod, file_id);
+        errdefer self.allocator.free(file_name);
+
+        return .{
+            .line = inlinee_src_line.source_line_num + range.line_offset,
+            // LLVM doesn't currently emit column information for inlined calls in PDBs.
+            .column = 0,
+            .file_name = file_name,
+        };
     }
     return null;
+}
+
+pub fn getFileName(self: *Pdb, mod: *Module, file_id: u32) ![]const u8 {
+    const checksum_offset = mod.checksum_offset orelse return error.MissingDebugInfo;
+    const subsect_index = checksum_offset + file_id;
+    const chksum_hdr: *align(1) pdb.FileChecksumEntryHeader = @ptrCast(&mod.subsect_info[subsect_index]);
+    const strtab_offset = @sizeOf(pdb.StringTableHeader) + chksum_hdr.file_name_offset;
+    self.string_table.?.seekTo(strtab_offset) catch return error.InvalidDebugInfo;
+    const string_reader = &self.string_table.?.interface;
+    var source_file_name: Io.Writer.Allocating = .init(self.allocator);
+    defer source_file_name.deinit();
+    _ = try string_reader.streamDelimiterLimit(&source_file_name.writer, 0, .limited(1024));
+    assert(string_reader.buffered()[0] == 0); // TODO change streamDelimiterLimit API
+    string_reader.toss(1);
+    return try source_file_name.toOwnedSlice();
 }
 
 pub fn getSymbolName(self: *Pdb, proc_sym: *align(1) const pdb.ProcSym) []const u8 {
@@ -610,8 +637,17 @@ pub fn getSymbolName(self: *Pdb, proc_sym: *align(1) const pdb.ProcSym) []const 
     return std.mem.sliceTo(@as([*:0]const u8, @ptrCast(&proc_sym.name[0])), 0);
 }
 
-pub fn getInlineeInfo(self: *Pdb, mod: *Module, inlinee: u32) !std.debug.SourceLocation {
-    const gpa = self.allocator;
+pub const InlineeSourceLine = struct {
+   signature: pdb.InlineeSourceLineSignature,
+   info: *align(1) const pdb.InlineeSourceLine, 
+};
+
+pub fn getInlineeSourceLine(
+    self: *Pdb,
+    mod: *Module,
+    inlinee: u32,
+) ?InlineeSourceLine {
+    _ = self;
     var sect_offset: usize = 0;
     var skip_len: usize = undefined;
     while (sect_offset < mod.subsect_info.len) : (sect_offset += skip_len) {
@@ -631,7 +667,7 @@ pub fn getInlineeInfo(self: *Pdb, mod: *Module, inlinee: u32) !std.debug.SourceL
             };
 
             while (offset < sect_offset + subsect_hdr.length) {
-                const entry: *const align(1) pdb.InlineeSourceLine = @ptrCast(&mod.subsect_info[offset]);
+                const inlinee_src_line: *const align(1) pdb.InlineeSourceLine = @ptrCast(&mod.subsect_info[offset]);
                 offset += @sizeOf(pdb.InlineeSourceLine);
 
                 if (has_extra_files) {
@@ -640,33 +676,14 @@ pub fn getInlineeInfo(self: *Pdb, mod: *Module, inlinee: u32) !std.debug.SourceL
                     offset += file_count.* * @sizeOf(u32);
                 }
 
-                if (entry.inlinee == inlinee) {
-                    const source_file_name = s: {
-                        const checksum_offset = mod.checksum_offset orelse return error.MissingDebugInfo;
-                        const subsect_index = checksum_offset + entry.file_id;
-                        const chksum_hdr: *align(1) pdb.FileChecksumEntryHeader = @ptrCast(&mod.subsect_info[subsect_index]);
-                        const strtab_offset = @sizeOf(pdb.StringTableHeader) + chksum_hdr.file_name_offset;
-                        try self.string_table.?.seekTo(strtab_offset);
-                        const string_reader = &self.string_table.?.interface;
-                        var source_file_name: Io.Writer.Allocating = .init(gpa);
-                        defer source_file_name.deinit();
-                        _ = try string_reader.streamDelimiterLimit(&source_file_name.writer, 0, .limited(1024));
-                        assert(string_reader.buffered()[0] == 0); // TODO change streamDelimiterLimit API
-                        string_reader.toss(1);
-                        break :s try source_file_name.toOwnedSlice();
-                    };
-                    errdefer gpa.free(source_file_name);
-
-                    return .{
-                        .line = entry.source_line_num,
-                        .column = 0,
-                        .file_name = source_file_name,
-                    };
-                }
+                if (inlinee_src_line.inlinee == inlinee) return .{
+                    .signature = signature.*,
+                    .info = inlinee_src_line,
+                };
             }
         }
     }
-    return error.MissingDebugInfo;
+    return null;
 }
 
 pub fn getLineNumberInfo(self: *Pdb, module: *Module, address: u64) !std.debug.SourceLocation {
@@ -676,7 +693,6 @@ pub fn getLineNumberInfo(self: *Pdb, module: *Module, address: u64) !std.debug.S
 
     var sect_offset: usize = 0;
     var skip_len: usize = undefined;
-    const checksum_offset = module.checksum_offset orelse return error.MissingDebugInfo;
     while (sect_offset != subsect_info.len) : (sect_offset += skip_len) {
         const subsect_hdr: *align(1) pdb.DebugSubsectionHeader = @ptrCast(&subsect_info[sect_offset]);
         skip_len = subsect_hdr.length;
@@ -723,20 +739,8 @@ pub fn getLineNumberInfo(self: *Pdb, module: *Module, address: u64) !std.debug.S
 
                         // line_i == 0 would mean that no matching pdb.LineNumberEntry was found.
                         if (line_i > 0) {
-                            const subsect_index = checksum_offset + block_hdr.name_index;
-                            const chksum_hdr: *align(1) pdb.FileChecksumEntryHeader = @ptrCast(&module.subsect_info[subsect_index]);
-                            const strtab_offset = @sizeOf(pdb.StringTableHeader) + chksum_hdr.file_name_offset;
-                            try self.string_table.?.seekTo(strtab_offset);
-                            const source_file_name = s: {
-                                const string_reader = &self.string_table.?.interface;
-                                var source_file_name: Io.Writer.Allocating = .init(gpa);
-                                defer source_file_name.deinit();
-                                _ = try string_reader.streamDelimiterLimit(&source_file_name.writer, 0, .limited(1024));
-                                assert(string_reader.buffered()[0] == 0); // TODO change streamDelimiterLimit API
-                                string_reader.toss(1);
-                                break :s try source_file_name.toOwnedSlice();
-                            };
-                            errdefer gpa.free(source_file_name);
+                            const file_name = try self.getFileName(module, block_hdr.name_index);
+                            errdefer gpa.free(file_name);
 
                             const line_entry_idx = line_i - 1;
 
@@ -751,7 +755,7 @@ pub fn getLineNumberInfo(self: *Pdb, module: *Module, address: u64) !std.debug.S
                             const line_num_entry: *align(1) pdb.LineNumberEntry = @ptrCast(&subsect_info[found_line_index]);
 
                             return .{
-                                .file_name = source_file_name,
+                                .file_name = file_name,
                                 .line = line_num_entry.flags.start,
                                 .column = column,
                             };
