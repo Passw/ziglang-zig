@@ -357,8 +357,8 @@ pub const BinaryAnnotation = union(enum) {
                     .change_file => |file_id| {
                         self.curr.file_id = file_id;
                     },
-                    // LLVM never emits this opcode, but it's clear enough how to interpret it so we may as
-                    // well in case they use it in the future
+                    // LLVM never emits this opcode, but it's clear enough how to interpret it so we
+                    // may as well in case they use it in the future
                     .change_code_length_and_code_offset => |info| {
                         self.curr.code_length = info.length;
                         self.curr.code_offset += info.delta;
@@ -371,21 +371,24 @@ pub const BinaryAnnotation = union(enum) {
                         self.curr.line_offset += info.line_delta;
                     },
 
-                    // Not emitted by LLVM at the time of writing, but if we get it from elsewhere it should
-                    // be safe to ignore since we don't use this info. Theoretically we could use column
-                    // info if it was present, but it's not easy to test since LLVM doesn't output it.
+                    // Not emitted by LLVM at the time of writing, and we don't want to add support
+                    // without a test csae. Safe to ignore since we don't use this info right now.
                     .change_line_end_delta,
                     .change_column_start,
                     .change_column_end_delta,
                     .change_column_end,
                      => {},
 
-                     // Not emitted by LLVM at the time of writing. Various sources conflict on how these
-                     // instructions should be interpreted, so we make no attempt to handle them.
+                     // Not emitted by LLVM at the time of writing. Various sources conflict on how
+                     // these opcodes should be interpreted, so we make no attempt to handle them.
                     .code_offset,
                     .change_code_offset_base,
                     .change_range_kind,
-                    => @panic("unimplemented"),
+                    => {
+                       self.annotations = .empty; 
+                       self.prev = null;
+                       return null;
+                    },
                 }
 
                 switch (annotation) {
@@ -432,6 +435,8 @@ pub const BinaryAnnotation = union(enum) {
 
     pub const Iterator = struct {
         reader: Io.Reader,
+
+        pub const empty: Iterator = .{ .reader = .ending_instance };
 
         pub fn next(self: *Iterator) error{InvalidDebugInfo}!?BinaryAnnotation {
             return take(&self.reader) catch |err| switch (err) {
