@@ -68,9 +68,18 @@ pub const SymbolIterator = struct {
                         if (pdb.getInlineeInfo(info.module, site.inlinee) catch null) |loc| {
                             const offset_in_func = info.addr - proc.code_offset;
                             if (try pdb.calculateOffset(site, loc, offset_in_func)) |offset| {
+                                // If we've found a match, filter out any duplicate sites that
+                                // follow. Tools like llvm-addr2line output duplicate sites in the
+                                // same cases as us, implying that they exist in the underlying
+                                // data and are not indicative of a parser bug.
+                                while (info.inline_sites.getLastOrNull()) |top| {
+                                    if (top.inlinee != site.inlinee) break;
+                                    _ = info.inline_sites.pop();
+                                }
+
                                 return .{
                                     .name = pdb.findInlineeName(site.inlinee),
-                                    .compile_unit_name = null,
+                                    .compile_unit_name = fs.path.basename(info.module.obj_file_name),
                                     .source_location = offset,
                                 };
                             }
