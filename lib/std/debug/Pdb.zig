@@ -253,12 +253,6 @@ pub const InlineSiteSymIterator = struct {
     offset: usize,
     end: usize,
 
-    pub const empty: InlineSiteSymIterator = .{
-        .module_index = 0,
-        .offset = 0,
-        .end = 0,
-    };
-
     pub fn next(iter: *InlineSiteSymIterator, module: *Module) ?*align(1) pdb.InlineSiteSym {
         while (iter.offset < iter.end) {
             const inline_prefix: *align(1) pdb.RecordPrefix = @ptrCast(&module.symbols[iter.offset]);
