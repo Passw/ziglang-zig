@@ -1178,7 +1178,11 @@ fn printLineInfo(
     t.setColor(.bold) catch {};
 
     if (source_location) |*sl| {
-        try writer.print("{s}:{d}:{d}", .{ sl.file_name, sl.line, sl.column });
+        if (sl.column == 0) {
+            try writer.print("{s}:{d}", .{ sl.file_name, sl.line });
+        } else {
+            try writer.print("{s}:{d}:{d}", .{ sl.file_name, sl.line, sl.column });
+        }
     } else {
         try writer.writeAll("???:?:?");
     }
