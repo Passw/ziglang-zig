@@ -311,7 +311,7 @@ pub const BinaryAnnotation = union(enum) {
         prev: ?PartialRange,
 
         const PartialRange = struct {
-            line_offset: u32,
+            line_offset: i32,
             file_id: ?u32,
             code_offset: u32,
             code_length: ?u32,
@@ -331,7 +331,7 @@ pub const BinaryAnnotation = union(enum) {
         }
 
         pub const Range = struct {
-            line_offset: u32,
+            line_offset: i32,
             file_id: ?u32,
             code_offset: u32,
             code_length: u32,
@@ -364,11 +364,11 @@ pub const BinaryAnnotation = union(enum) {
                         self.curr.code_offset += info.delta;
                     },
                     .change_line_offset => |delta| {
-                        self.curr.line_offset +%= @bitCast(delta);
+                        self.curr.line_offset += delta;
                     },
                     .change_code_offset_and_line_offset => |info| {
                         self.curr.code_offset += info.code_delta;
-                        self.curr.line_offset +%= @bitCast(info.line_delta);
+                        self.curr.line_offset += info.line_delta;
                     },
 
                     // Not emitted by LLVM at the time of writing, but if we get it from elsewhere it should
@@ -608,7 +608,7 @@ pub fn getInlineSiteSourceLocation(
         errdefer self.allocator.free(file_name);
 
         return .{
-            .line = inlinee_src_line.source_line_num + range.line_offset,
+            .line = inlinee_src_line.source_line_num +% @as(u32, @bitCast(range.line_offset)),
             // LLVM doesn't currently emit column information for inlined calls in PDBs.
             .column = 0,
             .file_name = file_name,
