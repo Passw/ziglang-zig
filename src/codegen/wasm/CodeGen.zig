@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const testing = std.testing;
+const math = std.math;
 const mem = std.mem;
 const log = std.log.scoped(.codegen);
 
@@ -3258,32 +3259,35 @@ fn intByteSwap(cg: *CodeGen, ty: IntType, operand: WValue) InnerError!WValue {
             return cg.intShr(ty, intrin_ret, .{ .imm32 = 64 - ty.bits });
         },
         65...128 => {
-            const tmp = try cg.allocStack(Type.u128);
+            const result = try cg.allocStack(Type.u128);
+
+            try cg.emitWValue(result);
 
             const low = try cg.load(operand, Type.u64, 0);
-            const high = try cg.load(operand, Type.u64, 8);
-
             const swap_low = try cg.callIntrinsic(
                 .__bswapdi2,
                 &.{.u64_type},
                 Type.u64,
                 &.{low},
             );
+            try cg.store(.stack, swap_low, Type.u64, result.offset() + 8);
+
+            try cg.emitWValue(result);
+
+            const high = try cg.load(operand, Type.u64, 8);
             const swap_high = try cg.callIntrinsic(
                 .__bswapdi2,
                 &.{.u64_type},
                 Type.u64,
                 &.{high},
             );
-
-            try cg.store(tmp, swap_low, Type.u64, tmp.offset() + 8);
-            try cg.store(tmp, swap_high, Type.u64, tmp.offset());
+            try cg.store(.stack, swap_high, Type.u64, result.offset());
 
             if (ty.bits < 128) {
                 const shift_ty: IntType = .{ .is_signed = ty.is_signed, .bits = 128 };
-                return cg.intShr(shift_ty, tmp, .{ .imm32 = 128 - ty.bits });
+                return cg.intShr(shift_ty, result, .{ .imm32 = 128 - ty.bits });
             } else {
-                return tmp;
+                return result;
             }
         },
         else => {
@@ -3360,14 +3364,14 @@ fn intWrap(cg: *CodeGen, ty: IntType, operand: WValue) InnerError!WValue {
 
             const result = try cg.allocInt(ty);
 
-            const copy_len = (ty.bits / 64) * 8;
-            try cg.memcpy(result, operand, .{ .imm32 = copy_len });
+            const used_len = (math.divCeil(u16, ty.bits, 64) catch unreachable) * 8;
 
             if (ty.bits % 64 != 0) {
+                try cg.memcpy(result, operand, .{ .imm32 = used_len - 8 });
                 const pad = 64 - ty.bits % 64;
 
                 try cg.emitWValue(result);
-                _ = try cg.load(operand, Type.u64, copy_len);
+                _ = try cg.load(operand, Type.u64, used_len - 8);
                 if (ty.is_signed) {
                     try cg.addImm64(pad);
                     try cg.addTag(.i64_shl);
@@ -3377,20 +3381,22 @@ fn intWrap(cg: *CodeGen, ty: IntType, operand: WValue) InnerError!WValue {
                     try cg.addImm64(~@as(u64, 0) >> @intCast(pad));
                     try cg.addTag(.i64_and);
                 }
-                try cg.store(.stack, .stack, Type.u64, result.offset() + copy_len);
+                try cg.store(.stack, .stack, Type.u64, result.offset() + used_len - 8);
+            } else {
+                try cg.memcpy(result, operand, .{ .imm32 = used_len });
             }
 
             const full_len = @divExact(bits, 8);
-            if (copy_len + 16 == full_len) { // last limb needs sign extended
+            if (used_len + 8 == full_len) { // last limb needs sign extended
                 try cg.emitWValue(result);
                 if (ty.is_signed) {
-                    _ = try cg.load(result, Type.u64, copy_len);
+                    _ = try cg.load(result, Type.u64, used_len - 8);
                     try cg.addImm64(63);
                     try cg.addTag(.i64_shr_s);
                 } else {
                     try cg.addImm64(0);
                 }
-                try cg.store(.stack, .stack, Type.u64, result.offset() + copy_len + 8);
+                try cg.store(.stack, .stack, Type.u64, result.offset() + used_len);
             }
 
             return result;
@@ -3424,17 +3430,17 @@ fn intMaxValue(cg: *CodeGen, int_ty: IntType) InnerError!WValue {
     } else {
         const result = try cg.allocInt(int_ty);
         const full_len = @divExact(cg.intBackingBits(int_ty.bits), 8);
-        const normal_len = (int_ty.bits / 64) * 8;
+        const used_len = (math.divCeil(u16, int_ty.bits, 64) catch unreachable) * 8;
 
-        try cg.memset(Type.u8, result, .{ .imm32 = normal_len }, .{ .imm32 = 0xFF });
+        try cg.memset(Type.u8, result, .{ .imm32 = used_len - 8 }, .{ .imm32 = 0xFF });
 
         if (int_ty.is_signed) {
-            try cg.store(result, .{ .imm64 = (~@as(u64, 0) >> @intCast((normal_len + 8) * 8 - int_ty.bits)) >> 1 }, Type.u64, normal_len);
+            try cg.store(result, .{ .imm64 = (~@as(u64, 0) >> @intCast(used_len * 8 - int_ty.bits)) >> 1 }, Type.u64, used_len - 8);
         } else {
-            try cg.store(result, .{ .imm64 = ~@as(u64, 0) >> @intCast((normal_len + 8) * 8 - int_ty.bits) }, Type.u64, normal_len);
+            try cg.store(result, .{ .imm64 = ~@as(u64, 0) >> @intCast(used_len * 8 - int_ty.bits) }, Type.u64, used_len - 8);
         }
 
-        if (normal_len + 16 == full_len) {
+        if (used_len + 8 == full_len) {
             try cg.store(result, .{ .imm64 = 0 }, Type.u64, full_len - 8);
         }
 
@@ -3458,12 +3464,12 @@ fn intMinValue(cg: *CodeGen, int_ty: IntType) InnerError!WValue {
     } else {
         const result = try cg.allocInt(int_ty);
         const full_len = @divExact(cg.intBackingBits(int_ty.bits), 8);
-        const normal_len = (int_ty.bits / 64) * 8;
+        const used_len = (math.divCeil(u16, int_ty.bits, 64) catch unreachable) * 8;
 
-        try cg.memset(Type.u8, result, .{ .imm32 = normal_len }, .{ .imm32 = 0 });
-        try cg.store(result, .{ .imm64 = ~@as(u64, 0) << @intCast(int_ty.bits - normal_len * 8 - 1) }, Type.u64, normal_len);
+        try cg.memset(Type.u8, result, .{ .imm32 = used_len - 8 }, .{ .imm32 = 0 });
+        try cg.store(result, .{ .imm64 = ~@as(u64, 0) << @intCast(int_ty.bits - (used_len - 8) * 8 - 1) }, Type.u64, used_len - 8);
 
-        if (normal_len + 16 == full_len) {
+        if (used_len + 8 == full_len) {
             try cg.store(result, .{ .imm64 = ~@as(u64, 0) }, Type.u64, full_len - 8);
         }
 
@@ -4505,7 +4511,7 @@ fn floatFromInt(cg: *CodeGen, dest_ty: FloatType, src_ty: IntType, operand: WVal
             },
             else => {
                 const intrinsic: Mir.Intrinsic = if (src_ty.is_signed) .__floateihf else .__floatuneihf;
-                return cg.callIntrinsic(intrinsic, &.{ .usize_type, .usize_type }, Type.f16, &.{ operand, .{ .imm32 = src_ty.bits }});
+                return cg.callIntrinsic(intrinsic, &.{ .usize_type, .usize_type }, Type.f16, &.{ operand, .{ .imm32 = src_ty.bits } });
             },
         },
         .f32 => switch (src_ty.bits) {
@@ -4526,7 +4532,7 @@ fn floatFromInt(cg: *CodeGen, dest_ty: FloatType, src_ty: IntType, operand: WVal
             },
             else => {
                 const intrinsic: Mir.Intrinsic = if (src_ty.is_signed) .__floateisf else .__floatuneisf;
-                return cg.callIntrinsic(intrinsic, &.{ .usize_type, .usize_type }, Type.f32, &.{ operand, .{ .imm32 = src_ty.bits }});
+                return cg.callIntrinsic(intrinsic, &.{ .usize_type, .usize_type }, Type.f32, &.{ operand, .{ .imm32 = src_ty.bits } });
             },
         },
         .f64 => switch (src_ty.bits) {
@@ -4547,7 +4553,7 @@ fn floatFromInt(cg: *CodeGen, dest_ty: FloatType, src_ty: IntType, operand: WVal
             },
             else => {
                 const intrinsic: Mir.Intrinsic = if (src_ty.is_signed) .__floateidf else .__floatuneidf;
-                return cg.callIntrinsic(intrinsic, &.{ .usize_type, .usize_type }, Type.f64, &.{ operand, .{ .imm32 = src_ty.bits }});
+                return cg.callIntrinsic(intrinsic, &.{ .usize_type, .usize_type }, Type.f64, &.{ operand, .{ .imm32 = src_ty.bits } });
             },
         },
         .f80 => switch (src_ty.bits) {
@@ -4566,7 +4572,7 @@ fn floatFromInt(cg: *CodeGen, dest_ty: FloatType, src_ty: IntType, operand: WVal
             },
             else => {
                 const intrinsic: Mir.Intrinsic = if (src_ty.is_signed) .__floateixf else .__floatuneixf;
-                return cg.callIntrinsic(intrinsic, &.{ .usize_type, .usize_type }, Type.f80, &.{ operand, .{ .imm32 = src_ty.bits }});
+                return cg.callIntrinsic(intrinsic, &.{ .usize_type, .usize_type }, Type.f80, &.{ operand, .{ .imm32 = src_ty.bits } });
             },
         },
         .f128 => switch (src_ty.bits) {
@@ -4585,7 +4591,7 @@ fn floatFromInt(cg: *CodeGen, dest_ty: FloatType, src_ty: IntType, operand: WVal
             },
             else => {
                 const intrinsic: Mir.Intrinsic = if (src_ty.is_signed) .__floateitf else .__floatuneitf;
-                return cg.callIntrinsic(intrinsic, &.{ .usize_type, .usize_type }, Type.f128, &.{ operand, .{ .imm32 = src_ty.bits }});
+                return cg.callIntrinsic(intrinsic, &.{ .usize_type, .usize_type }, Type.f128, &.{ operand, .{ .imm32 = src_ty.bits } });
             },
         },
     }

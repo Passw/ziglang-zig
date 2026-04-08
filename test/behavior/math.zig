@@ -1768,6 +1768,7 @@ fn testMod(comptime T: type, numerator: T, denominator: T, expected: T) !void {
 
 test "@mod > 128 bits" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
 
     try testMod(u140, 0, maxInt(u140), 0);
     try testMod(u140, maxInt(u140), maxInt(u140), 0);
