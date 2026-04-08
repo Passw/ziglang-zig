@@ -2530,11 +2530,24 @@ fn intDiv(cg: *CodeGen, ty: IntType, lhs: WValue, rhs: WValue) InnerError!WValue
         },
         else => {
             const result = try cg.allocInt(ty);
+            const bits = cg.intBackingBits(ty.bits);
+            var tmp = try cg.allocInt(.{ .is_signed = false, .bits = bits * 2 });
             if (ty.is_signed) {
-                _ = try cg.callIntrinsic(.__divei4, &.{ .usize_type, .usize_type, .usize_type, .usize_type }, .void, &.{ result, lhs, rhs, .{ .imm32 = ty.bits } });
+                _ = try cg.callIntrinsic(
+                    .__divei5,
+                    &.{ .usize_type, .usize_type, .usize_type, .usize_type, .usize_type },
+                    .void,
+                    &.{ result, lhs, rhs, tmp, .{ .imm32 = ty.bits } },
+                );
             } else {
-                _ = try cg.callIntrinsic(.__udivei4, &.{ .usize_type, .usize_type, .usize_type, .usize_type }, .void, &.{ result, lhs, rhs, .{ .imm32 = ty.bits } });
+                _ = try cg.callIntrinsic(
+                    .__udivei5,
+                    &.{ .usize_type, .usize_type, .usize_type, .usize_type, .usize_type },
+                    .void,
+                    &.{ result, lhs, rhs, tmp, .{ .imm32 = ty.bits } },
+                );
             }
+            tmp.free(cg);
             return result;
         },
     }
@@ -2631,11 +2644,24 @@ fn intRem(cg: *CodeGen, ty: IntType, lhs: WValue, rhs: WValue) InnerError!WValue
         },
         else => {
             const result = try cg.allocInt(ty);
+            const bits = cg.intBackingBits(ty.bits);
+            var tmp = try cg.allocInt(.{ .is_signed = false, .bits = bits * 2 });
             if (ty.is_signed) {
-                _ = try cg.callIntrinsic(.__modei4, &.{ .usize_type, .usize_type, .usize_type, .usize_type }, .void, &.{ result, lhs, rhs, .{ .imm32 = ty.bits } });
+                _ = try cg.callIntrinsic(
+                    .__modei5,
+                    &.{ .usize_type, .usize_type, .usize_type, .usize_type, .usize_type },
+                    .void,
+                    &.{ result, lhs, rhs, tmp, .{ .imm32 = ty.bits } },
+                );
             } else {
-                _ = try cg.callIntrinsic(.__umodei4, &.{ .usize_type, .usize_type, .usize_type, .usize_type }, .void, &.{ result, lhs, rhs, .{ .imm32 = ty.bits } });
+                _ = try cg.callIntrinsic(
+                    .__umodei5,
+                    &.{ .usize_type, .usize_type, .usize_type, .usize_type, .usize_type },
+                    .void,
+                    &.{ result, lhs, rhs, tmp, .{ .imm32 = ty.bits } },
+                );
             }
+            tmp.free(cg);
             return result;
         },
     }
