@@ -24,23 +24,30 @@ inline fn neg(x: []u32) void {
     }
 }
 
-/// Mutates the arguments!
-fn divmod(q: ?[]u32, r: ?[]u32, u: []u32, v: []u32) !void {
+const max_limbs = std.math.divCeil(usize, 65535, 32) catch unreachable;
+
+fn divmod(q: ?[]u32, r: ?[]u32, u: []const u32, v: []const u32) !void {
     const u_sign: i32 = @bitCast(u[u.len - 1]);
     const v_sign: i32 = @bitCast(v[v.len - 1]);
-    if (u_sign < 0) neg(u);
-    if (v_sign < 0) neg(v);
-    try @call(.always_inline, udivmod, .{ q, r, u, v });
+    var ua: [max_limbs]u32 = undefined;
+    const us = ua[0..u.len];
+    @memcpy(us, u);
+    var va: [max_limbs]u32 = undefined;
+    const vs = va[0..v.len];
+    @memcpy(vs, v);
+    if (u_sign < 0) neg(us);
+    if (v_sign < 0) neg(vs);
+    try @call(.always_inline, udivmod, .{ q, r, us, vs });
     if (q) |x| if (u_sign ^ v_sign < 0) neg(x);
     if (r) |x| if (u_sign < 0) neg(x);
 }
 
-pub fn __divei4(q_p: [*]u8, u_p: [*]u8, v_p: [*]u8, bits: usize) callconv(.c) void {
+pub fn __divei4(q_p: [*]u8, u_p: [*]const u8, v_p: [*]const u8, bits: usize) callconv(.c) void {
     @setRuntimeSafety(compiler_rt.test_safety);
     const byte_size = std.zig.target.intByteSize(&builtin.target, @intCast(bits));
     const q: []u32 = @ptrCast(@alignCast(q_p[0..byte_size]));
-    const u: []u32 = @ptrCast(@alignCast(u_p[0..byte_size]));
-    const v: []u32 = @ptrCast(@alignCast(v_p[0..byte_size]));
+    const u: []const u32 = @ptrCast(@alignCast(u_p[0..byte_size]));
+    const v: []const u32 = @ptrCast(@alignCast(v_p[0..byte_size]));
     @call(.always_inline, divmod, .{ q, null, u, v }) catch unreachable;
 }
 

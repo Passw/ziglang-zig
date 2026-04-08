@@ -1736,6 +1736,112 @@ test "@abs > 128 bits" {
     try testAbs(i200, minInt(i200), 1 << 199);
 }
 
+fn testRem(comptime T: type, numerator: T, denominator: T, expected: T) !void {
+    try expect(@rem(numerator, denominator) == expected);
+}
+
+test "@rem > 128 bits" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+
+    try testRem(u140, 0, maxInt(u140), 0);
+    try testRem(u140, maxInt(u140), maxInt(u140), 0);
+    try testRem(u140, maxInt(u140), 2, 1);
+    try testRem(u140, (1 << 139) + 5, 1 << 70, 5);
+    try testRem(u140, (1 << 100) + (1 << 50) + 7, 1 << 50, 7);
+    try testRem(u200, 123, 1 << 100, 123);
+    try testRem(u200, 1 << 120, 1 << 60, 0);
+    try testRem(u200, maxInt(u200), 1 << 100, (1 << 100) - 1);
+
+    try testRem(i140, 0, maxInt(i140), 0);
+    try testRem(i140, maxInt(i140), maxInt(i140), 0);
+    try testRem(i140, -((1 << 100) + 1), 1 << 50, -1);
+    try testRem(i140, (1 << 100) + 1, -(1 << 50), 1);
+    try testRem(i140, -((1 << 100) + 1), -(1 << 50), -1);
+    try testRem(i200, minInt(i200), 1, 0);
+    try testRem(i200, minInt(i200), -2, 0);
+    try testRem(i200, maxInt(i200), 2, 1);
+}
+
+fn testMod(comptime T: type, numerator: T, denominator: T, expected: T) !void {
+    try expect(@mod(numerator, denominator) == expected);
+}
+
+test "@mod > 128 bits" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+
+    try testMod(u140, 0, maxInt(u140), 0);
+    try testMod(u140, maxInt(u140), maxInt(u140), 0);
+    try testMod(u140, maxInt(u140), 2, 1);
+    try testMod(u140, (1 << 139) + 5, 1 << 70, 5);
+    try testMod(u140, (1 << 100) + (1 << 50) + 7, 1 << 50, 7);
+    try testMod(u200, 123, 1 << 100, 123);
+    try testMod(u200, 1 << 120, 1 << 60, 0);
+    try testMod(u200, maxInt(u200), 1 << 100, (1 << 100) - 1);
+
+    try testMod(i140, 0, maxInt(i140), 0);
+    try testMod(i140, maxInt(i140), maxInt(i140), 0);
+    try testMod(i140, -((1 << 100) + 1), 1 << 50, (1 << 50) - 1);
+    try testMod(i140, (1 << 100) + 1, -(1 << 50), -(1 << 50) + 1);
+    try testMod(i140, -((1 << 100) + 1), -(1 << 50), -1);
+    try testMod(i200, minInt(i200), 1, 0);
+    try testMod(i200, minInt(i200), -2, 0);
+    try testMod(i200, maxInt(i200), 2, 1);
+}
+
+fn testDivFloor(comptime T: type, numerator: T, denominator: T, expected: T) !void {
+    try expect(@divFloor(numerator, denominator) == expected);
+}
+
+test "@divFloor > 128 bits" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+
+    try testDivFloor(u140, 0, maxInt(u140), 0);
+    try testDivFloor(u140, maxInt(u140), maxInt(u140), 1);
+    try testDivFloor(u140, maxInt(u140), 2, maxInt(u140) >> 1);
+    try testDivFloor(u140, (1 << 139) + 5, 1 << 70, 1 << 69);
+    try testDivFloor(u140, (1 << 100) + (1 << 50) + 7, 1 << 50, (1 << 50) + 1);
+    try testDivFloor(u200, 123, 1 << 100, 0);
+    try testDivFloor(u200, 1 << 120, 1 << 60, 1 << 60);
+    try testDivFloor(u200, maxInt(u200), 1 << 100, (1 << 100) - 1);
+
+    try testDivFloor(i140, 0, maxInt(i140), 0);
+    try testDivFloor(i140, maxInt(i140), maxInt(i140), 1);
+    try testDivFloor(i140, -((1 << 100) + 1), 1 << 50, -(1 << 50) - 1);
+    try testDivFloor(i140, (1 << 100) + 1, -(1 << 50), -(1 << 50) - 1);
+    try testDivFloor(i140, -((1 << 100) + 1), -(1 << 50), 1 << 50);
+    try testDivFloor(i200, -3, 2, -2);
+    try testDivFloor(i200, minInt(i200), 1, minInt(i200));
+    try testDivFloor(i200, minInt(i200), -2, 1 << 198);
+    try testDivFloor(i200, maxInt(i200), 2, (1 << 198) - 1);
+}
+
+fn testDivTrunc(comptime T: type, numerator: T, denominator: T, expected: T) !void {
+    try expect(@divTrunc(numerator, denominator) == expected);
+}
+
+test "@divTrunc > 128 bits" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+
+    try testDivTrunc(u140, 0, maxInt(u140), 0);
+    try testDivTrunc(u140, maxInt(u140), maxInt(u140), 1);
+    try testDivTrunc(u140, maxInt(u140), 2, maxInt(u140) >> 1);
+    try testDivTrunc(u140, (1 << 139) + 5, 1 << 70, 1 << 69);
+    try testDivTrunc(u140, (1 << 100) + (1 << 50) + 7, 1 << 50, (1 << 50) + 1);
+    try testDivTrunc(u200, 123, 1 << 100, 0);
+    try testDivTrunc(u200, 1 << 120, 1 << 60, 1 << 60);
+    try testDivTrunc(u200, maxInt(u200), 1 << 100, (1 << 100) - 1);
+
+    try testDivTrunc(i140, 0, maxInt(i140), 0);
+    try testDivTrunc(i140, maxInt(i140), maxInt(i140), 1);
+    try testDivTrunc(i140, -((1 << 100) + 1), 1 << 50, -(1 << 50));
+    try testDivTrunc(i140, (1 << 100) + 1, -(1 << 50), -(1 << 50));
+    try testDivTrunc(i140, -((1 << 100) + 1), -(1 << 50), 1 << 50);
+    try testDivTrunc(i200, -3, 2, -1);
+    try testDivTrunc(i200, minInt(i200), 1, minInt(i200));
+    try testDivTrunc(i200, minInt(i200), -2, 1 << 198);
+    try testDivTrunc(i200, maxInt(i200), 2, (1 << 198) - 1);
+}
+
 test "overflow arithmetic with u0 values" {
     if (builtin.zig_backend == .stage2_spirv) return error.SkipZigTest;
 

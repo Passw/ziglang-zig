@@ -25,8 +25,24 @@ inline fn limbSet(limbs: []u64, i: usize, value: u64) void {
     }
 }
 
-fn limbCount(bits: u16) u16 {
+fn usedLimbCount(bits: u16) u16 {
     return divCeil(u16, bits, 64) catch unreachable;
+}
+
+fn limbCount(bits: u16) u16 {
+    return @divExact(std.zig.target.intByteSize(&builtin.target, bits), 8);
+}
+
+fn fixLastLimb(out_ptr: [*]u64, is_signed: bool, bits: u16) void {
+    const limb_cnt = usedLimbCount(bits);
+    const true_limb_cnt = limbCount(bits);
+    if (limb_cnt == true_limb_cnt) return;
+    const true_out = out_ptr[0..true_limb_cnt];
+
+    const sign: u64 = if (!is_signed or @as(i64, @bitCast(true_out[limb_cnt - 1])) >= 0) 0 else ~@as(u64, 0);
+    for (limb_cnt..true_limb_cnt) |i| {
+        true_out[i] = sign;
+    }
 }
 
 fn Limbs(T: type) type {
@@ -60,7 +76,7 @@ comptime {
 }
 
 fn __addo_limb64(out_ptr: [*]u64, a_ptr: [*]const u64, b_ptr: [*]const u64, is_signed: bool, bits: u16) callconv(.c) bool {
-    const limb_cnt = limbCount(bits);
+    const limb_cnt = usedLimbCount(bits);
     const out = out_ptr[0..limb_cnt];
     const a = a_ptr[0..limb_cnt];
     const b = b_ptr[0..limb_cnt];
@@ -92,11 +108,13 @@ fn __addo_limb64(out_ptr: [*]u64, a_ptr: [*]const u64, b_ptr: [*]const u64, is_s
 
     if (bits % 64 == 0) {
         limbSet(out, i, limb);
+        fixLastLimb(out_ptr, is_signed, bits);
         return carry != 0;
     } else {
         assert(carry == 0);
         const wrapped_limb = limbWrap(limb, is_signed, bits);
         limbSet(out, i, wrapped_limb);
+        fixLastLimb(out_ptr, is_signed, bits);
         return wrapped_limb != limb;
     }
 }
@@ -132,7 +150,7 @@ comptime {
 }
 
 fn __subo_limb64(out_ptr: [*]u64, a_ptr: [*]const u64, b_ptr: [*]const u64, is_signed: bool, bits: u16) callconv(.c) bool {
-    const limb_cnt = limbCount(bits);
+    const limb_cnt = usedLimbCount(bits);
     const out = out_ptr[0..limb_cnt];
     const a = a_ptr[0..limb_cnt];
     const b = b_ptr[0..limb_cnt];
@@ -164,10 +182,12 @@ fn __subo_limb64(out_ptr: [*]u64, a_ptr: [*]const u64, b_ptr: [*]const u64, is_s
 
     if (bits % 64 == 0) {
         limbSet(out, i, limb);
+        fixLastLimb(out_ptr, is_signed, bits);
         return borrow != 0;
     } else {
         const wrapped_limb = limbWrap(limb, is_signed, bits);
         limbSet(out, i, wrapped_limb);
+        fixLastLimb(out_ptr, is_signed, bits);
         return borrow != 0 or wrapped_limb != limb;
     }
 }
@@ -206,7 +226,7 @@ comptime {
 // a == b ->  0
 // a > b  ->  1
 fn __cmp_limb64(a_ptr: [*]const u64, b_ptr: [*]const u64, is_signed: bool, bits: u16) callconv(.c) i8 {
-    const limb_cnt = limbCount(bits);
+    const limb_cnt = usedLimbCount(bits);
     const a = a_ptr[0..limb_cnt];
     const b = b_ptr[0..limb_cnt];
 
@@ -391,7 +411,7 @@ comptime {
 }
 
 fn __not_limb64(out_ptr: [*]u64, a_ptr: [*]const u64, is_signed: bool, bits: u16) callconv(.c) void {
-    const limb_cnt = limbCount(bits);
+    const limb_cnt = usedLimbCount(bits);
     const out = out_ptr[0..limb_cnt];
     const a = a_ptr[0..limb_cnt];
 
@@ -405,6 +425,7 @@ fn __not_limb64(out_ptr: [*]u64, a_ptr: [*]const u64, is_signed: bool, bits: u16
         limb = limbWrap(limb, is_signed, bits);
     }
     limbSet(out, i, limb);
+    fixLastLimb(out_ptr, is_signed, bits);
 }
 
 fn test__not_limb64(comptime T: type, a: T, expected: T) !void {
@@ -436,7 +457,7 @@ comptime {
 }
 
 fn __shlo_limb64(out_ptr: [*]u64, a_ptr: [*]const u64, shift: u16, is_signed: bool, bits: u16) callconv(.c) bool {
-    const limb_cnt = limbCount(bits);
+    const limb_cnt = usedLimbCount(bits);
     const out = out_ptr[0..limb_cnt];
     const a = a_ptr[0..limb_cnt];
 
@@ -477,6 +498,7 @@ fn __shlo_limb64(out_ptr: [*]u64, a_ptr: [*]const u64, shift: u16, is_signed: bo
         overflow = overflow or limbGet(a, j) != sign_extend;
     }
 
+    fixLastLimb(out_ptr, is_signed, bits);
     return overflow;
 }
 
@@ -526,7 +548,7 @@ comptime {
 }
 
 fn __shr_limb64(out_ptr: [*]u64, a_ptr: [*]const u64, shift: u16, is_signed: bool, bits: u16) callconv(.c) void {
-    const limb_cnt = limbCount(bits);
+    const limb_cnt = usedLimbCount(bits);
     const out = out_ptr[0..limb_cnt];
     const a = a_ptr[0..limb_cnt];
 
@@ -594,7 +616,7 @@ comptime {
 }
 
 fn __clz_limb64(a_ptr: [*]const u64, bits: u16) callconv(.c) u16 {
-    const limb_cnt = limbCount(bits);
+    const limb_cnt = usedLimbCount(bits);
     const a = a_ptr[0..limb_cnt];
 
     var res: u16 = 0;
@@ -652,7 +674,7 @@ comptime {
 }
 
 fn __ctz_limb64(a_ptr: [*]const u64, bits: u16) callconv(.c) u16 {
-    const limb_cnt = limbCount(bits);
+    const limb_cnt = usedLimbCount(bits);
     const a = a_ptr[0..limb_cnt];
 
     var res: u16 = 0;
@@ -705,7 +727,7 @@ comptime {
 }
 
 fn __popcount_limb64(a_ptr: [*]const u64, bits: u16) callconv(.c) u16 {
-    const limb_cnt = limbCount(bits);
+    const limb_cnt = usedLimbCount(bits);
     const a = a_ptr[0..limb_cnt];
 
     var res: u16 = 0;
@@ -751,7 +773,7 @@ comptime {
 }
 
 fn __bitreverse_limb64(out_ptr: [*]u64, a_ptr: [*]const u64, is_signed: bool, bits: u16) callconv(.c) void {
-    const limb_cnt = limbCount(bits);
+    const limb_cnt = usedLimbCount(bits);
     const out = out_ptr[0..limb_cnt];
     const a = a_ptr[0..limb_cnt];
 
@@ -764,6 +786,7 @@ fn __bitreverse_limb64(out_ptr: [*]u64, a_ptr: [*]const u64, is_signed: bool, bi
     if (bits % 64 != 0) {
         __shr_limb64(out_ptr, out_ptr, 64 - bits % 64, is_signed, bits);
     }
+    fixLastLimb(out_ptr, is_signed, bits);
 }
 
 fn test__bitreverse_limb64(comptime T: type, a: T, expected: T) !void {
@@ -797,7 +820,7 @@ comptime {
 }
 
 fn __byteswap_limb64(out_ptr: [*]u64, a_ptr: [*]const u64, is_signed: bool, bits: u16) callconv(.c) void {
-    const limb_cnt = limbCount(bits);
+    const limb_cnt = usedLimbCount(bits);
     const out = out_ptr[0..limb_cnt];
     const a = a_ptr[0..limb_cnt];
 
@@ -812,6 +835,7 @@ fn __byteswap_limb64(out_ptr: [*]u64, a_ptr: [*]const u64, is_signed: bool, bits
     if (bits % 64 != 0) {
         __shr_limb64(out_ptr, out_ptr, 64 - bits % 64, is_signed, bits);
     }
+    fixLastLimb(out_ptr, is_signed, bits);
 }
 
 fn test__byteswap_limb64(comptime T: type, a: T, expected: T) !void {
@@ -861,7 +885,7 @@ fn mulwide(a: u64, b: u64) [2]u64 {
 }
 
 fn __mulo_limb64(out_ptr: [*]u64, a_ptr: [*]const u64, b_ptr: [*]const u64, is_signed: bool, bits: u16) callconv(.c) bool {
-    const limb_cnt = limbCount(bits);
+    const limb_cnt = usedLimbCount(bits);
 
     const out = out_ptr[0..limb_cnt];
     const a = a_ptr[0..limb_cnt];
@@ -920,6 +944,8 @@ fn __mulo_limb64(out_ptr: [*]u64, a_ptr: [*]const u64, b_ptr: [*]const u64, is_s
     if (bits % 64 != 0) {
         limbSet(out, limb_cnt - 1, last);
     }
+
+    fixLastLimb(out_ptr, is_signed, bits);
 
     if (!is_signed) {
         return !hi_zero or raw_last != last;
