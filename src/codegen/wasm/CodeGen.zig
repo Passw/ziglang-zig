@@ -3484,20 +3484,20 @@ fn intAddSat(cg: *CodeGen, int_ty: IntType, lhs: WValue, rhs: WValue) InnerError
         defer rhs_is_neg.free(cg);
         const min_val = try cg.intMinValue(int_ty);
 
-        try cg.emitWValue(min_val);
-        try cg.emitWValue(max_val);
+        try cg.lowerToStack(min_val);
+        try cg.lowerToStack(max_val);
         try cg.emitWValue(rhs_is_neg);
         try cg.addTag(.select);
 
-        try cg.emitWValue(op_val);
+        try cg.lowerToStack(op_val);
         const overflow_cmp = try cg.intCmp(int_ty, .lt, op_val, lhs);
         const is_overflow = try cg.intCmp(.u32, .neq, rhs_is_neg, overflow_cmp);
         try cg.emitWValue(is_overflow);
         try cg.addTag(.select);
         return .stack;
     } else {
-        try cg.emitWValue(max_val);
-        try cg.emitWValue(op_val);
+        try cg.lowerToStack(max_val);
+        try cg.lowerToStack(op_val);
 
         const is_overflow = try cg.intCmp(int_ty, .lt, op_val, lhs);
         try cg.emitWValue(is_overflow);
@@ -3518,12 +3518,12 @@ fn intSubSat(cg: *CodeGen, int_ty: IntType, lhs: WValue, rhs: WValue) InnerError
         const max_val = try cg.intMaxValue(int_ty);
         const min_val = try cg.intMinValue(int_ty);
 
-        try cg.emitWValue(max_val);
-        try cg.emitWValue(min_val);
+        try cg.lowerToStack(max_val);
+        try cg.lowerToStack(min_val);
         try cg.emitWValue(rhs_is_neg);
         try cg.addTag(.select);
 
-        try cg.emitWValue(op_val);
+        try cg.lowerToStack(op_val);
         const overflow_cmp = try cg.intCmp(int_ty, .gt, op_val, lhs);
         const is_overflow = try cg.intCmp(.u32, .neq, rhs_is_neg, overflow_cmp);
         try cg.emitWValue(is_overflow);
@@ -3532,8 +3532,8 @@ fn intSubSat(cg: *CodeGen, int_ty: IntType, lhs: WValue, rhs: WValue) InnerError
     } else {
         const zero = try cg.intZeroValue(int_ty);
 
-        try cg.emitWValue(zero);
-        try cg.emitWValue(op_val);
+        try cg.lowerToStack(zero);
+        try cg.lowerToStack(op_val);
         const is_overflow = try cg.intCmp(int_ty, .lt, lhs, rhs);
         try cg.emitWValue(is_overflow);
         try cg.addTag(.select);
@@ -3542,43 +3542,6 @@ fn intSubSat(cg: *CodeGen, int_ty: IntType, lhs: WValue, rhs: WValue) InnerError
 }
 
 fn intMulSat(cg: *CodeGen, int_ty: IntType, lhs: WValue, rhs: WValue) InnerError!WValue {
-    // Remove when > 128 int ops will be implemented in backend
-    if (int_ty.bits == 128) {
-        if (!int_ty.is_signed) {
-            return cg.fail("TODO: mul_sat for unsigned 128-bit integers", .{});
-        }
-
-        const overflow_ret = try cg.allocStack(Type.i32);
-        const ret = try cg.callIntrinsic(
-            .__muloti4,
-            &[_]InternPool.Index{ .i128_type, .i128_type, .usize_type },
-            Type.i128,
-            &.{ lhs, rhs, overflow_ret },
-        );
-        try cg.lowerToStack(ret);
-
-        const xor = try cg.intXor(int_ty, lhs, rhs);
-        const sign_v = try cg.intShr(int_ty, xor, .{ .imm32 = 127 });
-
-        // xor ~@as(u127, 0)
-        try cg.emitWValue(sign_v);
-        const lsb = try cg.load(sign_v, Type.u64, 0);
-        _ = try cg.intXor(.u64, lsb, .{ .imm64 = ~@as(u64, 0) });
-        try cg.store(.stack, .stack, Type.u64, sign_v.offset());
-
-        try cg.emitWValue(sign_v);
-        const msb = try cg.load(sign_v, Type.u64, 8);
-        _ = try cg.intXor(.u64, msb, .{ .imm64 = ~@as(u64, 0) >> 1 });
-        try cg.store(.stack, .stack, Type.u64, sign_v.offset() + 8);
-
-        try cg.lowerToStack(sign_v);
-        _ = try cg.load(overflow_ret, Type.i32, 0);
-        try cg.addTag(.i32_eqz);
-        try cg.addTag(.select);
-
-        return .stack;
-    }
-
     const ext_ty: IntType = .{ .is_signed = int_ty.is_signed, .bits = int_ty.bits * 2 };
 
     const lhs_ext = try cg.intCast(ext_ty, int_ty, lhs);
@@ -3594,10 +3557,10 @@ fn intMulSat(cg: *CodeGen, int_ty: IntType, lhs: WValue, rhs: WValue) InnerError
     if (int_ty.is_signed) {
         const min_val = try cg.intMinValue(int_ty);
 
-        try cg.emitWValue(min_val);
+        try cg.lowerToStack(min_val);
 
-        try cg.emitWValue(max_val);
-        try cg.emitWValue(op_val);
+        try cg.lowerToStack(max_val);
+        try cg.lowerToStack(op_val);
         const max_ext = try cg.intCast(ext_ty, int_ty, max_val);
         const ov_pos = try cg.intCmp(ext_ty, .lt, max_ext, mul_ext);
         try cg.emitWValue(ov_pos);
@@ -3605,12 +3568,12 @@ fn intMulSat(cg: *CodeGen, int_ty: IntType, lhs: WValue, rhs: WValue) InnerError
 
         const min_ext = try cg.intCast(ext_ty, int_ty, min_val);
         const ov_neg = try cg.intCmp(ext_ty, .gt, min_ext, mul_ext);
-        try cg.emitWValue(ov_neg);
+        try cg.lowerToStack(ov_neg);
         try cg.addTag(.select);
         return .stack;
     } else {
-        try cg.emitWValue(max_val);
-        try cg.emitWValue(op_val);
+        try cg.lowerToStack(max_val);
+        try cg.lowerToStack(op_val);
         const max_ext = try cg.intCast(ext_ty, int_ty, max_val);
         const is_overflow = try cg.intCmp(ext_ty, .lt, max_ext, mul_ext);
         try cg.emitWValue(is_overflow);
@@ -3633,20 +3596,20 @@ fn intShlSat(cg: *CodeGen, int_ty: IntType, lhs: WValue, rhs: WValue) InnerError
         const zero = try cg.intZeroValue(int_ty);
         const min_val = try cg.intMinValue(int_ty);
 
-        try cg.emitWValue(min_val);
-        try cg.emitWValue(max_val);
+        try cg.lowerToStack(min_val);
+        try cg.lowerToStack(max_val);
         const lhs_is_neg = try cg.intCmp(int_ty, .lt, lhs, zero);
         try cg.emitWValue(lhs_is_neg);
         try cg.addTag(.select);
 
-        try cg.emitWValue(op_val);
+        try cg.lowerToStack(op_val);
         const is_overflow = try cg.intCmp(int_ty, .neq, check_val, lhs);
         try cg.emitWValue(is_overflow);
         try cg.addTag(.select);
         return .stack;
     } else {
-        try cg.emitWValue(max_val);
-        try cg.emitWValue(op_val);
+        try cg.lowerToStack(max_val);
+        try cg.lowerToStack(op_val);
         const is_overflow = try cg.intCmp(int_ty, .neq, check_val, lhs);
         try cg.emitWValue(is_overflow);
         try cg.addTag(.select);
