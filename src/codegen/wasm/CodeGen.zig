@@ -1320,6 +1320,7 @@ fn genInst(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
         .mod,
         .max,
         .min,
+        .div_exact,
         .div_trunc,
         .div_floor,
         => |tag| {
@@ -1345,6 +1346,7 @@ fn genInst(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
                     .mod => try cg.floatMod(float_ty, lhs, rhs),
                     .max => try cg.floatMax(float_ty, lhs, rhs),
                     .min => try cg.floatMin(float_ty, lhs, rhs),
+                    .div_exact => try cg.floatDiv(float_ty, lhs, rhs),
                     .div_trunc => try cg.floatDivTrunc(float_ty, lhs, rhs),
                     .div_floor => try cg.floatDivFloor(float_ty, lhs, rhs),
                     else => unreachable,
@@ -1362,6 +1364,7 @@ fn genInst(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
                     .mod => try cg.intMod(int_ty, lhs, rhs),
                     .max => try cg.intMax(int_ty, lhs, rhs),
                     .min => try cg.intMin(int_ty, lhs, rhs),
+                    .div_exact => try cg.intDiv(int_ty, lhs, rhs),
                     .div_trunc => try cg.intDiv(int_ty, lhs, rhs),
                     .div_floor => try cg.intDivFloor(int_ty, lhs, rhs),
                     else => unreachable,
@@ -1383,19 +1386,6 @@ fn genInst(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
             }
 
             const result = try cg.floatDiv(.fromType(cg, ty), lhs, rhs);
-            try cg.finishAir(inst, result, &.{ bin_op.lhs, bin_op.rhs });
-        },
-        .div_exact => {
-            const bin_op = cg.air.instructions.items(.data)[@intFromEnum(inst)].bin_op;
-            const lhs = try cg.resolveInst(bin_op.lhs);
-            const rhs = try cg.resolveInst(bin_op.rhs);
-            const ty = cg.typeOfIndex(inst);
-
-            if (ty.zigTypeTag(zcu) == .vector) {
-                return cg.fail("TODO: implement AIR op: div_exact for vectors", .{});
-            }
-
-            const result = try cg.intDiv(.fromType(cg, ty), lhs, rhs);
             try cg.finishAir(inst, result, &.{ bin_op.lhs, bin_op.rhs });
         },
         .abs => {
