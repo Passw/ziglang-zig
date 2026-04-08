@@ -2252,9 +2252,8 @@ pub fn setupErrorReturnTrace(sema: *Sema, block: *Block, last_arg_index: usize) 
     });
     const addrs_ptr = try err_trace_block.addTy(.alloc, try pt.singleMutPtrType(addr_arr_ty));
 
-    // var st: StackTrace = undefined;
-    const stack_trace_ty = try sema.getBuiltinType(block.nodeOffset(.zero), .StackTrace);
-    const st_ptr = try err_trace_block.addTy(.alloc, try pt.singleMutPtrType(stack_trace_ty));
+    const error_return_trace_ty = try sema.getBuiltinType(block.nodeOffset(.zero), .ErrorReturnTrace);
+    const st_ptr = try err_trace_block.addTy(.alloc, try pt.singleMutPtrType(error_return_trace_ty));
 
     // st.instruction_addresses = &addrs;
     const instruction_addresses_field_name = try ip.getOrPutString(gpa, io, pt.tid, "instruction_addresses", .no_embedded_nulls);
@@ -6166,10 +6165,10 @@ pub fn analyzeSaveErrRetIndex(sema: *Sema, block: *Block) SemaError!Air.Inst.Ref
 
     if (!block.ownerModule().error_tracing) return .none;
 
-    const stack_trace_ty = try sema.getBuiltinType(block.nodeOffset(.zero), .StackTrace);
+    const error_return_trace_ty = try sema.getBuiltinType(block.nodeOffset(.zero), .ErrorReturnTrace);
     const field_name = try zcu.intern_pool.getOrPutString(gpa, io, pt.tid, "index", .no_embedded_nulls);
-    const field_index = sema.structFieldIndex(block, stack_trace_ty, field_name, LazySrcLoc.unneeded) catch |err| switch (err) {
-        error.AnalysisFail => @panic("std.builtin.StackTrace is corrupt"),
+    const field_index = sema.structFieldIndex(block, error_return_trace_ty, field_name, LazySrcLoc.unneeded) catch |err| switch (err) {
+        error.AnalysisFail => @panic("std.builtin.ErrorReturnTrace is corrupt"),
         error.ComptimeReturn, error.ComptimeBreak => unreachable,
         error.OutOfMemory, error.Canceled => |e| return e,
     };
@@ -6177,7 +6176,7 @@ pub fn analyzeSaveErrRetIndex(sema: *Sema, block: *Block) SemaError!Air.Inst.Ref
     return try block.addInst(.{
         .tag = .save_err_return_trace_index,
         .data = .{ .ty_pl = .{
-            .ty = Air.internedToRef(stack_trace_ty.toIntern()),
+            .ty = Air.internedToRef(error_return_trace_ty.toIntern()),
             .payload = @intCast(field_index),
         } },
     });
@@ -6209,11 +6208,11 @@ fn popErrorReturnTrace(
         // AstGen determined this result does not go to an error-handling expr (try/catch/return etc.), or
         // the result is comptime-known to be a non-error. Either way, pop unconditionally.
 
-        const stack_trace_ty = try sema.getBuiltinType(src, .StackTrace);
-        const ptr_stack_trace_ty = try pt.singleMutPtrType(stack_trace_ty);
-        const err_return_trace = try block.addTy(.err_return_trace, ptr_stack_trace_ty);
+        const error_return_trace_ty = try sema.getBuiltinType(src, .ErrorReturnTrace);
+        const ptr_error_return_trace_ty = try pt.singleMutPtrType(error_return_trace_ty);
+        const err_return_trace = try block.addTy(.err_return_trace, ptr_error_return_trace_ty);
         const field_name = try zcu.intern_pool.getOrPutString(gpa, io, pt.tid, "index", .no_embedded_nulls);
-        const field_ptr = try sema.structFieldPtr(block, src, err_return_trace, field_name, src, stack_trace_ty);
+        const field_ptr = try sema.structFieldPtr(block, src, err_return_trace, field_name, src, error_return_trace_ty);
         try sema.storePtr2(block, src, field_ptr, src, saved_error_trace_index, src, .store);
     } else if (is_non_error == null) {
         // The result might be an error. If it is, we leave the error trace alone. If it isn't, we need
@@ -6234,11 +6233,11 @@ fn popErrorReturnTrace(
         defer then_block.instructions.deinit(gpa);
 
         // If non-error, then pop the error return trace by restoring the index.
-        const stack_trace_ty = try sema.getBuiltinType(src, .StackTrace);
-        const ptr_stack_trace_ty = try pt.singleMutPtrType(stack_trace_ty);
-        const err_return_trace = try then_block.addTy(.err_return_trace, ptr_stack_trace_ty);
+        const error_return_trace_ty = try sema.getBuiltinType(src, .ErrorReturnTrace);
+        const ptr_error_return_trace_ty = try pt.singleMutPtrType(error_return_trace_ty);
+        const err_return_trace = try then_block.addTy(.err_return_trace, ptr_error_return_trace_ty);
         const field_name = try zcu.intern_pool.getOrPutString(gpa, io, pt.tid, "index", .no_embedded_nulls);
-        const field_ptr = try sema.structFieldPtr(&then_block, src, err_return_trace, field_name, src, stack_trace_ty);
+        const field_ptr = try sema.structFieldPtr(&then_block, src, err_return_trace, field_name, src, error_return_trace_ty);
         try sema.storePtr2(&then_block, src, field_ptr, src, saved_error_trace_index, src, .store);
         _ = try then_block.addBr(cond_block_inst, .void_value);
 
@@ -6373,15 +6372,15 @@ fn zirCall(
         // If any input is an error-type, we might need to pop any trace it generated. Otherwise, we only
         // need to clean-up our own trace if we were passed to a non-error-handling expression.
         if (input_is_error or (pop_error_return_trace and return_ty.isError(zcu))) {
-            const stack_trace_ty = try sema.getBuiltinType(call_src, .StackTrace);
+            const error_return_trace_ty = try sema.getBuiltinType(call_src, .ErrorReturnTrace);
             const field_name = try zcu.intern_pool.getOrPutString(gpa, io, pt.tid, "index", .no_embedded_nulls);
-            const field_index = try sema.structFieldIndex(block, stack_trace_ty, field_name, call_src);
+            const field_index = try sema.structFieldIndex(block, error_return_trace_ty, field_name, call_src);
 
             // Insert a save instruction before the arg resolution + call instructions we just generated
             const save_inst = try block.insertInst(block_index, .{
                 .tag = .save_err_return_trace_index,
                 .data = .{ .ty_pl = .{
-                    .ty = Air.internedToRef(stack_trace_ty.toIntern()),
+                    .ty = Air.internedToRef(error_return_trace_ty.toIntern()),
                     .payload = @intCast(field_index),
                 } },
             });
@@ -19529,13 +19528,13 @@ fn getErrorReturnTrace(sema: *Sema, block: *Block) CompileError!Air.Inst.Ref {
     const pt = sema.pt;
     const zcu = pt.zcu;
     const ip = &zcu.intern_pool;
-    const stack_trace_ty = try sema.getBuiltinType(block.nodeOffset(.zero), .StackTrace);
-    const ptr_stack_trace_ty = try pt.singleMutPtrType(stack_trace_ty);
-    const opt_ptr_stack_trace_ty = try pt.optionalType(ptr_stack_trace_ty.toIntern());
+    const error_return_trace_ty = try sema.getBuiltinType(block.nodeOffset(.zero), .ErrorReturnTrace);
+    const ptr_error_return_trace_ty = try pt.singleMutPtrType(error_return_trace_ty);
+    const opt_ptr_error_return_trace_ty = try pt.optionalType(ptr_error_return_trace_ty.toIntern());
 
     switch (sema.owner.unwrap()) {
         .func => |func| if (ip.funcAnalysisUnordered(func).has_error_trace and block.ownerModule().error_tracing) {
-            return block.addTy(.err_return_trace, opt_ptr_stack_trace_ty);
+            return block.addTy(.err_return_trace, opt_ptr_error_return_trace_ty);
         },
 
         .@"comptime",
@@ -19547,7 +19546,7 @@ fn getErrorReturnTrace(sema: *Sema, block: *Block) CompileError!Air.Inst.Ref {
         => {},
     }
     return Air.internedToRef(try pt.intern(.{ .opt = .{
-        .ty = opt_ptr_stack_trace_ty.toIntern(),
+        .ty = opt_ptr_error_return_trace_ty.toIntern(),
         .val = .none,
     } }));
 }

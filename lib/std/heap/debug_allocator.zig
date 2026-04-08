@@ -81,7 +81,7 @@
 //! Resizing and remapping are forwarded directly to the backing allocator,
 //! except where such operations would change the category from large to small.
 const builtin = @import("builtin");
-const StackTrace = std.builtin.StackTrace;
+const StackTrace = std.debug.StackTrace;
 
 const std = @import("std");
 const log = std.log.scoped(.DebugAllocator);
@@ -229,7 +229,7 @@ pub fn DebugAllocator(comptime config: Config) type {
                 std.debug.dumpStackTrace(self.getStackTrace(trace_kind));
             }
 
-            fn getStackTrace(self: *LargeAlloc, trace_kind: TraceKind) std.builtin.StackTrace {
+            fn getStackTrace(self: *LargeAlloc, trace_kind: TraceKind) std.debug.StackTrace {
                 assert(@intFromEnum(trace_kind) < trace_n);
                 const stack_addresses = &self.stack_addresses[@intFromEnum(trace_kind)];
                 var len: usize = 0;
@@ -239,7 +239,6 @@ pub fn DebugAllocator(comptime config: Config) type {
                 return .{
                     .instruction_addresses = stack_addresses,
                     .index = len,
-                    .includes_inlined_frames = false,
                 };
             }
 
@@ -342,7 +341,6 @@ pub fn DebugAllocator(comptime config: Config) type {
             return .{
                 .instruction_addresses = stack_addresses,
                 .index = len,
-                .includes_inlined_frames = false,
             };
         }
 

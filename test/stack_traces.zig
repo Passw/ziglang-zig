@@ -118,13 +118,13 @@ pub fn addCases(cases: *@import("tests.zig").StackTracesContext) void {
         \\    var stack_trace_buf: [8]usize = undefined;
         \\    dumpIt(&captureIt(&stack_trace_buf));
         \\}
-        \\fn captureIt(buf: []usize) std.builtin.StackTrace {
+        \\fn captureIt(buf: []usize) std.debug.StackTrace {
         \\    return captureItInner(buf);
         \\}
-        \\fn dumpIt(st: *const std.builtin.StackTrace) void {
+        \\fn dumpIt(st: *const std.debug.StackTrace) void {
         \\    std.debug.dumpStackTrace(st);
         \\}
-        \\fn captureItInner(buf: []usize) std.builtin.StackTrace {
+        \\fn captureItInner(buf: []usize) std.debug.StackTrace {
         \\    return std.debug.captureCurrentStackTrace(.{}, buf);
         \\}
         \\const std = @import("std");
@@ -159,13 +159,13 @@ pub fn addCases(cases: *@import("tests.zig").StackTracesContext) void {
         \\    var stack_trace_buf: [8]usize = undefined;
         \\    dumpIt(&captureIt(&stack_trace_buf));
         \\}
-        \\fn captureIt(buf: []usize) std.builtin.StackTrace {
+        \\fn captureIt(buf: []usize) std.debug.StackTrace {
         \\    return captureItInner(buf);
         \\}
-        \\fn dumpIt(st: *const std.builtin.StackTrace) void {
+        \\fn dumpIt(st: *const std.debug.StackTrace) void {
         \\    std.debug.dumpStackTrace(st);
         \\}
-        \\fn captureItInner(buf: []usize) std.builtin.StackTrace {
+        \\fn captureItInner(buf: []usize) std.debug.StackTrace {
         \\    return std.debug.captureCurrentStackTrace(.{}, buf);
         \\}
         \\const std = @import("std");
@@ -188,13 +188,13 @@ pub fn addCases(cases: *@import("tests.zig").StackTracesContext) void {
         \\fn threadMain(stack_trace_buf: []usize) void {
         \\    dumpIt(&captureIt(stack_trace_buf));
         \\}
-        \\fn captureIt(buf: []usize) std.builtin.StackTrace {
+        \\fn captureIt(buf: []usize) std.debug.StackTrace {
         \\    return captureItInner(buf);
         \\}
-        \\fn dumpIt(st: *const std.builtin.StackTrace) void {
+        \\fn dumpIt(st: *const std.debug.StackTrace) void {
         \\    std.debug.dumpStackTrace(st);
         \\}
-        \\fn captureItInner(buf: []usize) std.builtin.StackTrace {
+        \\fn captureItInner(buf: []usize) std.debug.StackTrace {
         \\    return std.debug.captureCurrentStackTrace(.{}, buf);
         \\}
         \\const std = @import("std");

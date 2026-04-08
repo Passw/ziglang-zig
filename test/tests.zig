@@ -2200,7 +2200,7 @@ pub fn addCliTests(b: *std.Build) *Step {
             \\    return num * num;
             \\}
             \\extern fn zig_panic() noreturn;
-            \\pub fn panic(msg: []const u8, error_return_trace: ?*@import("std").builtin.StackTrace, _: ?usize) noreturn {
+            \\pub fn panic(msg: []const u8, error_return_trace: ?*@import("std").debug.StackTrace, _: ?usize) noreturn {
             \\    _ = msg;
             \\    _ = error_return_trace;
             \\    zig_panic();

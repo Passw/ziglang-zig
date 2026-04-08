@@ -13,7 +13,7 @@ pub fn main() !void {
 
     try stdout.interface.flush();
 }
-fn foo(w: *std.Io.Writer, st_buf: []usize) !std.builtin.StackTrace {
+fn foo(w: *std.Io.Writer, st_buf: []usize) !std.debug.StackTrace {
     try std.debug.writeCurrentStackTrace(.{}, .{ .writer = w, .mode = .no_color });
     return std.debug.captureCurrentStackTrace(.{}, st_buf);
 }

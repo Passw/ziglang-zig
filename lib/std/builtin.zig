@@ -8,12 +8,9 @@ pub const assembly = @import("builtin/assembly.zig");
 
 /// This data structure is used by the Zig language code generation and
 /// therefore must be kept in sync with the compiler implementation.
-pub const StackTrace = struct {
+pub const ErrorReturnTrace = struct {
     index: usize,
     instruction_addresses: []usize,
-    /// Set to true if inlined frames are given their own entries in `instruction_addresses`,
-    /// otherwise set to false.
-    includes_inlined_frames: bool,
 };
 
 /// This data structure is used by the Zig language code generation and

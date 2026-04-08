@@ -67,7 +67,7 @@ test_results: TestResults,
 
 /// The return address associated with creation of this step that can be useful
 /// to print along with debugging messages.
-debug_stack_trace: std.builtin.StackTrace,
+debug_stack_trace: std.debug.StackTrace,
 
 pub const TestResults = struct {
     /// The total number of tests in the step. Every test has a "status" from the following:

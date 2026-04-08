@@ -13,7 +13,6 @@ const windows = std.os.windows;
 const builtin = @import("builtin");
 const native_arch = builtin.cpu.arch;
 const native_os = builtin.os.tag;
-const StackTrace = std.builtin.StackTrace;
 
 const root = @import("root");
 
@@ -568,7 +567,7 @@ pub fn defaultPanic(msg: []const u8, first_trace_addr: ?usize) noreturn {
 
                 if (@errorReturnTrace()) |t| if (t.index > 0) {
                     writer.writeAll("error return context:\n") catch break :trace;
-                    writeStackTrace(t, stderr) catch break :trace;
+                    writeErrorReturnTrace(t, stderr) catch break :trace;
                     writer.writeAll("\nstack trace:\n") catch break :trace;
                 };
                 writeCurrentStackTrace(.{
@@ -607,6 +606,13 @@ fn waitForOtherThreadToFinishPanicking() void {
     }
 }
 
+/// This data structure is used by the Zig language code generation and
+/// therefore must be kept in sync with the compiler implementation.
+pub const StackTrace = struct {
+    index: usize,
+    instruction_addresses: []usize,
+};
+
 pub const StackUnwindOptions = struct {
     /// If not `null`, we will ignore all frames up until this return address. This is typically
     /// used to omit intermediate handling code (for instance, a panic handler and its machinery)
@@ -629,7 +635,6 @@ pub noinline fn captureCurrentStackTrace(options: StackUnwindOptions, addr_buf: 
     const empty_trace: StackTrace = .{
         .index = 0,
         .instruction_addresses = &.{},
-        .includes_inlined_frames = false,
     };
     if (!std.options.allow_stack_tracing) return empty_trace;
     var it: StackIterator = .init(options.context);
@@ -665,7 +670,6 @@ pub noinline fn captureCurrentStackTrace(options: StackUnwindOptions, addr_buf: 
     return .{
         .index = index,
         .instruction_addresses = addr_buf[0..index],
-        .includes_inlined_frames = false,
     };
 }
 /// Write the current stack trace to `writer`, annotated with source locations.
@@ -752,7 +756,7 @@ pub noinline fn writeCurrentStackTrace(options: StackUnwindOptions, t: Io.Termin
             // Subtract 1 to get an address *in* the function call for a better source location.
             try printSourceAtAddress(io, di, t, .{
                 .address = ret_addr -| StackIterator.ra_call_offset,
-                .print_inlines = true,
+                .resolve_inline_callers = true,
             });
             printed_any_frame = true;
         },
@@ -786,8 +790,17 @@ pub const FormatStackTrace = struct {
     }
 };
 
+/// Write a previously captured error return trace to `writer`, annotated with source locations.
+pub fn writeErrorReturnTrace(st: *const std.builtin.ErrorReturnTrace, t: Io.Terminal) Writer.Error!void {
+    try writeTrace(st, t, false);
+}
+
 /// Write a previously captured stack trace to `writer`, annotated with source locations.
-pub fn writeStackTrace(st: *const StackTrace, t: Io.Terminal) Writer.Error!void {
+pub fn writeStackTrace(et: *const StackTrace, t: Io.Terminal) Writer.Error!void {
+    try writeTrace(et, t, true);
+}
+
+fn writeTrace(trace: anytype, t: Io.Terminal, resolve_inline_callers: bool) Writer.Error!void {
     const writer = t.writer;
     if (!std.options.allow_stack_tracing) {
         t.setColor(.dim) catch {};
@@ -796,9 +809,9 @@ pub fn writeStackTrace(st: *const StackTrace, t: Io.Terminal) Writer.Error!void 
         return;
     }
 
-    // Fetch `st.index` straight away. Aside from avoiding redundant loads, this prevents issues if
-    // `st` is `@errorReturnTrace()` and errors are encountered while writing the stack trace.
-    const n_frames = st.index;
+    // Fetch `trace.index` straight away. Aside from avoiding redundant loads, this prevents issues if
+    // `trace` is `@errorReturnTrace()` and errors are encountered while writing the stack trace.
+    const n_frames = trace.index;
     if (n_frames == 0) return writer.writeAll("(empty stack trace)\n");
     const di = getSelfDebugInfo() catch |err| switch (err) {
         error.UnsupportedTarget => {
@@ -809,13 +822,13 @@ pub fn writeStackTrace(st: *const StackTrace, t: Io.Terminal) Writer.Error!void 
         },
     };
     const io = std.Options.debug_io;
-    const captured_frames = @min(n_frames, st.instruction_addresses.len);
-    for (st.instruction_addresses[0..captured_frames]) |ret_addr| {
+    const captured_frames = @min(n_frames, trace.instruction_addresses.len);
+    for (trace.instruction_addresses[0..captured_frames]) |ret_addr| {
         // `ret_addr` is the return address, which is *after* the function call.
         // Subtract 1 to get an address *in* the function call for a better source location.
         try printSourceAtAddress(io, di, t, .{
             .address = ret_addr -| StackIterator.ra_call_offset,
-            .print_inlines = !st.includes_inlined_frames,
+            .resolve_inline_callers = resolve_inline_callers,
         });
     }
     if (n_frames > captured_frames) {
@@ -829,6 +842,15 @@ pub fn dumpStackTrace(st: *const StackTrace) void {
     const stderr = lockStderr(&.{}).terminal();
     defer unlockStderr();
     writeStackTrace(st, stderr) catch |err| switch (err) {
+        error.WriteFailed => {},
+    };
+}
+
+/// A thin wrapper around `writeErrorReturnTrace` which writes to stderr and ignores write errors.
+pub fn dumpErrorReturnTrace(et: *const std.builtin.ErrorReturnTrace) void {
+    const stderr = lockStderr(&.{}).terminal();
+    defer unlockStderr();
+    writeErrorReturnTrace(et, stderr) catch |err| switch (err) {
         error.WriteFailed => {},
     };
 }
@@ -1124,7 +1146,7 @@ pub inline fn stripInstructionPtrAuthCode(ptr: usize) usize {
 
 const PrintSourceAddressOptions = struct {
     address: usize,
-    print_inlines: bool,
+    resolve_inline_callers: bool,
 };
 
 fn printSourceAtAddress(
@@ -1163,7 +1185,7 @@ fn printSourceAtAddress(
             symbol.name orelse "???",
             symbol.compile_unit_name orelse debug_info.getModuleName(io, options.address) catch "???",
         );
-        if (!options.print_inlines) break;
+        if (!options.resolve_inline_callers) break;
     }
 }
 fn printLineInfo(
@@ -1708,7 +1730,6 @@ pub fn ConfigurableTrace(comptime size: usize, comptime stack_frame_count: usize
                 const stack_trace: StackTrace = .{
                     .index = frames.len,
                     .instruction_addresses = frames,
-                    .includes_inlined_frames = false,
                 };
                 writeStackTrace(&stack_trace, stderr) catch return;
             }
