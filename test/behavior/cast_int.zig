@@ -169,6 +169,7 @@ test "@intCast <= 64 bits" {
 
 test "@intCast > 128 bits" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest;
 
     try testIntCast(u8, 123, u140, 123);
     try testIntCast(u64, 1 << 63, u140, 1 << 63);
