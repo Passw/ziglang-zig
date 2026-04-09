@@ -368,7 +368,7 @@ const Module = struct {
                 /// iteration, e.g. because they only wanted the topmost call.
                 inline_sites: std.ArrayList(*align(1) const std.pdb.InlineSiteSym),
             },
-            dwarf: struct { addr: usize },
+            dwarf: struct { addr: u64 },
             none: void,
 
             fn init(di: *DebugInfo, vaddr: usize) Error!Symbols {

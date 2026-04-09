@@ -2016,10 +2016,24 @@ fn nativeAndCompatible32bit(b: *std.Build, skip_non_native: bool) []const std.Bu
         },
         else => return only_native,
     };
-    return b.graph.arena.dupe(std.Build.ResolvedTarget, &.{
-        b.graph.host,
-        b.resolveTargetQuery(.{ .cpu_arch = arch32, .os_tag = host.os.tag }),
-    }) catch @panic("OOM");
+    var targets = std.ArrayList(std.Build.ResolvedTarget).initCapacity(b.graph.arena, 2)
+        catch @panic("OOM");
+    targets.appendAssumeCapacity(b.graph.host);
+    targets.appendAssumeCapacity(b.resolveTargetQuery(.{
+        .cpu_arch = arch32,
+        .os_tag = host.os.tag,
+    }));
+    if (b.enable_wine and b.graph.host.result.os.tag != .windows) {
+        targets.append(b.graph.arena, b.resolveTargetQuery(.{
+            .cpu_arch = host.cpu.arch,
+            .os_tag = .windows,
+        })) catch @panic("OOM");
+        targets.append(b.graph.arena, b.resolveTargetQuery(.{
+            .cpu_arch = arch32,
+            .os_tag = .windows,
+        })) catch @panic("OOM");
+    }
+    return targets.toOwnedSlice(b.graph.arena) catch @panic("OOM");
 }
 
 pub fn addStackTraceTests(
