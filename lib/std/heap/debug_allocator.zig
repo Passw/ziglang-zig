@@ -237,7 +237,7 @@ pub fn DebugAllocator(comptime config: Config) type {
                     len += 1;
                 }
                 return .{
-                    .instruction_addresses = stack_addresses,
+                    .return_addresses = stack_addresses,
                     .index = len,
                 };
             }
@@ -339,7 +339,7 @@ pub fn DebugAllocator(comptime config: Config) type {
                 len += 1;
             }
             return .{
-                .instruction_addresses = stack_addresses,
+                .return_addresses = stack_addresses,
                 .index = len,
             };
         }

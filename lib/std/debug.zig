@@ -610,7 +610,7 @@ fn waitForOtherThreadToFinishPanicking() void {
 /// therefore must be kept in sync with the compiler implementation.
 pub const StackTrace = struct {
     index: usize,
-    instruction_addresses: []usize,
+    return_addresses: []usize,
 };
 
 pub const StackUnwindOptions = struct {
@@ -634,7 +634,7 @@ pub const StackUnwindOptions = struct {
 pub noinline fn captureCurrentStackTrace(options: StackUnwindOptions, addr_buf: []usize) StackTrace {
     const empty_trace: StackTrace = .{
         .index = 0,
-        .instruction_addresses = &.{},
+        .return_addresses = &.{},
     };
     if (!std.options.allow_stack_tracing) return empty_trace;
     var it: StackIterator = .init(options.context);
@@ -669,7 +669,7 @@ pub noinline fn captureCurrentStackTrace(options: StackUnwindOptions, addr_buf: 
     };
     return .{
         .index = index,
-        .instruction_addresses = addr_buf[0..index],
+        .return_addresses = addr_buf[0..index],
     };
 }
 /// Write the current stack trace to `writer`, annotated with source locations.
@@ -791,16 +791,23 @@ pub const FormatStackTrace = struct {
 };
 
 /// Write a previously captured error return trace to `writer`, annotated with source locations.
-pub fn writeErrorReturnTrace(st: *const std.builtin.ErrorReturnTrace, t: Io.Terminal) Writer.Error!void {
-    try writeTrace(st, t, false);
+pub fn writeErrorReturnTrace(et: *const std.builtin.ErrorReturnTrace, t: Io.Terminal) Writer.Error!void {
+    // Fetch `et.index` straight away. Aside from avoiding redundant loads, this prevents issues if
+    // errors are encountered while writing the stack trace.
+    try writeTrace(et.instruction_addresses, et.index, t, false);
 }
 
 /// Write a previously captured stack trace to `writer`, annotated with source locations.
-pub fn writeStackTrace(et: *const StackTrace, t: Io.Terminal) Writer.Error!void {
-    try writeTrace(et, t, true);
+pub fn writeStackTrace(st: *const StackTrace, t: Io.Terminal) Writer.Error!void {
+    try writeTrace(st.return_addresses, st.index, t, true);
 }
 
-fn writeTrace(trace: anytype, t: Io.Terminal, resolve_inline_callers: bool) Writer.Error!void {
+fn writeTrace(
+    addresses: []const usize,
+    n_frames: usize,
+    t: Io.Terminal,
+    resolve_inline_callers: bool,
+) Writer.Error!void {
     const writer = t.writer;
     if (!std.options.allow_stack_tracing) {
         t.setColor(.dim) catch {};
@@ -809,9 +816,6 @@ fn writeTrace(trace: anytype, t: Io.Terminal, resolve_inline_callers: bool) Writ
         return;
     }
 
-    // Fetch `trace.index` straight away. Aside from avoiding redundant loads, this prevents issues if
-    // `trace` is `@errorReturnTrace()` and errors are encountered while writing the stack trace.
-    const n_frames = trace.index;
     if (n_frames == 0) return writer.writeAll("(empty stack trace)\n");
     const di = getSelfDebugInfo() catch |err| switch (err) {
         error.UnsupportedTarget => {
@@ -822,8 +826,8 @@ fn writeTrace(trace: anytype, t: Io.Terminal, resolve_inline_callers: bool) Writ
         },
     };
     const io = std.Options.debug_io;
-    const captured_frames = @min(n_frames, trace.instruction_addresses.len);
-    for (trace.instruction_addresses[0..captured_frames]) |ret_addr| {
+    const captured_frames = @min(n_frames, addresses.len);
+    for (addresses[0..captured_frames]) |ret_addr| {
         // `ret_addr` is the return address, which is *after* the function call.
         // Subtract 1 to get an address *in* the function call for a better source location.
         try printSourceAtAddress(io, di, t, .{
@@ -1729,7 +1733,7 @@ pub fn ConfigurableTrace(comptime size: usize, comptime stack_frame_count: usize
                 const frames = mem.sliceTo(frames_array_mutable[0..], 0);
                 const stack_trace: StackTrace = .{
                     .index = frames.len,
-                    .instruction_addresses = frames,
+                    .return_addresses = frames,
                 };
                 writeStackTrace(&stack_trace, stderr) catch return;
             }

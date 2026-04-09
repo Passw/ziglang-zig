@@ -328,7 +328,7 @@ pub fn cast(step: *Step, comptime T: type) ?*T {
 /// For debugging purposes, prints identifying information about this Step.
 pub fn dump(step: *Step, t: Io.Terminal) void {
     const w = t.writer;
-    if (step.debug_stack_trace.instruction_addresses.len > 0) {
+    if (step.debug_stack_trace.return_addresses.len > 0) {
         w.print("name: '{s}'. creation stack trace:\n", .{step.name}) catch {};
         std.debug.writeStackTrace(&step.debug_stack_trace, t) catch {};
     } else {
