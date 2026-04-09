@@ -237,8 +237,8 @@ pub fn DebugAllocator(comptime config: Config) type {
                     len += 1;
                 }
                 return .{
-                    .return_addresses = stack_addresses,
-                    .index = len,
+                    .return_addresses = stack_addresses[0..len],
+                    .skipped = if (len < stack_addresses.len) .none else .unknown,
                 };
             }
 
@@ -339,8 +339,8 @@ pub fn DebugAllocator(comptime config: Config) type {
                 len += 1;
             }
             return .{
-                .return_addresses = stack_addresses,
-                .index = len,
+                .return_addresses = stack_addresses[0..len],
+                .skipped = if (len < stack_addresses.len) .none else .unknown,
             };
         }
 
@@ -508,7 +508,7 @@ pub fn DebugAllocator(comptime config: Config) type {
 
         fn collectStackTrace(first_trace_addr: usize, addr_buf: *[stack_n]usize) void {
             const st = std.debug.captureCurrentStackTrace(.{ .first_address = first_trace_addr }, addr_buf);
-            @memset(addr_buf[@min(st.index, addr_buf.len)..], 0);
+            @memset(addr_buf[@min(st.return_addresses.len, addr_buf.len)..], 0);
         }
 
         fn reportDoubleFree(ret_addr: usize, alloc_stack_trace: StackTrace, free_stack_trace: StackTrace) void {

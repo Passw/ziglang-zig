@@ -609,8 +609,33 @@ fn waitForOtherThreadToFinishPanicking() void {
 /// This data structure is used by the Zig language code generation and
 /// therefore must be kept in sync with the compiler implementation.
 pub const StackTrace = struct {
-    index: usize,
+    /// Each element is the "return address" of a function call, meaning the instruction address
+    /// which control flow will return to when the function returns.
+    ///
+    /// The first slice element corresponds to the innermost stack frame, and the last element to
+    /// the outermost.
+    ///
+    /// Inlined function calls do not have meaningful return addresses and are therefore not
+    /// included in this slice. Instead, when printing the stack trace, the source locations of
+    /// inline calls should be read from debug information and the corresponding "inline frames"
+    /// printed in the appropriate locations.
     return_addresses: []usize,
+    /// Indicates whether any stack frames were omitted from `return_addresses`.
+    skipped: SkippedAddresses,
+
+};
+
+/// Indicates how many addresses were skipped in a trace.
+pub const SkippedAddresses = enum(usize) {
+    /// No addresses were omitted: `return_addresses` contains all stack frames, including the
+    /// outermost.
+    none = 0,
+    /// It is not known whether any frames were omitted.
+    unknown = std.math.maxInt(usize),
+    /// The full stack trace was available, but some frames are not included in
+    /// `return_addresses` due to buffer size limitations. The enum value is the exact number of
+    /// addresses which were omitted.
+    _,
 };
 
 pub const StackUnwindOptions = struct {
@@ -633,8 +658,8 @@ pub const StackUnwindOptions = struct {
 /// See `writeCurrentStackTrace` to immediately print the trace instead of capturing it.
 pub noinline fn captureCurrentStackTrace(options: StackUnwindOptions, addr_buf: []usize) StackTrace {
     const empty_trace: StackTrace = .{
-        .index = 0,
         .return_addresses = &.{},
+        .skipped = .none,
     };
     if (!std.options.allow_stack_tracing) return empty_trace;
     var it: StackIterator = .init(options.context);
@@ -646,17 +671,17 @@ pub noinline fn captureCurrentStackTrace(options: StackUnwindOptions, addr_buf: 
     var total_frames: usize = 0;
     var index: usize = 0;
     var wait_for = options.first_address;
-    // Ideally, we would iterate the whole stack so that the `index` in the returned trace was
+    // Ideally, we would iterate the whole stack so that the `index - min(buf.len, index)` would be
     // indicative of how many frames were skipped. However, this has a significant runtime cost
     // in some cases, so at least for now, we don't do that.
-    while (index < addr_buf.len) switch (it.next(io)) {
-        .switch_to_fp => if (!it.stratOk(options.allow_unsafe_unwind)) break,
-        .end => break,
+    const skipped: SkippedAddresses = while (index < addr_buf.len) switch (it.next(io)) {
+        .switch_to_fp => if (!it.stratOk(options.allow_unsafe_unwind)) break .unknown,
+        .end => break .none,
         .frame => |ret_addr| {
             if (total_frames > 10_000) {
                 // Limit the number of frames in case of (e.g.) broken debug information which is
                 // getting unwinding stuck in a loop.
-                break;
+                break .unknown;
             }
             total_frames += 1;
             if (wait_for) |target| {
@@ -666,10 +691,10 @@ pub noinline fn captureCurrentStackTrace(options: StackUnwindOptions, addr_buf: 
             addr_buf[index] = ret_addr;
             index += 1;
         },
-    };
+    } else .unknown;
     return .{
-        .index = index,
         .return_addresses = addr_buf[0..index],
+        .skipped = skipped,
     };
 }
 /// Write the current stack trace to `writer`, annotated with source locations.
@@ -792,19 +817,21 @@ pub const FormatStackTrace = struct {
 
 /// Write a previously captured error return trace to `writer`, annotated with source locations.
 pub fn writeErrorReturnTrace(et: *const std.builtin.ErrorReturnTrace, t: Io.Terminal) Writer.Error!void {
-    // Fetch `et.index` straight away. Aside from avoiding redundant loads, this prevents issues if
-    // errors are encountered while writing the stack trace.
-    try writeTrace(et.instruction_addresses, et.index, t, false);
+    // We take the slice by value, preventing the length from being mutated if an error occurs while
+    // writing the stack trace.
+    const len = @min(et.instruction_addresses.len, et.index);
+    const skipped = et.index - len;
+    try writeTrace(et.instruction_addresses[0..len], @enumFromInt(skipped), t, false);
 }
 
 /// Write a previously captured stack trace to `writer`, annotated with source locations.
 pub fn writeStackTrace(st: *const StackTrace, t: Io.Terminal) Writer.Error!void {
-    try writeTrace(st.return_addresses, st.index, t, true);
+    try writeTrace(st.return_addresses, st.skipped, t, true);
 }
 
 fn writeTrace(
     addresses: []const usize,
-    n_frames: usize,
+    skipped: SkippedAddresses,
     t: Io.Terminal,
     resolve_inline_callers: bool,
 ) Writer.Error!void {
@@ -816,7 +843,7 @@ fn writeTrace(
         return;
     }
 
-    if (n_frames == 0) return writer.writeAll("(empty stack trace)\n");
+    if (addresses.len == 0) return writer.writeAll("(empty stack trace)\n");
     const di = getSelfDebugInfo() catch |err| switch (err) {
         error.UnsupportedTarget => {
             t.setColor(.dim) catch {};
@@ -826,19 +853,26 @@ fn writeTrace(
         },
     };
     const io = std.Options.debug_io;
-    const captured_frames = @min(n_frames, addresses.len);
-    for (addresses[0..captured_frames]) |ret_addr| {
-        // `ret_addr` is the return address, which is *after* the function call.
+    for (addresses) |addr| {
+        // `addr` is the return address, which is *after* the function call.
         // Subtract 1 to get an address *in* the function call for a better source location.
         try printSourceAtAddress(io, di, t, .{
-            .address = ret_addr -| StackIterator.ra_call_offset,
+            .address = addr -| StackIterator.ra_call_offset,
             .resolve_inline_callers = resolve_inline_callers,
         });
     }
-    if (n_frames > captured_frames) {
-        t.setColor(.bold) catch {};
-        try writer.print("({d} additional stack frames skipped...)\n", .{n_frames - captured_frames});
-        t.setColor(.reset) catch {};
+    switch (skipped) {
+        .none => {},
+        .unknown => {
+            t.setColor(.bold) catch {};
+            try writer.writeAll("(additional stack frames may have been skipped...)\n");
+            t.setColor(.reset) catch {};
+        },
+        else => |n| {
+            t.setColor(.bold) catch {};
+            try writer.print("({d} additional stack frames skipped due to buffer size limitations...)\n", .{n});
+            t.setColor(.reset) catch {};
+        },
     }
 }
 /// A thin wrapper around `writeStackTrace` which writes to stderr and ignores write errors.
@@ -1712,8 +1746,8 @@ pub fn ConfigurableTrace(comptime size: usize, comptime stack_frame_count: usize
                 t.notes[t.index] = note;
                 const addrs = &t.addrs[t.index];
                 const st = captureCurrentStackTrace(.{ .first_address = addr }, addrs);
-                if (st.index < addrs.len) {
-                    @memset(addrs[st.index..], 0); // zero unused frames to indicate end of trace
+                if (st.return_addresses.len < addrs.len) {
+                    @memset(addrs[st.return_addresses.len..], 0); // zero unused frames to indicate end of trace
                 }
             }
             // Keep counting even if the end is reached so that the
@@ -1731,9 +1765,10 @@ pub fn ConfigurableTrace(comptime size: usize, comptime stack_frame_count: usize
                 stderr.writer.print("{s}:\n", .{t.notes[i]}) catch return;
                 var frames_array_mutable = frames_array;
                 const frames = mem.sliceTo(frames_array_mutable[0..], 0);
+                const len = @min(t.index, frames.len);
                 const stack_trace: StackTrace = .{
-                    .index = frames.len,
-                    .return_addresses = frames,
+                    .return_addresses = frames[0..len],
+                    .skipped = if (len < frames.len) .none else .unknown,
                 };
                 writeStackTrace(&stack_trace, stderr) catch return;
             }
