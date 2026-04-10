@@ -20965,7 +20965,7 @@ fn zirRoundCast(
         .exact => unreachable,
     };
     const air_cast_tag: Air.Inst.Tag = switch (block.float_mode) {
-        .optimized => if (safe) .int_from_float_optimized_safe else .int_from_float_safe,
+        .optimized => if (safe) .int_from_float_optimized_safe else .int_from_float_optimized,
         .strict => if (safe) .int_from_float_safe else .int_from_float,
     };
     return block.addTyOp(air_cast_tag, dest_ty, uncasted_result);
