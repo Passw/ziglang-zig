@@ -2033,6 +2033,12 @@ fn nativeAndCompatible32bit(b: *std.Build, skip_non_native: bool) []const std.Bu
             .os_tag = .windows,
         })) catch @panic("OOM");
     }
+    if (b.enable_darling and b.graph.host.result.os.tag != .macos) {
+        targets.append(b.graph.arena, b.resolveTargetQuery(.{
+            .cpu_arch = host.cpu.arch,
+            .os_tag = .macos,
+        })) catch @panic("OOM");
+    }
     return targets.toOwnedSlice(b.graph.arena) catch @panic("OOM");
 }
 
