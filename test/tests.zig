@@ -1989,56 +1989,75 @@ const c_abi_targets = blk: {
     };
 };
 
-/// For stack trace tests, we only test native, because external executors are pretty unreliable at
-/// stack tracing. However, if there's a 32-bit equivalent target which the host can trivially run,
-/// we may as well at least test that!
-fn nativeAndCompatible32bit(b: *std.Build, skip_non_native: bool) []const std.Build.ResolvedTarget {
+fn compatible32bitArch(b: *std.Build) ?std.Target.Cpu.Arch {
     const host = b.graph.host.result;
-    const only_native = (&b.graph.host)[0..1];
-    if (skip_non_native) return only_native;
-    const arch32: std.Target.Cpu.Arch = switch (host.os.tag) {
+    return switch (host.os.tag) {
         .windows => switch (host.cpu.arch) {
             .x86_64 => .x86,
             .aarch64 => .thumb,
             .aarch64_be => .thumbeb,
-            else => return only_native,
+            else => null,
         },
         .freebsd => switch (host.cpu.arch) {
             .aarch64 => .arm,
             .aarch64_be => .armeb,
-            else => return only_native,
+            else => null,
         },
         .linux, .netbsd => switch (host.cpu.arch) {
             .x86_64 => .x86,
             .aarch64 => .arm,
             .aarch64_be => .armeb,
-            else => return only_native,
+            else => null,
         },
-        else => return only_native,
+        else => null,
     };
-    var targets = std.ArrayList(std.Build.ResolvedTarget).initCapacity(b.graph.arena, 2)
-        catch @panic("OOM");
-    targets.appendAssumeCapacity(b.graph.host);
-    targets.appendAssumeCapacity(b.resolveTargetQuery(.{
-        .cpu_arch = arch32,
-        .os_tag = host.os.tag,
-    }));
-    if (b.enable_wine and b.graph.host.result.os.tag != .windows) {
-        targets.append(b.graph.arena, b.resolveTargetQuery(.{
-            .cpu_arch = host.cpu.arch,
-            .os_tag = .windows,
-        })) catch @panic("OOM");
-        targets.append(b.graph.arena, b.resolveTargetQuery(.{
-            .cpu_arch = arch32,
-            .os_tag = .windows,
-        })) catch @panic("OOM");
+}
+
+/// For stack trace tests, we only test native by default, because external executors are pretty
+/// unreliable at stack tracing. However, if there's a 32-bit equivalent target which the host can
+/// trivially run, we may as well at least test that!
+fn nativeAndCompatible32bit(b: *std.Build, skip_non_native: bool) []const std.Build.ResolvedTarget {
+    const host = b.graph.host.result;
+    const only_native = (&b.graph.host)[0..1];
+    if (skip_non_native) return only_native;
+    const arch32 = compatible32bitArch(b) orelse return only_native;
+    return b.graph.arena.dupe(std.Build.ResolvedTarget, &.{
+        b.graph.host,
+        b.resolveTargetQuery(.{ .cpu_arch = arch32, .os_tag = host.os.tag }),
+    }) catch @panic("OOM");
+}
+
+fn wineAndCompatible32bit(b: *std.Build, skip_non_native: bool) []const std.Build.ResolvedTarget {
+    var targets: std.ArrayList(std.Build.ResolvedTarget) = .empty;
+
+    const host = b.graph.host.result;
+
+    targets.append(b.graph.arena, b.resolveTargetQuery(.{
+        .cpu_arch = host.cpu.arch,
+        .os_tag = .windows,
+    })) catch @panic("OOM");
+    if (!skip_non_native) {
+        if (compatible32bitArch(b)) |arch| {
+            targets.append(b.graph.arena, b.resolveTargetQuery(.{
+                .cpu_arch = arch,
+                .os_tag = .windows,
+            })) catch @panic("OOM");
+        }
     }
-    if (b.enable_darling and b.graph.host.result.os.tag != .macos) {
-        targets.append(b.graph.arena, b.resolveTargetQuery(.{
-            .cpu_arch = host.cpu.arch,
-            .os_tag = .macos,
-        })) catch @panic("OOM");
-    }
+
+    return targets.toOwnedSlice(b.graph.arena) catch @panic("OOM");
+}
+
+fn darlingTargets(b: *std.Build) []const std.Build.ResolvedTarget {
+    var targets: std.ArrayList(std.Build.ResolvedTarget) = .empty;
+
+    const host = b.graph.host.result;
+
+    targets.append(b.graph.arena, b.resolveTargetQuery(.{
+        .cpu_arch = host.cpu.arch,
+        .os_tag = .macos,
+    })) catch @panic("OOM");
+
     return targets.toOwnedSlice(b.graph.arena) catch @panic("OOM");
 }
 
@@ -2047,6 +2066,8 @@ pub fn addStackTraceTests(
     test_filters: []const []const u8,
     skip_non_native: bool,
 ) *Step {
+    const step = b.step("test-stack-traces", "Run the stack trace tests");
+
     const convert_exe = b.addExecutable(.{
         .name = "convert-stack-trace",
         .root_module = b.createModule(.{
@@ -2056,19 +2077,41 @@ pub fn addStackTraceTests(
         }),
     });
 
-    const cases = b.allocator.create(StackTracesContext) catch @panic("OOM");
-
-    cases.* = .{
+    const host_cases = b.allocator.create(StackTracesContext) catch @panic("OOM");
+    host_cases.* = .{
         .b = b,
-        .step = b.step("test-stack-traces", "Run the stack trace tests"),
+        .step = step,
         .test_filters = test_filters,
         .targets = nativeAndCompatible32bit(b, skip_non_native),
         .convert_exe = convert_exe,
     };
+    stack_traces.addCases(host_cases, b.graph.host.result.os.tag);
 
-    stack_traces.addCases(cases);
+    if (b.enable_wine) {
+        const wine_cases = b.allocator.create(StackTracesContext) catch @panic("OOM");
+        wine_cases.* = .{
+            .b = b,
+            .step = step,
+            .test_filters = test_filters,
+            .targets = wineAndCompatible32bit(b, skip_non_native),
+            .convert_exe = convert_exe,
+        };
+        stack_traces.addCases(wine_cases, .windows);
+    }
 
-    return cases.step;
+    if (b.enable_darling) {
+        const darling_cases = b.allocator.create(StackTracesContext) catch @panic("OOM");
+        darling_cases.* = .{
+            .b = b,
+            .step = step,
+            .test_filters = test_filters,
+            .targets = darlingTargets(b),
+            .convert_exe = convert_exe,
+        };
+        stack_traces.addCases(darling_cases, .macos);
+    }
+
+    return step;
 }
 
 pub fn addErrorTraceTests(
@@ -2077,6 +2120,8 @@ pub fn addErrorTraceTests(
     optimize_modes: []const OptimizeMode,
     skip_non_native: bool,
 ) *Step {
+    const step = b.step("test-error-traces", "Run the error trace tests");
+
     const convert_exe = b.addExecutable(.{
         .name = "convert-stack-trace",
         .root_module = b.createModule(.{
@@ -2086,19 +2131,45 @@ pub fn addErrorTraceTests(
         }),
     });
 
-    const cases = b.allocator.create(ErrorTracesContext) catch @panic("OOM");
-    cases.* = .{
+    const host_cases = b.allocator.create(ErrorTracesContext) catch @panic("OOM");
+    host_cases.* = .{
         .b = b,
-        .step = b.step("test-error-traces", "Run the error trace tests"),
+        .step = step,
         .test_filters = test_filters,
         .targets = nativeAndCompatible32bit(b, skip_non_native),
         .optimize_modes = optimize_modes,
         .convert_exe = convert_exe,
     };
+    error_traces.addCases(host_cases, b.graph.host.result.os.tag);
 
-    error_traces.addCases(cases);
+    if (b.enable_wine) {
+        const wine_cases = b.allocator.create(ErrorTracesContext) catch @panic("OOM");
+        wine_cases.* = .{
+            .b = b,
+            .step = step,
+            .test_filters = test_filters,
+            .targets = wineAndCompatible32bit(b, skip_non_native),
+            .optimize_modes = optimize_modes,
+            .convert_exe = convert_exe,
+        };
+        error_traces.addCases(wine_cases, .windows);
+    }
 
-    return cases.step;
+    if (b.enable_darling) {
+        const darling_cases = b.allocator.create(ErrorTracesContext) catch @panic("OOM");
+        darling_cases.* = .{
+            .b = b,
+            .step = step,
+            .test_filters = test_filters,
+            .targets = darlingTargets(b),
+            .optimize_modes = optimize_modes,
+            .convert_exe = convert_exe,
+        };
+        error_traces.addCases(darling_cases, .macos);
+    }
+
+
+    return step;
 }
 
 fn compilerHasPackageManager(b: *std.Build) bool {

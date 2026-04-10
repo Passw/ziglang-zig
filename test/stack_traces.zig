@@ -1,4 +1,6 @@
-pub fn addCases(cases: *@import("tests.zig").StackTracesContext) void {
+const std = @import("std");
+
+pub fn addCases(cases: *@import("tests.zig").StackTracesContext, os: std.Target.Os.Tag) void {
     cases.addCase(.{
         .name = "simple panic",
         .source =
@@ -220,5 +222,119 @@ pub fn addCases(cases: *@import("tests.zig").StackTracesContext) void {
         \\???:?:?: [address] in source.threadMain
         \\
         ,
+    });
+
+    cases.addCase(.{
+        .name = "simple inline panic",
+        .source =
+        \\pub fn main() void {
+        \\    foo();
+        \\}
+        \\inline fn foo() void {
+        \\    @panic("oh no");
+        \\}
+        \\
+        ,
+        .unwind = .any,
+        .expect_panic = true,
+        .expect = switch (os) {
+            // We use the information present in PDBs to resolve inlines when dumping stack traces
+            // on Windows. Column numbers are missing as LLVM doesn't emit column info in the PDBs
+            // for inline functions.
+            .windows =>
+            \\panic: oh no
+            \\source.zig:5: [address] in foo
+            \\    @panic("oh no");
+            \\
+            \\source.zig:2:8: [address] in main
+            \\    foo();
+            \\       ^
+            \\
+            ,
+            // We don't yet resolve inlines on other platforms.
+            else =>
+            \\panic: oh no
+            \\source.zig:5:5: [address] in foo
+            \\    @panic("oh no");
+            \\    ^
+            ,
+        },
+        .expect_strip = switch (os) {
+            .windows =>
+            \\panic: oh no
+            \\???:?:?: [address] in source.foo
+            \\???:?:?: [address] in source.main
+            \\
+            ,
+            else =>
+            \\panic: oh no
+            \\???:?:?: [address] in source.foo
+            \\
+            ,
+        },
+    });
+
+    // Make sure all inline calls are resolved and in the right order!
+    cases.addCase(.{
+        .name = "nested inline panic",
+        .source =
+        \\pub fn main() void {
+        \\    foo();
+        \\}
+        \\inline fn foo() void {
+        \\    bar();
+        \\}
+        \\inline fn bar() void {
+        \\    baz();
+        \\}
+        \\inline fn baz() void {
+        \\    @panic("oh no");
+        \\}
+        \\
+        ,
+        .unwind = .any,
+        .expect_panic = true,
+        .expect = switch (os) {
+            // Similarly to "inline panic", we can resolve inlines from PDBs but LLVM doesn't emit
+            // column info for them.
+            .windows =>
+            \\panic: oh no
+            \\source.zig:11: [address] in baz
+            \\    @panic("oh no");
+            \\
+            \\source.zig:8: [address] in bar
+            \\    baz();
+            \\
+            \\source.zig:5: [address] in foo
+            \\    bar();
+            \\
+            \\source.zig:2:8: [address] in main
+            \\    foo();
+            \\       ^
+            \\
+            ,
+            // Similarly to "inline panic", we don't yet resolve inlines on other platforms.
+            else =>
+            \\panic: oh no
+            \\source.zig:11:5: [address] in baz
+            \\    @panic("oh no");
+            \\    ^
+            ,
+        },
+        .expect_strip = switch (os) {
+            .windows =>
+            \\panic: oh no
+            \\???:?:?: [address] in baz
+            \\???:?:?: [address] in bar
+            \\???:?:?: [address] in foo
+            \\???:?:?: [address] in main
+            \\
+            ,
+            else =>
+            \\panic: oh no
+            \\???:?:?: [address] in baz
+            \\
+            ,
+        },
     });
 }
