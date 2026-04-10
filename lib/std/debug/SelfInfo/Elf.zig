@@ -30,19 +30,7 @@ pub fn deinit(si: *SelfInfo, io: Io) void {
     if (si.unwind_cache) |cache| gpa.free(cache);
 }
 
-pub const SymbolIterator = struct {
-    curr: ?Error!std.debug.Symbol,
-
-    pub fn deinit(self: *SymbolIterator, _: Io) void {
-        self.* = undefined;
-    }
-
-    pub fn next(self: *SymbolIterator) ?Error!std.debug.Symbol {
-        const result = self.curr;
-        self.curr = null;
-        return result;
-    }
-};
+pub const SymbolIterator = std.debug.Dwarf.SymbolIterator;
 
 pub fn getSymbols(si: *SelfInfo, io: Io, address: usize) SymbolIterator {
     const gpa = std.debug.getDebugInfoAllocator();
@@ -67,21 +55,7 @@ pub fn getSymbols(si: *SelfInfo, io: Io, address: usize) SymbolIterator {
             };
             loaded_elf.scanned_dwarf = true;
         }
-        if (dwarf.getSymbol(gpa, native_endian, vaddr)) |sym| {
-            return .{ .curr = sym };
-        } else |err| switch (err) {
-            error.MissingDebugInfo => {},
-
-            error.InvalidDebugInfo,
-            error.OutOfMemory,
-            => |e| return .{ .curr = e },
-
-            error.ReadFailed,
-            error.EndOfStream,
-            error.Overflow,
-            error.StreamTooLong,
-            => return .{ .curr = error.InvalidDebugInfo },
-        }
+        return dwarf.getSymbols(gpa, native_endian, vaddr);
     }
     // When DWARF is unavailable, fall back to searching the symtab.
     const symbol = loaded_elf.file.searchSymtab(gpa, vaddr) catch |err| switch (err) {

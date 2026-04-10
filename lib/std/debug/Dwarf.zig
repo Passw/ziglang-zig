@@ -22,7 +22,9 @@ const cast = std.math.cast;
 const maxInt = std.math.maxInt;
 const ArrayList = std.ArrayList;
 const Endian = std.builtin.Endian;
-const Reader = std.Io.Reader;
+const Io = std.Io;
+const Reader = Io.Reader;
+const Error = std.debug.SelfInfoError;
 
 const Dwarf = @This();
 
@@ -1543,21 +1545,40 @@ fn getStringGeneric(opt_str: ?[]const u8, offset: u64) ![:0]const u8 {
     return str[casted_offset..last :0];
 }
 
-pub fn getSymbol(di: *Dwarf, gpa: Allocator, endian: Endian, address: u64) !std.debug.Symbol {
+pub const SymbolIterator = struct {
+    curr: ?std.debug.SelfInfoError!std.debug.Symbol,
+
+    pub fn deinit(self: *SymbolIterator, _: Io) void {
+        self.* = undefined;
+    }
+
+    pub fn next(self: *SymbolIterator) ?Error!std.debug.Symbol {
+        const result = self.curr;
+        self.curr = null;
+        return result;
+    }
+};
+
+pub fn getSymbols(di: *Dwarf, gpa: Allocator, endian: Endian, address: u64) SymbolIterator {
     const compile_unit = di.findCompileUnit(endian, address) catch |err| switch (err) {
-        error.MissingDebugInfo, error.InvalidDebugInfo => return .unknown,
-        else => return err,
+        error.EndOfStream, error.Overflow => return .{ .curr = error.InvalidDebugInfo },
+        else => |e| return .{ .curr = e },
     };
-    return .{
+    return .{ .curr = .{
         .name = di.getSymbolName(address),
         .compile_unit_name = compile_unit.die.getAttrString(di, endian, std.dwarf.AT.name, di.section(.debug_str), compile_unit) catch |err| switch (err) {
             error.MissingDebugInfo, error.InvalidDebugInfo => null,
         },
         .source_location = di.getLineNumberInfo(gpa, endian, compile_unit, address) catch |err| switch (err) {
             error.MissingDebugInfo, error.InvalidDebugInfo => null,
-            else => return err,
+            error.ReadFailed,
+            error.EndOfStream,
+            error.Overflow,
+            error.StreamTooLong,
+            => return .{ .curr = error.InvalidDebugInfo },
+            else => |e| return .{ .curr = e },
         },
-    };
+    } };
 }
 
 /// DWARF5 7.4: "In the 32-bit DWARF format, all values that represent lengths of DWARF sections and

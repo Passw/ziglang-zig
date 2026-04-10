@@ -33,7 +33,7 @@ pub const SymbolIterator = struct {
 
     pub fn deinit(self: *SymbolIterator, io: Io) void {
         if (self.lock) |lock| lock.unlockShared(io);
-        self.symbols.deinit();
+        self.symbols.deinit(io);
         self.* = undefined;
     }
 
@@ -105,29 +105,7 @@ pub const SymbolIterator = struct {
                     .source_location = pdb.getLineNumberInfo(info.module, info.addr) catch null,
                 };
             },
-            .dwarf => |info| {
-                // The failure cases are unreachable because we only set the dwarf field if these
-                // are set
-                const di = if (self.module.di.?) |*di| di else |_| unreachable;
-                const dwarf = if (di.dwarf) |*dwarf| dwarf else unreachable;
-
-                // Return the main symbol and then return the iterator
-                defer self.symbols = .none;
-                const gpa = std.debug.getDebugInfoAllocator();
-                return dwarf.getSymbol(gpa, native_endian, info.addr) catch |err| switch (err) {
-                    error.MissingDebugInfo => return null,
-
-                    error.InvalidDebugInfo,
-                    error.OutOfMemory,
-                    => |e| return e,
-
-                    error.ReadFailed,
-                    error.EndOfStream,
-                    error.Overflow,
-                    error.StreamTooLong,
-                    => return error.InvalidDebugInfo,
-                };
-            },
+            .dwarf => |*info| return info.next(),
             .none => return null,
         }
     }
@@ -368,7 +346,7 @@ const Module = struct {
                 /// iteration, e.g. because they only wanted the topmost call.
                 inline_sites: std.ArrayList(*align(1) const std.pdb.InlineSiteSym),
             },
-            dwarf: struct { addr: u64 },
+            dwarf: std.debug.Dwarf.SymbolIterator,
             none: void,
 
             fn init(di: *DebugInfo, vaddr: usize) Error!Symbols {
@@ -425,23 +403,20 @@ const Module = struct {
 
                 // Dwarf
                 dwarf: {
-                    if (di.dwarf == null) break :dwarf;
+                    const dwarf = &(di.dwarf orelse break :dwarf);
                     const addr = vaddr + di.coff_image_base;
-                    return .{ .dwarf = .{
-                        .addr = addr,
-                    } };
+                    return .{ .dwarf = dwarf.getSymbols(gpa, native_endian, addr) };
                 }
 
                 return error.MissingDebugInfo;
             }
 
-            fn deinit(self: *Symbols) void {
+            fn deinit(self: *Symbols, io: Io) void {
+                const gpa = std.debug.getDebugInfoAllocator();
                 switch (self.*) {
-                    .pdb => |*info| {
-                        const gpa = std.debug.getDebugInfoAllocator();
-                        info.inline_sites.deinit(gpa);
-                    },
-                    .dwarf, .none => {},
+                    .pdb => |*info| info.inline_sites.deinit(gpa),
+                    .dwarf => |*info| info.deinit(io),
+                    .none => {},
                 }
             }
         };

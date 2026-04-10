@@ -358,7 +358,7 @@ pub const BinaryAnnotation = union(enum) {
                         self.curr.file_id = file_id;
                     },
                     // LLVM never emits this opcode, but it's clear enough how to interpret it so we
-                    // may as well in case they use it in the future
+                    // may as well handle it in case they emit it in the future
                     .change_code_length_and_code_offset => |info| {
                         self.curr.code_length = info.length;
                         self.curr.code_offset += info.delta;
