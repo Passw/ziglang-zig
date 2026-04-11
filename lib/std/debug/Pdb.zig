@@ -315,6 +315,21 @@ pub const BinaryAnnotation = union(enum) {
             file_id: ?u32,
             code_offset: u32,
             code_length: ?u32,
+
+            /// Resolves a partial range to a range with a definite length, or returns null if this
+            /// is not possible.
+            fn resolve(self: PartialRange, next_code_offset: ?u32) ?Range {
+                return .{
+                    .line_offset = self.line_offset,
+                    .file_id = self.file_id,
+                    .code_offset = self.code_offset,
+                    .code_length = b: {
+                       if (self.code_length) |l| break :b l; 
+                       const end = next_code_offset orelse return null;
+                       break :b end - self.code_offset;
+                    },
+                };
+            }
         };
 
         pub fn init(annotations: Iterator) RangeIterator {
@@ -391,6 +406,8 @@ pub const BinaryAnnotation = union(enum) {
                     },
                 }
 
+                // If we have a new code offset, return the previous range if it exists, resolving
+                // its length if necessary.
                 switch (annotation) {
                     .change_code_offset,
                     .change_code_offset_and_line_offset,
@@ -398,38 +415,16 @@ pub const BinaryAnnotation = union(enum) {
                     => {},
                     else => continue,
                 }
-
-                if (self.prev) |*prev| {
-                    if (prev.code_length == null) {
-                        prev.code_length = self.curr.code_offset - prev.code_offset;
-                    }
-                }
-
-                defer self.prev = .{
-                    .code_offset = self.curr.code_offset,
-                    .code_length = self.curr.code_length,
-                    .line_offset = self.curr.line_offset,
-                    .file_id = self.curr.file_id,
-                };
+                defer self.prev = self.curr;
                 const prev = self.prev orelse continue;
-                const prev_code_length = prev.code_length orelse continue;
-                return .{
-                    .code_offset = prev.code_offset,
-                    .code_length = prev_code_length,
-                    .line_offset = prev.line_offset,
-                    .file_id = prev.file_id,
-                };
+                return prev.resolve(self.curr.code_offset);
             }
 
+            // If we've processed all the binary operations but still have a previous range leftover
+            // with a known length, return it.
             const prev = self.prev orelse return null;
             defer self.prev = null;
-            const prev_code_length = prev.code_length orelse return null;
-            return .{
-                .code_offset = prev.code_offset,
-                .code_length = prev_code_length,
-                .line_offset = prev.line_offset,
-                .file_id = prev.file_id,
-            };
+            return prev.resolve(null);
         }
     };
 
@@ -452,6 +447,10 @@ pub const BinaryAnnotation = union(enum) {
             try takePackedU32(reader),
         ) orelse return error.ReadFailed;
         switch (op) {
+            // Microsoft's docs say that invalid is used as padding, though it is left ambiguous
+            // whether padding is allowed internally or only after all instructions are complete.
+            // Empircally, the latter appears to be the case, at lest with the output from LLVM that
+            // I've tested.
             .invalid => return error.EndOfStream,
             .code_offset => return .{
                 .code_offset = try expect(takePackedU32(reader)),
@@ -547,13 +546,19 @@ pub const BinaryAnnotation = union(enum) {
 };
 
 pub fn findInlineeName(self: *const Pdb, inlinee: u32) ?[]const u8 {
+    // According to LLVM, the high bit *can* be used to indicate that a type index comes from the
+    // ipi stream in which case that bit needs to be cleared. LLVM doesn't generate data in this
+    // manner, but we may as well handle it since it just involves a single bitwise and.
+    // https://llvm.org/docs/PDB/TpiStream.html#type-indices
+    const type_index = inlinee & 0x7FFFFFFF;
+
     var reader: Io.Reader = .fixed(self.ipi orelse return null);
     const header = reader.takeStructPointer(pdb.IpiStreamHeader) catch return null;
-    for (header.type_index_begin..header.type_index_end) |type_index| {
+    for (header.type_index_begin..header.type_index_end) |curr_type_index| {
         const prefix = reader.takeStructPointer(pdb.LfRecordPrefix) catch return null;
         reader.discardAll(prefix.len - @sizeOf(@FieldType(pdb.LfRecordPrefix, "len"))) catch return null;
 
-        if (type_index == inlinee) {
+        if (curr_type_index == type_index) {
             switch (prefix.kind) {
                 .func_id => {
                     const func: *align(1) pdb.LfFuncId = @ptrCast(prefix);
