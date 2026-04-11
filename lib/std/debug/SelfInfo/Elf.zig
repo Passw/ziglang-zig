@@ -30,41 +30,50 @@ pub fn deinit(si: *SelfInfo, io: Io) void {
     if (si.unwind_cache) |cache| gpa.free(cache);
 }
 
-pub const SymbolIterator = std.debug.Dwarf.SymbolIterator;
-
-pub fn getSymbols(si: *SelfInfo, io: Io, address: usize) SymbolIterator {
+pub fn getSymbols(si: *SelfInfo, io: Io, address: usize) Error![]const std.debug.Symbol {
     const gpa = std.debug.getDebugInfoAllocator();
-    const module = si.findModule(gpa, io, address, .exclusive) catch |err| return .{ .curr = err };
+    const module = try si.findModule(gpa, io, address, .exclusive);
     defer si.rwlock.unlock(io);
 
     const vaddr = address - module.load_offset;
 
-    const loaded_elf = module.getLoadedElf(gpa, io) catch |err| return .{ .curr = err };
+    const loaded_elf = try module.getLoadedElf(gpa, io);
     if (loaded_elf.file.dwarf) |*dwarf| {
         if (!loaded_elf.scanned_dwarf) {
             dwarf.open(gpa, native_endian) catch |err| switch (err) {
                 error.InvalidDebugInfo,
                 error.MissingDebugInfo,
                 error.OutOfMemory,
-                => |e| return .{ .curr = e },
+                => |e| return e,
                 error.EndOfStream,
                 error.Overflow,
                 error.ReadFailed,
                 error.StreamTooLong,
-                => return .{ .curr = error.InvalidDebugInfo },
+                => return error.InvalidDebugInfo,
             };
             loaded_elf.scanned_dwarf = true;
         }
         return dwarf.getSymbols(gpa, native_endian, vaddr);
     }
     // When DWARF is unavailable, fall back to searching the symtab.
-    const symbol = loaded_elf.file.searchSymtab(gpa, vaddr) catch |err| switch (err) {
-        error.NoSymtab, error.NoStrtab => return .{ .curr = error.MissingDebugInfo },
-        error.BadSymtab => return .{ .curr = error.InvalidDebugInfo },
-        error.OutOfMemory => |e| return .{ .curr = e },
+    const symbol = try gpa.create(std.debug.Symbol);
+    errdefer gpa.destroy(symbol);
+    symbol.* = loaded_elf.file.searchSymtab(gpa, vaddr) catch |err| switch (err) {
+        error.NoSymtab, error.NoStrtab => return error.MissingDebugInfo,
+        error.BadSymtab => return error.InvalidDebugInfo,
+        error.OutOfMemory => |e| return e,
     };
-
-    return .{ .curr = symbol };
+    return symbol[0..1];
+}
+pub fn freeSymbols(si: *SelfInfo, symbols: []const std.debug.Symbol) void {
+    _ = si;
+    const gpa = std.debug.getDebugInfoAllocator();
+    for (symbols) |symbol| {
+        if (symbol.source_location) |source_location| {
+            gpa.free(source_location.file_name);
+        }
+    }
+    gpa.free(symbols);
 }
 pub fn getModuleName(si: *SelfInfo, io: Io, address: usize) Error![]const u8 {
     const gpa = std.debug.getDebugInfoAllocator();

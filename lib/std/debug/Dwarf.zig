@@ -1545,26 +1545,17 @@ fn getStringGeneric(opt_str: ?[]const u8, offset: u64) ![:0]const u8 {
     return str[casted_offset..last :0];
 }
 
-pub const SymbolIterator = struct {
-    curr: ?std.debug.SelfInfoError!std.debug.Symbol,
-
-    pub fn deinit(self: *SymbolIterator, _: Io) void {
-        self.* = undefined;
-    }
-
-    pub fn next(self: *SymbolIterator) ?Error!std.debug.Symbol {
-        const result = self.curr;
-        self.curr = null;
-        return result;
-    }
-};
-
-pub fn getSymbols(di: *Dwarf, gpa: Allocator, endian: Endian, address: u64) SymbolIterator {
+pub fn getSymbols(di: *Dwarf, gpa: Allocator, endian: Endian, address: u64) std.debug.SelfInfoError![]const std.debug.Symbol {
+    const symbol = try gpa.create(std.debug.Symbol);
+    errdefer gpa.destroy(symbol);
     const compile_unit = di.findCompileUnit(endian, address) catch |err| switch (err) {
-        error.EndOfStream, error.Overflow => return .{ .curr = error.InvalidDebugInfo },
-        else => |e| return .{ .curr = e },
+        error.EndOfStream, error.Overflow => {
+            symbol.* = .unknown;
+            return symbol[0..1];
+        },
+        else => |e| return e,
     };
-    return .{ .curr = .{
+    symbol.* = .{
         .name = di.getSymbolName(address),
         .compile_unit_name = compile_unit.die.getAttrString(di, endian, std.dwarf.AT.name, di.section(.debug_str), compile_unit) catch |err| switch (err) {
             error.MissingDebugInfo, error.InvalidDebugInfo => null,
@@ -1575,10 +1566,11 @@ pub fn getSymbols(di: *Dwarf, gpa: Allocator, endian: Endian, address: u64) Symb
             error.EndOfStream,
             error.Overflow,
             error.StreamTooLong,
-            => return .{ .curr = error.InvalidDebugInfo },
-            else => |e| return .{ .curr = e },
+            => return error.InvalidDebugInfo,
+            else => |e| return e,
         },
-    } };
+    };
+    return symbol[0..1];
 }
 
 /// DWARF5 7.4: "In the 32-bit DWARF format, all values that represent lengths of DWARF sections and

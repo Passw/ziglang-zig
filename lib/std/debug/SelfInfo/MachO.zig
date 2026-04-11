@@ -36,12 +36,15 @@ pub const SymbolIterator = struct {
     }
 };
 
-pub fn getSymbols(si: *SelfInfo, io: Io, address: usize) SymbolIterator {
+pub fn getSymbols(si: *SelfInfo, io: Io, address: usize) Error![]const std.debug.Symbol {
     const gpa = std.debug.getDebugInfoAllocator();
-    const module = si.findModule(gpa, io, address) catch |err| return .{ .curr = err };
+    const module = try si.findModule(gpa, io, address);
     defer si.mutex.unlock(io);
 
-    const file = module.getFile(gpa, io) catch |err| return .{ .curr = err };
+    const file = try module.getFile(gpa, io);
+
+    const symbol = try gpa.create(std.debug.Symbol);
+    errdefer gpa.destroy(symbol);
 
     // This is not necessarily the same as the vmaddr_slide that dyld would report. This is
     // because the segments in the file on disk might differ from the ones in memory. Normally
@@ -57,26 +60,27 @@ pub fn getSymbols(si: *SelfInfo, io: Io, address: usize) SymbolIterator {
 
     const ofile_dwarf, const ofile_vaddr = file.getDwarfForAddress(gpa, io, vaddr) catch {
         // Return at least the symbol name if available.
-        return .{ .curr = .{
-            .name = file.lookupSymbolName(vaddr) catch |err| return .{ .curr = err },
+        symbol.* = .{
+            .name = try file.lookupSymbolName(vaddr),
             .compile_unit_name = null,
             .source_location = null,
-        } };
+        };
+        return symbol[0..1];
     };
 
     const compile_unit = ofile_dwarf.findCompileUnit(native_endian, ofile_vaddr) catch {
         // Return at least the symbol name if available.
-        return .{ .curr = .{
-            .name = file.lookupSymbolName(vaddr) catch |err| return .{ .curr = err },
+        symbol.* = .{
+            .name = try file.lookupSymbolName(vaddr),
             .compile_unit_name = null,
             .source_location = null,
-        } };
+        };
+        return symbol[0..1];
     };
 
-    return .{ .curr = .{
+    symbol.* = .{
         .name = ofile_dwarf.getSymbolName(ofile_vaddr) orelse
-            file.lookupSymbolName(vaddr) catch |err|
-                return .{ .curr = err },
+            try file.lookupSymbolName(vaddr),
         .compile_unit_name = compile_unit.die.getAttrString(
             ofile_dwarf,
             native_endian,
@@ -92,7 +96,18 @@ pub fn getSymbols(si: *SelfInfo, io: Io, address: usize) SymbolIterator {
             compile_unit,
             ofile_vaddr,
         ) catch null,
-    } };
+    };
+    return symbol[0..1];
+}
+pub fn freeSymbols(si: *SelfInfo, symbols: []const std.debug.Symbol) void {
+    _ = si;
+    const gpa = std.debug.getDebugInfoAllocator();
+    for (symbols) |symbol| {
+        if (symbol.source_location) |source_location| {
+            gpa.free(source_location.file_name);
+        }
+    }
+    gpa.free(symbols);
 }
 pub fn getModuleName(si: *SelfInfo, io: Io, address: usize) Error![]const u8 {
     _ = si;

@@ -38,8 +38,12 @@ pub const cpu_context = @import("debug/cpu_context.zig");
 /// pub const init: SelfInfo;
 /// pub fn deinit(si: *SelfInfo, io: Io) void;
 ///
-/// /// Returns an iterator over the symbols and source locations of the instruction at `address`.
-/// pub fn getSymbols(si: *SelfInfo, io: Io, address: usize) SelfInfo.SymbolIterator;
+/// /// Returns the the symbols and source locations of the instruction at `address`. Often this
+/// /// will return a single result, but in the case of inlines it may return multiple. When
+/// /// multiple results are returned, they are sorted from innermost to outermost.
+/// pub fn getSymbols(si: *SelfInfo, io: Io, address: usize) SelfInfoError![]const Symbol;
+/// /// Frees symbols returned from `getSymbols`.
+/// pub fn freeSymbols(si: *SelfInfo, symbols: []const Symbol) void;
 /// /// Returns a name for the "module" (e.g. shared library or executable image) containing `address`.
 /// pub fn getModuleName(si: *SelfInfo, io: Io, address: usize) SelfInfoError![]const u8;
 /// pub fn getModuleSlide(si: *SelfInfo, io: Io, address: usize) SelfInfoError!usize;
@@ -60,11 +64,6 @@ pub const cpu_context = @import("debug/cpu_context.zig");
 /// /// Only required if `can_unwind == true`. Unwinds a single stack frame, returning the frame's
 /// /// return address, or 0 if the end of the stack has been reached.
 /// pub fn unwindFrame(si: *SelfInfo, io: Io, context: *UnwindContext) SelfInfoError!usize;
-/// /// Iterates symbols found at an address.
-/// pub const SymbolIterator = struct {
-///     pub fn deinit(Self: *SymbolIterator, io: Io) void;
-///     pub fn next(self: *SymbolIterator) ?SelfInfoError!Symbol;
-/// };
 /// ```
 pub const SelfInfo = if (@hasDecl(root, "debug") and @hasDecl(root.debug, "SelfInfo"))
     root.debug.SelfInfo
@@ -1193,35 +1192,35 @@ fn printSourceAtAddress(
     t: Io.Terminal,
     options: PrintSourceAddressOptions,
 ) Writer.Error!void {
-    var symbols: SelfInfo.SymbolIterator = debug_info.getSymbols(io, options.address);
-    defer symbols.deinit(io);
-    while (symbols.next()) |curr| {
-        const symbol: Symbol = curr catch |err| switch (err) {
+    const symbols: []const Symbol = debug_info.getSymbols(io, options.address) catch |err| {
+        t.setColor(.dim) catch {};
+        defer t.setColor(.reset) catch {};
+        switch (err) {
             error.MissingDebugInfo,
             error.UnsupportedDebugInfo,
             error.InvalidDebugInfo,
-            => .unknown,
-            error.ReadFailed, error.Unexpected, error.Canceled => s: {
-                t.setColor(.dim) catch {};
+            => {},
+            error.ReadFailed, error.Unexpected, error.Canceled => {
                 try t.writer.print("Failed to read debug info from filesystem, trace may be incomplete\n\n", .{});
-                t.setColor(.reset) catch {};
-                break :s .unknown;
             },
-            error.OutOfMemory => s: {
+            error.OutOfMemory => {
                 t.setColor(.dim) catch {};
                 try t.writer.print("Ran out of memory loading debug info, trace may be incomplete\n\n", .{});
                 t.setColor(.reset) catch {};
-                break :s .unknown;
             },
-        };
-        defer if (symbol.source_location) |sl| getDebugInfoAllocator().free(sl.file_name);
+        }
+        return printLineInfo(io, t, debug_info, null, options.address, null, null);
+    };
+    defer debug_info.freeSymbols(symbols);
+    for (symbols) |symbol| {
         try printLineInfo(
             io,
             t,
+            debug_info,
             symbol.source_location,
             options.address,
-            symbol.name orelse "???",
-            symbol.compile_unit_name orelse debug_info.getModuleName(io, options.address) catch "???",
+            symbol.name,
+            symbol.compile_unit_name,
         );
         if (!options.resolve_inline_callers) break;
     }
@@ -1229,10 +1228,11 @@ fn printSourceAtAddress(
 fn printLineInfo(
     io: Io,
     t: Io.Terminal,
+    debug_info: *SelfInfo,
     source_location: ?SourceLocation,
     address: usize,
-    symbol_name: []const u8,
-    compile_unit_name: []const u8,
+    symbol_name: ?[]const u8,
+    compile_unit_name: ?[]const u8,
 ) Writer.Error!void {
     const writer = t.writer;
     t.setColor(.bold) catch {};
@@ -1250,7 +1250,11 @@ fn printLineInfo(
     t.setColor(.reset) catch {};
     try writer.writeAll(": ");
     t.setColor(.dim) catch {};
-    try writer.print("0x{x} in {s} ({s})", .{ address, symbol_name, compile_unit_name });
+    try writer.print("0x{x} in {s} ({s})", .{
+        address,
+        symbol_name orelse "???",
+        compile_unit_name orelse debug_info.getModuleName(io, address) catch "???",
+    });
     t.setColor(.reset) catch {};
     try writer.writeAll("\n");
 

@@ -25,107 +25,26 @@ pub fn deinit(si: *SelfInfo, io: Io) void {
     si.modules.deinit(gpa);
 }
 
-pub const SymbolIterator = struct {
-    err: Error!void = {},
-    lock: ?*Io.RwLock,
-    module: *Module,
-    symbols: Module.DebugInfo.Symbols,
+pub fn getSymbols(si: *SelfInfo, io: Io, address: usize) Error![]const std.debug.Symbol {
+    const gpa = std.debug.getDebugInfoAllocator();
+    try si.lock.lockShared(io);
+    defer si.lock.unlockShared(io);
+    const module = try si.findModule(gpa, address);
+    const di = try module.getDebugInfo(gpa, io);
+    return di.getSymbols(gpa, address - @intFromPtr(module.entry.DllBase));
+}
 
-    pub fn deinit(self: *SymbolIterator, io: Io) void {
-        if (self.lock) |lock| lock.unlockShared(io);
-        self.symbols.deinit(io);
-        self.* = undefined;
-    }
-
-    fn failing(err: Error) SymbolIterator {
-        return .{
-            .err = err,
-            .lock = null,
-            .module = undefined,
-            .symbols = .none,
-        };
-    }
-
-    pub fn next(self: *SymbolIterator) ?Error!std.debug.Symbol {
-        // Check for errors
-        self.err catch |err| {
-            self.err = {};
-            self.symbols = .none;
-            return err;
-        };
-
-        // Return the next symbol for the debug info type
-        switch (self.symbols) {
-            .pdb => |*info| {
-                // The failure cases are unreachable because we only set the pdb field if these are
-                // set
-                const di = if (self.module.di.?) |*di| di else |_| unreachable;
-                const pdb = if (di.pdb) |*pdb| pdb else unreachable;
-
-                // Get the next inlinee if it exists
-                if (info.proc) |proc| {
-                    const offset_in_func = info.addr - proc.code_offset;
-                    while (info.inline_sites.pop()) |site| {
-                        // If our address points into this site, get the source location it points
-                        // at
-                        const inlinee_src_line = pdb.getInlineeSourceLine(
-                            info.module,
-                            site.inlinee,
-                        ) orelse continue;
-                        const maybe_loc = pdb.getInlineSiteSourceLocation(
-                            info.module,
-                            site,
-                            inlinee_src_line.info,
-                            offset_in_func,
-                        ) catch continue;
-                        const loc = maybe_loc orelse continue;
-
-                        // If we've found a match, filter out any duplicates that might follow.
-                        // Tools like llvm-addr2line output duplicate sites in the same cases as us,
-                        // implying that they exist in the underlying data and are not indicative of
-                        // a parser bug.
-                        while (info.inline_sites.getLastOrNull()) |top| {
-                            if (top.inlinee != site.inlinee) break;
-                            _ = info.inline_sites.pop();
-                        }
-
-                        return .{
-                            .name = pdb.findInlineeName(site.inlinee),
-                            .compile_unit_name = fs.path.basename(info.module.obj_file_name),
-                            .source_location = loc,
-                        };
-                    }
-                }
-
-                // Return the main symbol and end the iterator
-                defer self.symbols = .none;
-                return .{
-                    .name = if (info.proc) |proc| pdb.getSymbolName(proc) else null,
-                    .compile_unit_name = fs.path.basename(info.module.obj_file_name),
-                    .source_location = pdb.getLineNumberInfo(info.module, info.addr) catch null,
-                };
-            },
-            .dwarf => |*info| return info.next(),
-            .none => return null,
+pub fn freeSymbols(si: *SelfInfo, symbols: []const std.debug.Symbol) void {
+    _ = si;
+    const gpa = std.debug.getDebugInfoAllocator();
+    for (symbols) |symbol| {
+        if (symbol.source_location) |source_location| {
+            gpa.free(source_location.file_name);
         }
     }
-};
-
-pub fn getSymbols(si: *SelfInfo, io: Io, address: usize) SymbolIterator {
-    const gpa = std.debug.getDebugInfoAllocator();
-    si.lock.lockShared(io) catch |err| return .failing(err);
-    errdefer si.lock.unlockShared(io);
-    const module = si.findModule(gpa, address) catch |err| return .failing(err);
-    const di = module.getDebugInfo(gpa, io) catch |err| return .failing(err);
-    const symbols = Module.DebugInfo.Symbols.init(di, address - @intFromPtr(module.entry.DllBase))
-        catch |err| return .failing(err);
-    errdefer comptime unreachable;
-    return .{
-        .lock = &si.lock,
-        .module = module,
-        .symbols = symbols,
-    };
+    gpa.free(symbols);
 }
+
 pub fn getModuleName(si: *SelfInfo, io: Io, address: usize) Error![]const u8 {
     const gpa = std.debug.getDebugInfoAllocator();
     try si.lock.lockShared(io);
@@ -333,94 +252,100 @@ const Module = struct {
             arena.deinit();
         }
 
-        pub const Symbols = union(enum) {
-            pdb: struct {
-                module: *Pdb.Module,
-                proc: ?*align(1) const std.pdb.ProcSym,
-                addr: usize,
-                /// Inline sites are stored in the pdb in reverse order, so we build up a list of up
-                /// front so that our iterator can return them in the correct order without doing an
-                /// n^2 search. We don't try to filter inline sites based on address until the user
-                /// calls `next` as this requires parsing binary annotations, and this is work we
-                /// may be able to elide if the caller chooses to early out before finishing
-                /// iteration, e.g. because they only wanted the topmost call.
-                inline_sites: std.ArrayList(*align(1) const std.pdb.InlineSiteSym),
-            },
-            dwarf: std.debug.Dwarf.SymbolIterator,
-            none: void,
+        fn getSymbols(di: *DebugInfo, gpa: Allocator, vaddr: usize) Error![]const std.debug.Symbol {
+            pdb: {
+                const pdb = &(di.pdb orelse break :pdb);
+                var coff_section: *align(1) const coff.SectionHeader = undefined;
+                const mod_index = for (pdb.sect_contribs) |sect_contrib| {
+                    if (sect_contrib.section > di.coff_section_headers.len) continue;
+                    // Remember that SectionContribEntry.Section is 1-based.
+                    coff_section = &di.coff_section_headers[sect_contrib.section - 1];
 
-            fn init(di: *DebugInfo, vaddr: usize) Error!Symbols {
-                const gpa = std.debug.getDebugInfoAllocator();
+                    const vaddr_start = coff_section.virtual_address + sect_contrib.offset;
+                    const vaddr_end = vaddr_start + sect_contrib.size;
+                    if (vaddr >= vaddr_start and vaddr < vaddr_end) {
+                        break sect_contrib.module_index;
+                    }
+                } else {
+                    // we have no information to add to the address
+                    break :pdb;
+                };
+                const module = pdb.getModule(mod_index) catch |err| switch (err) {
+                    error.InvalidDebugInfo,
+                    error.MissingDebugInfo,
+                    error.OutOfMemory,
+                    => |e| return e,
 
-                pdb: {
-                    const pdb = &(di.pdb orelse break :pdb);
-                    var coff_section: *align(1) const coff.SectionHeader = undefined;
-                    const mod_index = for (pdb.sect_contribs) |sect_contrib| {
-                        if (sect_contrib.section > di.coff_section_headers.len) continue;
-                        // Remember that SectionContribEntry.Section is 1-based.
-                        coff_section = &di.coff_section_headers[sect_contrib.section - 1];
+                    error.ReadFailed,
+                    error.EndOfStream,
+                    => return error.InvalidDebugInfo,
+                } orelse {
+                    return error.InvalidDebugInfo; // bad module index
+                };
 
-                        const vaddr_start = coff_section.virtual_address + sect_contrib.offset;
-                        const vaddr_end = vaddr_start + sect_contrib.size;
-                        if (vaddr >= vaddr_start and vaddr < vaddr_end) {
-                            break sect_contrib.module_index;
-                        }
-                    } else {
-                        // we have no information to add to the address
-                        break :pdb;
-                    };
-                    const module = pdb.getModule(mod_index) catch |err| switch (err) {
-                        error.InvalidDebugInfo,
-                        error.MissingDebugInfo,
-                        error.OutOfMemory,
-                        => |e| return e,
+                const addr = vaddr - coff_section.virtual_address;
+                const maybe_proc = pdb.getProcSym(module, addr);
+                var symbols: std.ArrayList(std.debug.Symbol) = .empty;
+                errdefer symbols.deinit(gpa);
 
-                        error.ReadFailed,
-                        error.EndOfStream,
-                        => return error.InvalidDebugInfo,
-                    } orelse {
-                        return error.InvalidDebugInfo; // bad module index
-                    };
+                if (maybe_proc) |proc| {
+                    const offset_in_func = addr - proc.code_offset;
+                    var last_inlinee: ?u32 = null;
+                    var iter = pdb.getInlinees(module, proc);
+                    while (iter.next(module)) |inline_site| {
+                        // If our address points into this site, get the source location it
+                        // points at
+                        const inlinee_src_line = pdb.getInlineeSourceLine(
+                            module,
+                            inline_site.inlinee,
+                        ) orelse continue;
+                        const maybe_loc = pdb.getInlineSiteSourceLocation(
+                            module,
+                            inline_site,
+                            inlinee_src_line.info,
+                            offset_in_func,
+                        ) catch continue;
+                        const loc = maybe_loc orelse continue;
 
-                    const addr = vaddr - coff_section.virtual_address;
-                    const maybe_proc = pdb.getProcSym(module, addr);
+                        // Filter out duplicate inline sites. Tools like llvm-addr2line output
+                        // duplicate sites in the same cases as us if we elide this check,
+                        // implying that they exist in the underlying data and are not
+                        // indicative of a parser bug. No useful information is lost here since an
+                        // inline site can't actually reference itself.
+                        if (inline_site.inlinee == last_inlinee) continue;
+                        last_inlinee = inline_site.inlinee;
 
-                    var inline_sites: std.ArrayList(*align(1) const std.pdb.InlineSiteSym) = .empty;
-                    if (maybe_proc) |proc| {
-                        var iter = pdb.getInlinees(module, proc);
-                        while (iter.next(module)) |inline_site| {
-                            try inline_sites.append(gpa, inline_site);
-                        }
+                        try symbols.append(gpa, .{
+                            .name = pdb.findInlineeName(inline_site.inlinee),
+                            .compile_unit_name = fs.path.basename(module.obj_file_name),
+                            .source_location = loc,
+                        });
                     }
 
-                    return .{ .pdb = .{
-                        .module = module,
-                        .proc = maybe_proc,
-                        .addr = addr,
-                        .inline_sites = inline_sites,
-                    } };
+                    // Inline sites are stored in the pdb in reverse order, so we reverse the
+                    // matching sites here. We could alternatively use the parent fields to
+                    // determine the order, but this would introduce seemingly unecessary
+                    // complexity.
+                    std.mem.reverse(std.debug.Symbol, symbols.items);
                 }
 
-                // Dwarf
-                dwarf: {
-                    const dwarf = &(di.dwarf orelse break :dwarf);
-                    const addr = vaddr + di.coff_image_base;
-                    return .{ .dwarf = dwarf.getSymbols(gpa, native_endian, addr) };
-                }
+                try symbols.append(gpa, .{
+                    .name = if (maybe_proc) |proc| pdb.getSymbolName(proc) else null,
+                    .compile_unit_name = fs.path.basename(module.obj_file_name),
+                    .source_location = pdb.getLineNumberInfo(module, addr) catch null,
+                });
 
-                return error.MissingDebugInfo;
+                return symbols.toOwnedSlice(gpa);
             }
 
-            fn deinit(self: *Symbols, io: Io) void {
-                const gpa = std.debug.getDebugInfoAllocator();
-                switch (self.*) {
-                    .pdb => |*info| info.inline_sites.deinit(gpa),
-                    .dwarf => |*info| info.deinit(io),
-                    .none => {},
-                }
+            dwarf: {
+                const dwarf = &(di.dwarf orelse break :dwarf);
+                const addr = vaddr + di.coff_image_base;
+                return dwarf.getSymbols(gpa, native_endian, addr);
             }
-        };
 
+            return error.MissingDebugInfo;
+        }
     };
 
     fn deinit(module: *Module, gpa: Allocator, io: Io) void {
