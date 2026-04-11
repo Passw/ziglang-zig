@@ -225,14 +225,13 @@ pub fn parseInfoStream(self: *Pdb) !void {
 
 pub fn getProcSym(self: *Pdb, module: *Module, address: u64) ?*align(1) pdb.ProcSym {
     _ = self;
-
     std.debug.assert(module.populated);
-
-    var symbol_i: usize = 0;
-    while (symbol_i != module.symbols.len) {
-        const prefix: *align(1) pdb.RecordPrefix = @ptrCast(&module.symbols[symbol_i]);
+    var reader: Io.Reader = .fixed(module.symbols);
+    while (true) {
+        const prefix = reader.takeStructPointer(pdb.RecordPrefix) catch return null;
         if (prefix.record_len < 2)
             return null;
+        reader.discardAll(prefix.record_len - @sizeOf(u16)) catch return null;
         switch (prefix.record_kind) {
             .lproc32, .gproc32 => {
                 const proc_sym: *align(1) pdb.ProcSym = @ptrCast(prefix);
@@ -242,9 +241,7 @@ pub fn getProcSym(self: *Pdb, module: *Module, address: u64) ?*align(1) pdb.Proc
             },
             else => {},
         }
-        symbol_i += prefix.record_len + @sizeOf(u16);
     }
-
     return null;
 }
 
@@ -253,12 +250,17 @@ pub const InlineSiteSymIterator = struct {
     offset: usize,
     end: usize,
 
+    const empty: InlineSiteSymIterator = .{
+        .module_index = 0,
+        .offset = 0,
+        .end = 0,
+    };
+
     pub fn next(iter: *InlineSiteSymIterator, module: *Module) ?*align(1) pdb.InlineSiteSym {
         while (iter.offset < iter.end) {
             const inline_prefix: *align(1) pdb.RecordPrefix = @ptrCast(&module.symbols[iter.offset]);
-            if (inline_prefix.record_len < 2)
-                return null;
             const end = iter.offset + inline_prefix.record_len + @sizeOf(u16);
+            if (end > iter.end) return null;
             defer iter.offset = end;
             switch (inline_prefix.record_kind) {
                 // Skip nested procedures
@@ -556,7 +558,8 @@ pub fn findInlineeName(self: *const Pdb, inlinee: u32) ?[]const u8 {
     const header = reader.takeStructPointer(pdb.IpiStreamHeader) catch return null;
     for (header.type_index_begin..header.type_index_end) |curr_type_index| {
         const prefix = reader.takeStructPointer(pdb.LfRecordPrefix) catch return null;
-        reader.discardAll(prefix.len - @sizeOf(@FieldType(pdb.LfRecordPrefix, "len"))) catch return null;
+        if (prefix.len < 2) return null;
+        reader.discardAll(prefix.len - @sizeOf(u16)) catch return null;
 
         if (curr_type_index == type_index) {
             switch (prefix.kind) {
@@ -580,7 +583,9 @@ pub fn getInlinees(self: *Pdb, module: *Module, proc_sym: *align(1) const pdb.Pr
     const offset = @intFromPtr(proc_sym) -
         @intFromPtr(module.symbols.ptr) +
         proc_sym.record_len +
-        @sizeOf(@FieldType(pdb.ProcSym, "record_len"));
+        @sizeOf(u16);
+    const symbols_end = @intFromPtr(module.symbols.ptr) + module.symbols.len;
+    if (offset > symbols_end or proc_sym.end > symbols_end) return .empty;
     return .{
         .module_index = module_index,
         .offset = offset,
@@ -588,17 +593,19 @@ pub fn getInlinees(self: *Pdb, module: *Module, proc_sym: *align(1) const pdb.Pr
     };
 }
 
-pub fn getBinaryAnnotations(self: *Pdb, site: *align(1) const pdb.InlineSiteSym) BinaryAnnotation.Iterator {
+pub fn getBinaryAnnotations(self: *Pdb, module: *Module, site: *align(1) const pdb.InlineSiteSym) BinaryAnnotation.Iterator {
     _ = self;
     var start: usize = @intFromPtr(site) + @sizeOf(pdb.InlineSiteSym);
-    var end = start + site.record_len + @sizeOf(@FieldType(pdb.InlineSiteSym, "record_len")) - @sizeOf(pdb.InlineSiteSym);
+    var end = start + site.record_len + @sizeOf(u16) - @sizeOf(pdb.InlineSiteSym);
     switch (site.record_kind) {
         .inlinesite => {},
         .inlinesite2 => start += @sizeOf(pdb.InlineSiteSym2) - @sizeOf(pdb.InlineSiteSym),
         else => end = start,
     }
+    if (start < @intFromPtr(module.symbols.ptr) or end > @intFromPtr(module.symbols.ptr) + module.symbols.len) return .empty;
+    const len = end - start;
     const ptr: [*]const u8 = @ptrFromInt(start);
-    const slice = ptr[0..end - start];
+    const slice = ptr[0..len];
     return .{ .reader = Io.Reader.fixed(slice) };
 }
 
@@ -609,7 +616,7 @@ pub fn getInlineSiteSourceLocation(
     inlinee_src_line: *align(1) const pdb.InlineeSourceLine,
     offset_in_func: usize,
 ) !?std.debug.SourceLocation {
-    var ranges: BinaryAnnotation.RangeIterator = .init(self.getBinaryAnnotations(site));
+    var ranges: BinaryAnnotation.RangeIterator = .init(self.getBinaryAnnotations(mod, site));
     while (try ranges.next()) |range| {
         if (!range.contains(offset_in_func)) continue;
 
@@ -658,36 +665,26 @@ pub fn getInlineeSourceLine(
     inlinee: u32,
 ) ?InlineeSourceLine {
     _ = self;
-    var sect_offset: usize = 0;
-    var skip_len: usize = undefined;
-    while (sect_offset < mod.subsect_info.len) : (sect_offset += skip_len) {
-        const subsect_hdr: *align(1) pdb.DebugSubsectionHeader = @ptrCast(&mod.subsect_info[sect_offset]);
-        skip_len = subsect_hdr.length;
-        sect_offset += @sizeOf(pdb.DebugSubsectionHeader);
-
+    var subsects: Io.Reader = .fixed(mod.subsect_info);
+    while (subsects.takeStructPointer(pdb.DebugSubsectionHeader) catch null) |subsect_hdr| {
+        var subsect: Io.Reader = .fixed(subsects.take(subsect_hdr.length) catch return null);
         if (subsect_hdr.kind == .inlinee_lines) {
-            var offset = sect_offset;
-            const signature: *const align(1) pdb.InlineeSourceLineSignature = @ptrCast(&mod.subsect_info[offset]);
-            offset += @sizeOf(pdb.InlineeSourceLineSignature);
-
-            const has_extra_files = switch (signature.*) {
+            const signature = subsect.takeEnum(pdb.InlineeSourceLineSignature, .little) catch return null;
+            const has_extra_files = switch (signature) {
                 .normal => false,
                 .ex => true,
                 else => continue,
             };
 
-            while (offset < sect_offset + subsect_hdr.length) {
-                const inlinee_src_line: *const align(1) pdb.InlineeSourceLine = @ptrCast(&mod.subsect_info[offset]);
-                offset += @sizeOf(pdb.InlineeSourceLine);
-
+            while (subsect.takeStructPointer(pdb.InlineeSourceLine) catch null) |inlinee_src_line| {
                 if (has_extra_files) {
-                    const file_count: *const align(1) u32 = @ptrCast(&mod.subsect_info[offset]);
-                    offset += @sizeOf(u32);
-                    offset += file_count.* * @sizeOf(u32);
+                    const file_count = subsect.takeInt(u32, .little) catch return null;
+                    const file_bytes = std.math.mul(usize, file_count, @sizeOf(u32)) catch return null;
+                    subsect.discardAll(file_bytes) catch return null;
                 }
 
                 if (inlinee_src_line.inlinee == inlinee) return .{
-                    .signature = signature.*,
+                    .signature = signature,
                     .info = inlinee_src_line,
                 };
             }
