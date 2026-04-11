@@ -25,24 +25,13 @@ pub fn deinit(si: *SelfInfo, io: Io) void {
     si.modules.deinit(gpa);
 }
 
-pub fn getSymbols(si: *SelfInfo, io: Io, address: usize) Error![]const std.debug.Symbol {
+pub fn getSymbols(si: *SelfInfo, io: Io, address: usize, resolve_inline_callers: bool) Error![]std.debug.Symbol {
     const gpa = std.debug.getDebugInfoAllocator();
     try si.lock.lockShared(io);
     defer si.lock.unlockShared(io);
     const module = try si.findModule(gpa, address);
     const di = try module.getDebugInfo(gpa, io);
-    return di.getSymbols(gpa, address - @intFromPtr(module.entry.DllBase));
-}
-
-pub fn freeSymbols(si: *SelfInfo, symbols: []const std.debug.Symbol) void {
-    _ = si;
-    const gpa = std.debug.getDebugInfoAllocator();
-    for (symbols) |symbol| {
-        if (symbol.source_location) |source_location| {
-            gpa.free(source_location.file_name);
-        }
-    }
-    gpa.free(symbols);
+    return di.getSymbols(gpa, address - @intFromPtr(module.entry.DllBase), resolve_inline_callers);
 }
 
 pub fn getModuleName(si: *SelfInfo, io: Io, address: usize) Error![]const u8 {
@@ -252,7 +241,7 @@ const Module = struct {
             arena.deinit();
         }
 
-        fn getSymbols(di: *DebugInfo, gpa: Allocator, vaddr: usize) Error![]const std.debug.Symbol {
+        fn getSymbols(di: *DebugInfo, gpa: Allocator, vaddr: usize, resolve_inline_callers: bool) Error![]std.debug.Symbol {
             pdb: {
                 const pdb = &(di.pdb orelse break :pdb);
                 var coff_section: *align(1) const coff.SectionHeader = undefined;
@@ -285,8 +274,12 @@ const Module = struct {
 
                 const addr = vaddr - coff_section.virtual_address;
                 const maybe_proc = pdb.getProcSym(module, addr);
-                var symbols: std.ArrayList(std.debug.Symbol) = .empty;
-                errdefer symbols.deinit(gpa);
+                const compile_unit_name = fs.path.basename(module.obj_file_name);
+                var symbols: std.ArrayList(std.debug.Symbol) = try .initCapacity(gpa, 1);
+                errdefer {
+                    for (symbols.items) |*symbol| symbol.deinit(gpa);
+                    symbols.deinit(gpa);
+                }
 
                 if (maybe_proc) |proc| {
                     const offset_in_func = addr - proc.code_offset;
@@ -315,25 +308,43 @@ const Module = struct {
                         if (inline_site.inlinee == last_inlinee) continue;
                         last_inlinee = inline_site.inlinee;
 
+                        // If we're appending this symbol, resolve the name. If we're replacing the
+                        // last symbol, clear the previous symbols and wait to resolve the name
+                        // until we've reached the last symbol to avoid doing work and then
+                        // throwing it out.
+                        const name = b: {
+                            if (resolve_inline_callers) break :b pdb.findInlineeName(inline_site.inlinee);
+                            symbols.items.len = 0;
+                            break :b null;
+                        };
+
                         try symbols.append(gpa, .{
-                            .name = pdb.findInlineeName(inline_site.inlinee),
-                            .compile_unit_name = fs.path.basename(module.obj_file_name),
+                            .name = name,
+                            .compile_unit_name = compile_unit_name,
                             .source_location = loc,
                         });
                     }
 
-                    // Inline sites are stored in the pdb in reverse order, so we reverse the
-                    // matching sites here. We could alternatively use the parent fields to
-                    // determine the order, but this would introduce seemingly unecessary
-                    // complexity.
-                    std.mem.reverse(std.debug.Symbol, symbols.items);
+                    if (resolve_inline_callers) {
+                        // Inline sites are stored in the pdb in reverse order, so we reverse the
+                        // matching sites here. We could alternatively use the parent fields to
+                        // determine the order, but this would introduce seemingly unecessary
+                        // complexity.
+                        std.mem.reverse(std.debug.Symbol, symbols.items);
+                    } else if (last_inlinee) |inlinee| {
+                        // If we haven't resolved the name yet, resolve it now
+                        symbols.items[symbols.items.len - 1].name = pdb.findInlineeName(inlinee);
+                    }
                 }
 
-                try symbols.append(gpa, .{
-                    .name = if (maybe_proc) |proc| pdb.getSymbolName(proc) else null,
-                    .compile_unit_name = fs.path.basename(module.obj_file_name),
-                    .source_location = pdb.getLineNumberInfo(module, addr) catch null,
-                });
+                // If there's room for another symbol, add the actual proc
+                if (resolve_inline_callers or symbols.items.len == 0) {
+                    try symbols.append(gpa, .{
+                        .name = if (maybe_proc) |proc| pdb.getSymbolName(proc) else null,
+                        .compile_unit_name = compile_unit_name,
+                        .source_location = pdb.getLineNumberInfo(module, addr) catch null,
+                    });
+                }
 
                 return symbols.toOwnedSlice(gpa);
             }
@@ -341,7 +352,7 @@ const Module = struct {
             dwarf: {
                 const dwarf = &(di.dwarf orelse break :dwarf);
                 const addr = vaddr + di.coff_image_base;
-                return dwarf.getSymbols(gpa, native_endian, addr);
+                return dwarf.getSymbols(gpa, native_endian, addr, resolve_inline_callers);
             }
 
             return error.MissingDebugInfo;

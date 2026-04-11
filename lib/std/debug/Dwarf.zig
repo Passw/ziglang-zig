@@ -1545,17 +1545,22 @@ fn getStringGeneric(opt_str: ?[]const u8, offset: u64) ![:0]const u8 {
     return str[casted_offset..last :0];
 }
 
-pub fn getSymbols(di: *Dwarf, gpa: Allocator, endian: Endian, address: u64) std.debug.SelfInfoError![]const std.debug.Symbol {
-    const symbol = try gpa.create(std.debug.Symbol);
-    errdefer gpa.destroy(symbol);
+pub fn getSymbols(di: *Dwarf, gpa: Allocator, endian: Endian, address: u64, resolve_inline_callers: bool) std.debug.SelfInfoError![]std.debug.Symbol {
+    _ = resolve_inline_callers;
+
+    var symbols: std.ArrayList(std.debug.Symbol) = try .initCapacity(gpa, 1);
+    errdefer {
+        for (symbols.items) |*symbol| symbol.deinit(gpa);
+        symbols.deinit(gpa);
+    }
     const compile_unit = di.findCompileUnit(endian, address) catch |err| switch (err) {
         error.EndOfStream, error.Overflow => {
-            symbol.* = .unknown;
-            return symbol[0..1];
+            symbols.appendAssumeCapacity(.unknown);
+            return symbols.toOwnedSlice(gpa);
         },
         else => |e| return e,
     };
-    symbol.* = .{
+    symbols.appendAssumeCapacity(.{
         .name = di.getSymbolName(address),
         .compile_unit_name = compile_unit.die.getAttrString(di, endian, std.dwarf.AT.name, di.section(.debug_str), compile_unit) catch |err| switch (err) {
             error.MissingDebugInfo, error.InvalidDebugInfo => null,
@@ -1569,8 +1574,8 @@ pub fn getSymbols(di: *Dwarf, gpa: Allocator, endian: Endian, address: u64) std.
             => return error.InvalidDebugInfo,
             else => |e| return e,
         },
-    };
-    return symbol[0..1];
+    });
+    return symbols.toOwnedSlice(gpa);
 }
 
 /// DWARF5 7.4: "In the 32-bit DWARF format, all values that represent lengths of DWARF sections and

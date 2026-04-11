@@ -36,15 +36,20 @@ pub const SymbolIterator = struct {
     }
 };
 
-pub fn getSymbols(si: *SelfInfo, io: Io, address: usize) Error![]const std.debug.Symbol {
+pub fn getSymbols(si: *SelfInfo, io: Io, address: usize, resolve_inline_callers: bool) Error![]std.debug.Symbol {
+    _ = resolve_inline_callers;
+
     const gpa = std.debug.getDebugInfoAllocator();
     const module = try si.findModule(gpa, io, address);
     defer si.mutex.unlock(io);
 
     const file = try module.getFile(gpa, io);
 
-    const symbol = try gpa.create(std.debug.Symbol);
-    errdefer gpa.destroy(symbol);
+    var symbols: std.ArrayList(std.debug.Symbol) = try .initCapacity(gpa, 1);
+    errdefer {
+        for (symbols.items) |*symbol| symbol.deinit(gpa);
+        symbols.deinit(gpa);
+    }
 
     // This is not necessarily the same as the vmaddr_slide that dyld would report. This is
     // because the segments in the file on disk might differ from the ones in memory. Normally
@@ -60,25 +65,25 @@ pub fn getSymbols(si: *SelfInfo, io: Io, address: usize) Error![]const std.debug
 
     const ofile_dwarf, const ofile_vaddr = file.getDwarfForAddress(gpa, io, vaddr) catch {
         // Return at least the symbol name if available.
-        symbol.* = .{
+        symbols.appendAssumeCapacity(.{
             .name = try file.lookupSymbolName(vaddr),
             .compile_unit_name = null,
             .source_location = null,
-        };
-        return symbol[0..1];
+        });
+        return symbols.toOwnedSlice(gpa);
     };
 
     const compile_unit = ofile_dwarf.findCompileUnit(native_endian, ofile_vaddr) catch {
         // Return at least the symbol name if available.
-        symbol.* = .{
+        symbols.appendAssumeCapacity(.{
             .name = try file.lookupSymbolName(vaddr),
             .compile_unit_name = null,
             .source_location = null,
-        };
-        return symbol[0..1];
+        });
+        return symbols.toOwnedSlice(gpa);
     };
 
-    symbol.* = .{
+    symbols.appendAssumeCapacity(.{
         .name = ofile_dwarf.getSymbolName(ofile_vaddr) orelse
             try file.lookupSymbolName(vaddr),
         .compile_unit_name = compile_unit.die.getAttrString(
@@ -96,18 +101,8 @@ pub fn getSymbols(si: *SelfInfo, io: Io, address: usize) Error![]const std.debug
             compile_unit,
             ofile_vaddr,
         ) catch null,
-    };
-    return symbol[0..1];
-}
-pub fn freeSymbols(si: *SelfInfo, symbols: []const std.debug.Symbol) void {
-    _ = si;
-    const gpa = std.debug.getDebugInfoAllocator();
-    for (symbols) |symbol| {
-        if (symbol.source_location) |source_location| {
-            gpa.free(source_location.file_name);
-        }
-    }
-    gpa.free(symbols);
+    });
+    return symbols.toOwnedSlice(gpa);
 }
 pub fn getModuleName(si: *SelfInfo, io: Io, address: usize) Error![]const u8 {
     _ = si;

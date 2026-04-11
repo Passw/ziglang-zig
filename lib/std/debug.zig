@@ -38,12 +38,8 @@ pub const cpu_context = @import("debug/cpu_context.zig");
 /// pub const init: SelfInfo;
 /// pub fn deinit(si: *SelfInfo, io: Io) void;
 ///
-/// /// Returns the the symbols and source locations of the instruction at `address`. Often this
-/// /// will return a single result, but in the case of inlines it may return multiple. When
-/// /// multiple results are returned, they are sorted from innermost to outermost.
-/// pub fn getSymbols(si: *SelfInfo, io: Io, address: usize) SelfInfoError![]const Symbol;
-/// /// Frees symbols returned from `getSymbols`.
-/// pub fn freeSymbols(si: *SelfInfo, symbols: []const Symbol) void;
+/// /// Returns the the symbols and source locations of the instruction at `address`.
+/// pub fn getSymbols(si: *SelfInfo, io: Io, address: usize, include_inline_callers: bool) SelfInfoError![]Symbol;
 /// /// Returns a name for the "module" (e.g. shared library or executable image) containing `address`.
 /// pub fn getModuleName(si: *SelfInfo, io: Io, address: usize) SelfInfoError![]const u8;
 /// pub fn getModuleSlide(si: *SelfInfo, io: Io, address: usize) SelfInfoError!usize;
@@ -233,6 +229,11 @@ pub const Symbol = struct {
         .compile_unit_name = null,
         .source_location = null,
     };
+
+    pub fn deinit(self: *Symbol, gpa: Allocator) void {
+        if (self.source_location) |sl| gpa.free(sl.file_name);
+        self.* = undefined;
+    }
 };
 
 /// Deprecated because it returns the optimization mode of the standard
@@ -1192,7 +1193,8 @@ fn printSourceAtAddress(
     t: Io.Terminal,
     options: PrintSourceAddressOptions,
 ) Writer.Error!void {
-    const symbols: []const Symbol = debug_info.getSymbols(io, options.address) catch |err| {
+    const gpa = getDebugInfoAllocator();
+    const symbols: []Symbol = debug_info.getSymbols(io, options.address, options.resolve_inline_callers) catch |err| {
         t.setColor(.dim) catch {};
         defer t.setColor(.reset) catch {};
         switch (err) {
@@ -1211,7 +1213,10 @@ fn printSourceAtAddress(
         }
         return printLineInfo(io, t, debug_info, null, options.address, null, null);
     };
-    defer debug_info.freeSymbols(symbols);
+    defer {
+        for (symbols) |*symbol| symbol.deinit(gpa);
+        gpa.free(symbols);
+    }
     for (symbols) |symbol| {
         try printLineInfo(
             io,
@@ -1222,7 +1227,6 @@ fn printSourceAtAddress(
             symbol.name,
             symbol.compile_unit_name,
         );
-        if (!options.resolve_inline_callers) break;
     }
 }
 fn printLineInfo(
