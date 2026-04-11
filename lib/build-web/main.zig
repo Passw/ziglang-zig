@@ -40,7 +40,7 @@ pub const std_options: std.Options = .{
     .logFn = logFn,
 };
 
-pub fn panic(msg: []const u8, st: ?*std.debug.StackTrace, addr: ?usize) noreturn {
+pub fn panic(msg: []const u8, st: ?*std.builtin.StackTrace, addr: ?usize) noreturn {
     _ = st;
     _ = addr;
     log.err("panic: {s}", .{msg});

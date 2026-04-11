@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub fn panic(message: []const u8, _: ?*std.debug.StackTrace, _: ?usize) noreturn {
+pub fn panic(message: []const u8, _: ?*std.builtin.StackTrace, _: ?usize) noreturn {
     if (std.mem.eql(u8, message, "invalid enum value")) {
         std.process.exit(0);
     }

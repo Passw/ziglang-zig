@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub fn panic(message: []const u8, stack_trace: ?*std.debug.StackTrace, ra: ?usize) noreturn {
+pub fn panic(message: []const u8, stack_trace: ?*std.builtin.StackTrace, ra: ?usize) noreturn {
     _ = stack_trace;
     _ = ra;
     if (std.mem.eql(u8, message, "attempt to use null value")) {

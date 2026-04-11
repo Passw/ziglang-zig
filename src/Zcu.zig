@@ -434,7 +434,7 @@ pub const BuiltinDecl = enum {
     AddressSpace,
     CallingConvention,
     returnError,
-    ErrorReturnTrace,
+    StackTrace,
     SourceLocation,
     CallModifier,
     AtomicOrder,
@@ -512,7 +512,7 @@ pub const BuiltinDecl = enum {
         return switch (decl) {
             .returnError => .func,
 
-            .ErrorReturnTrace,
+            .StackTrace,
             .CallingConvention,
             .SourceLocation,
             .Signedness,

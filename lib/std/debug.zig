@@ -816,7 +816,7 @@ pub const FormatStackTrace = struct {
 };
 
 /// Write a previously captured error return trace to `writer`, annotated with source locations.
-pub fn writeErrorReturnTrace(et: *const std.builtin.ErrorReturnTrace, t: Io.Terminal) Writer.Error!void {
+pub fn writeErrorReturnTrace(et: *const std.builtin.StackTrace, t: Io.Terminal) Writer.Error!void {
     // We take the slice by value, preventing the length from being mutated if an error occurs while
     // writing the stack trace.
     const len = @min(et.instruction_addresses.len, et.index);
@@ -885,7 +885,7 @@ pub fn dumpStackTrace(st: *const StackTrace) void {
 }
 
 /// A thin wrapper around `writeErrorReturnTrace` which writes to stderr and ignores write errors.
-pub fn dumpErrorReturnTrace(et: *const std.builtin.ErrorReturnTrace) void {
+pub fn dumpErrorReturnTrace(et: *const std.builtin.StackTrace) void {
     const stderr = lockStderr(&.{}).terminal();
     defer unlockStderr();
     writeErrorReturnTrace(et, stderr) catch |err| switch (err) {

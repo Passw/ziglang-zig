@@ -13,7 +13,7 @@ pub fn main() void {
     std.process.exit(1);
 }
 
-pub fn panic(message: []const u8, _: ?*std.debug.StackTrace, _: ?usize) noreturn {
+pub fn panic(message: []const u8, _: ?*std.builtin.StackTrace, _: ?usize) noreturn {
     if (std.mem.eql(u8, message, "slice length '1' does not divide exactly into destination elements")) {
         std.process.exit(0);
     }

@@ -8,7 +8,7 @@ pub const assembly = @import("builtin/assembly.zig");
 
 /// This data structure is used by the Zig language code generation and
 /// therefore must be kept in sync with the compiler implementation.
-pub const ErrorReturnTrace = struct {
+pub const StackTrace = struct {
     index: usize,
     instruction_addresses: []usize,
 };

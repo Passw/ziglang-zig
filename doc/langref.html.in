@@ -4900,7 +4900,7 @@ fn cmpxchgWeakButNotAtomic(comptime T: type, ptr: *T, expected_value: T, new_val
       {#header_close#}
 
       {#header_open|@errorReturnTrace#}
-      <pre>{#syntax#}@errorReturnTrace() ?*builtin.ErrorReturnTrace{#endsyntax#}</pre>
+      <pre>{#syntax#}@errorReturnTrace() ?*builtin.StackTrace{#endsyntax#}</pre>
       <p>
       If the binary is built with error return tracing, and this function is invoked in a
       function that calls a function with an error or error union return type, returns a
