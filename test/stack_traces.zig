@@ -238,9 +238,8 @@ pub fn addCases(cases: *@import("tests.zig").StackTracesContext, os: std.Target.
         .unwind = .any,
         .expect_panic = true,
         .expect = switch (os) {
-            // We use the information present in PDBs to resolve inlines when dumping stack traces
-            // on Windows. Column numbers are missing as LLVM doesn't emit column info in the PDBs
-            // for inline functions.
+            // LLVM doesn't emit column info in the binary annotations for inlinee callees in PDBs,
+            // so the first location has only a row.
             .windows =>
             \\panic: oh no
             \\source.zig:5: [address] in foo
@@ -251,7 +250,8 @@ pub fn addCases(cases: *@import("tests.zig").StackTracesContext, os: std.Target.
             \\       ^
             \\
             ,
-            // We don't yet resolve inlines on other platforms.
+            // On all other platforms, we resolve the innermost inline callee but we don't yet
+            // resolve the inline callers.
             else =>
             \\panic: oh no
             \\source.zig:5:5: [address] in foo
@@ -294,9 +294,8 @@ pub fn addCases(cases: *@import("tests.zig").StackTracesContext, os: std.Target.
         ,
         .unwind = .any,
         .expect_panic = true,
+        // This switch serves a similar purpose as in "inline panic".
         .expect = switch (os) {
-            // Similarly to "inline panic", we can resolve inlines from PDBs but LLVM doesn't emit
-            // column info for them.
             .windows =>
             \\panic: oh no
             \\source.zig:11: [address] in baz
@@ -313,7 +312,6 @@ pub fn addCases(cases: *@import("tests.zig").StackTracesContext, os: std.Target.
             \\       ^
             \\
             ,
-            // Similarly to "inline panic", we don't yet resolve inlines on other platforms.
             else =>
             \\panic: oh no
             \\source.zig:11:5: [address] in baz
