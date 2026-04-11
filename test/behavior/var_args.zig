@@ -163,7 +163,7 @@ test "coerce reference to var arg" {
         // https://github.com/ziglang/zig/issues/14096
         return error.SkipZigTest;
     }
-    if (builtin.cpu.arch == .x86_64 and builtin.os.tag == .windows and builtin.zig_backend != .stage2_x86_64) return error.SkipZigTest; // TODO
+    if (builtin.cpu.arch == .x86_64 and builtin.os.tag == .windows and builtin.zig_backend == .stage2_llvm) return error.SkipZigTest; // TODO
     if (builtin.cpu.arch == .s390x and builtin.zig_backend == .stage2_llvm) return error.SkipZigTest; // https://github.com/ziglang/zig/issues/21350
 
     const S = struct {
@@ -195,7 +195,7 @@ test "variadic functions" {
         // https://github.com/ziglang/zig/issues/14096
         return error.SkipZigTest;
     }
-    if (builtin.cpu.arch == .x86_64 and builtin.os.tag == .windows and builtin.zig_backend != .stage2_x86_64) return error.SkipZigTest; // TODO
+    if (builtin.cpu.arch == .x86_64 and builtin.os.tag == .windows and builtin.zig_backend == .stage2_llvm) return error.SkipZigTest; // TODO
     if (builtin.cpu.arch == .s390x and builtin.zig_backend == .stage2_llvm) return error.SkipZigTest; // https://github.com/ziglang/zig/issues/21350
     if (builtin.cpu.arch.isSPARC() and builtin.zig_backend == .stage2_llvm) return error.SkipZigTest; // https://github.com/ziglang/zig/issues/23718
     if (builtin.cpu.arch.isRISCV() and builtin.zig_backend == .stage2_llvm) return error.SkipZigTest; // https://github.com/ziglang/zig/issues/25064
@@ -248,7 +248,7 @@ test "copy VaList" {
         // https://github.com/ziglang/zig/issues/14096
         return error.SkipZigTest;
     }
-    if (builtin.cpu.arch == .x86_64 and builtin.os.tag == .windows and builtin.zig_backend != .stage2_x86_64) return error.SkipZigTest; // TODO
+    if (builtin.cpu.arch == .x86_64 and builtin.os.tag == .windows and builtin.zig_backend == .stage2_llvm) return error.SkipZigTest; // TODO
     if (builtin.cpu.arch == .s390x and builtin.zig_backend == .stage2_llvm) return error.SkipZigTest; // https://github.com/ziglang/zig/issues/21350
     if (builtin.cpu.arch.isSPARC() and builtin.zig_backend == .stage2_llvm) return error.SkipZigTest; // https://github.com/ziglang/zig/issues/23718
     if (builtin.cpu.arch.isRISCV() and builtin.zig_backend == .stage2_llvm) return error.SkipZigTest; // https://github.com/ziglang/zig/issues/25064
@@ -283,7 +283,7 @@ test "unused VaList arg" {
         // https://github.com/ziglang/zig/issues/14096
         return error.SkipZigTest;
     }
-    if (builtin.cpu.arch == .x86_64 and builtin.os.tag == .windows and builtin.zig_backend != .stage2_x86_64) {
+    if (builtin.cpu.arch == .x86_64 and builtin.os.tag == .windows and builtin.zig_backend == .stage2_llvm) {
         // https://github.com/ziglang/zig/issues/16961
         return error.SkipZigTest; // TODO
     }
