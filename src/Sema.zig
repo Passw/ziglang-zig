@@ -5330,6 +5330,7 @@ fn zirCImport(sema: *Sema, parent_block: *Block, inst: Zir.Inst.Index) CompileEr
             .prev_zir = null,
             .zoir_invalidated = false,
         };
+        try zcu.alive_files.putNoClobber(zcu.gpa, c_import_file_index, undefined);
         break :file c_import_file_index;
     };
     pt.updateFile(new_file_index, zcu.fileByIndex(new_file_index)) catch |err|
