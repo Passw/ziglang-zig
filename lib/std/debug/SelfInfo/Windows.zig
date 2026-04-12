@@ -286,43 +286,48 @@ const Module = struct {
                     var last_inlinee: ?u32 = null;
                     var iter = pdb.getInlinees(module, proc);
                     while (iter.next(module)) |inline_site| {
-                        // If our address points into this site, get the source location it
-                        // points at
-                        const inlinee_src_line = pdb.getInlineeSourceLine(
-                            module,
-                            inline_site.inlinee,
-                        ) orelse continue;
-                        const maybe_loc = pdb.getInlineSiteSourceLocation(
-                            module,
-                            inline_site,
-                            inlinee_src_line.info,
-                            offset_in_func,
-                        ) catch continue;
-                        const loc = maybe_loc orelse continue;
-
                         // Filter out duplicate inline sites. Tools like llvm-addr2line output
                         // duplicate sites in the same cases as us if we elide this check,
-                        // implying that they exist in the underlying data and are not
-                        // indicative of a parser bug. No useful information is lost here since an
-                        // inline site can't actually reference itself.
+                        // implying that they exist in the underlying data and are not indicative
+                        // of a parser bug. No useful information is lost here since an inline site
+                        // can't actually reference itself.
                         if (inline_site.inlinee == last_inlinee) continue;
-                        last_inlinee = inline_site.inlinee;
 
-                        // If we're appending this symbol, resolve the name. If we're replacing the
-                        // last symbol, clear the previous symbols and wait to resolve the name
-                        // until we've reached the last symbol to avoid doing work and then
-                        // throwing it out.
-                        const name = b: {
-                            if (resolve_inline_callers) break :b pdb.findInlineeName(inline_site.inlinee);
-                            symbols.items.len = 0;
-                            break :b null;
-                        };
+                        // If our address points into this site, get the source location(s) it
+                        // points at
+                        for (pdb.getInlineeSourceLines(
+                            module,
+                            inline_site.inlinee,
+                        )) |inlinee_src_line| {
+                            const maybe_loc = pdb.getInlineSiteSourceLocation(
+                                module,
+                                inline_site,
+                                inlinee_src_line.info,
+                                offset_in_func,
+                            ) catch continue;
+                            const loc = maybe_loc orelse continue;
 
-                        try symbols.append(gpa, .{
-                            .name = name,
-                            .compile_unit_name = compile_unit_name,
-                            .source_location = loc,
-                        });
+                            // If we aren't trying to resolve inline callers, and we've matched a
+                            // new inline site, we want to overwrite the previous results.
+                            if (!resolve_inline_callers and inline_site.inlinee != last_inlinee) {
+                                symbols.items.len = 0;
+                            }
+
+                            // Only resolve the name if we're resolving inline callers, otherwise
+                            // wait until we're done to avoid duplicated work.
+                            const name = if (resolve_inline_callers)
+                                pdb.findInlineeName(inline_site.inlinee)
+                            else
+                                null;
+
+                            try symbols.append(gpa, .{
+                                .name = name,
+                                .compile_unit_name = compile_unit_name,
+                                .source_location = loc,
+                            });
+
+                            last_inlinee = inline_site.inlinee;
+                        }
                     }
 
                     if (resolve_inline_callers) {
@@ -332,8 +337,10 @@ const Module = struct {
                         // complexity.
                         std.mem.reverse(std.debug.Symbol, symbols.items);
                     } else if (last_inlinee) |inlinee| {
-                        // If we haven't resolved the name yet, resolve it now
-                        symbols.items[symbols.items.len - 1].name = pdb.findInlineeName(inlinee);
+                        // If we aren't resolving inline callers, then all results will have the
+                        // same inline site, and we resolve its name once at the end.
+                        const name = pdb.findInlineeName(inlinee);
+                        for (symbols.items) |*symbol| symbol.name = name;
                     }
                 }
 

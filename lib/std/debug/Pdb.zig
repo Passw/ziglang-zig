@@ -26,6 +26,10 @@ pub const Module = struct {
     symbols: []u8,
     subsect_info: []u8,
     checksum_offset: ?usize,
+    /// The inlinee source lines, sorted by inlinee. This saves us from repeatedly doing linear
+    /// searches over all inlinees. We prefer binary search over a hashmap as LLVM somtimes outputs
+    /// multiple entries for a single inlinee ID, see `getInlineeSourceLines` for more info.
+    inlinee_source_lines: []InlineeSourceLine,
 
     pub fn deinit(self: *Module, allocator: Allocator) void {
         allocator.free(self.module_name);
@@ -33,6 +37,7 @@ pub const Module = struct {
         if (self.populated) {
             allocator.free(self.symbols);
             allocator.free(self.subsect_info);
+            allocator.free(self.inlinee_source_lines);
         }
     }
 };
@@ -117,6 +122,7 @@ pub fn parseDbiStream(self: *Pdb) !void {
             .symbols = undefined,
             .subsect_info = undefined,
             .checksum_offset = null,
+            .inlinee_source_lines = undefined,
         });
 
         mod_info_offset += this_record_len;
@@ -657,40 +663,58 @@ pub fn getSymbolName(self: *Pdb, proc_sym: *align(1) const pdb.ProcSym) []const 
 pub const InlineeSourceLine = struct {
    signature: pdb.InlineeSourceLineSignature,
    info: *align(1) const pdb.InlineeSourceLine, 
+
+   fn lessThan(_: void, lhs: InlineeSourceLine, rhs: InlineeSourceLine) bool {
+       return lhs.info.inlinee < rhs.info.inlinee;
+   }
+
+   fn compare(inlinee: u32, self: InlineeSourceLine) std.math.Order {
+       return std.math.order(inlinee, self.info.inlinee);
+   }
 };
 
-pub fn getInlineeSourceLine(
+/// Returns all `InlineeSourceLine`s for a given module with the given inlinee. Ideally there would
+/// only be one entry per inlinee, but LLVM appears to assign all functions that share a name the
+/// same inlinee ID. This appears to be a bug, so the best the caller can do right now is print all
+/// the results.
+pub fn getInlineeSourceLines(
     self: *Pdb,
     mod: *Module,
     inlinee: u32,
-) ?InlineeSourceLine {
+) []const InlineeSourceLine {
     _ = self;
-    var subsects: Io.Reader = .fixed(mod.subsect_info);
-    while (subsects.takeStructPointer(pdb.DebugSubsectionHeader) catch null) |subsect_hdr| {
-        var subsect: Io.Reader = .fixed(subsects.take(subsect_hdr.length) catch return null);
-        if (subsect_hdr.kind == .inlinee_lines) {
-            const signature = subsect.takeEnum(pdb.InlineeSourceLineSignature, .little) catch return null;
-            const has_extra_files = switch (signature) {
-                .normal => false,
-                .ex => true,
-                else => continue,
-            };
 
-            while (subsect.takeStructPointer(pdb.InlineeSourceLine) catch null) |inlinee_src_line| {
-                if (has_extra_files) {
-                    const file_count = subsect.takeInt(u32, .little) catch return null;
-                    const file_bytes = std.math.mul(usize, file_count, @sizeOf(u32)) catch return null;
-                    subsect.discardAll(file_bytes) catch return null;
-                }
+    // Binary search to an arbitrary match, if there are other matches they will be adjacent
+    const any = std.sort.binarySearch(
+        InlineeSourceLine,
+        mod.inlinee_source_lines,
+        inlinee,
+        InlineeSourceLine.compare,
+    ) orelse return &.{};
 
-                if (inlinee_src_line.inlinee == inlinee) return .{
-                    .signature = signature,
-                    .info = inlinee_src_line,
-                };
-            }
+    // Linearly scan to the first match
+    const begin = b: {
+        var begin = any; 
+        while (begin > 0) {
+            const prev = begin - 1;
+            if (mod.inlinee_source_lines[prev].info.inlinee != inlinee) break;
+            begin = prev;
         }
-    }
-    return null;
+        break :b begin;
+    };
+
+    // Linearly scan to the last match
+    const end = b: {
+        var end = any + 1;
+        while (
+            end < mod.inlinee_source_lines.len and
+            mod.inlinee_source_lines[end].info.inlinee == inlinee
+        ) : (end += 1) {}
+        break :b end;
+    };
+
+    // Return a slice of all the matches
+    return mod.inlinee_source_lines[begin..end];
 }
 
 pub fn getLineNumberInfo(self: *Pdb, module: *Module, address: u64) !std.debug.SourceLocation {
@@ -810,7 +834,45 @@ pub fn getModule(self: *Pdb, index: usize) !?*Module {
     const gpa = self.allocator;
 
     mod.symbols = try reader.readAlloc(gpa, mod.mod_info.sym_byte_size - 4);
+    errdefer gpa.free(mod.symbols);
     mod.subsect_info = try reader.readAlloc(gpa, mod.mod_info.c13_byte_size);
+    errdefer gpa.free(mod.subsect_info);
+    mod.inlinee_source_lines = b: {
+        var inlinee_source_lines: std.ArrayList(InlineeSourceLine) = .empty;
+        defer inlinee_source_lines.deinit(gpa);
+        var subsects: Io.Reader = .fixed(mod.subsect_info);
+        while (subsects.takeStructPointer(pdb.DebugSubsectionHeader) catch null) |subsect_hdr| {
+            var subsect: Io.Reader = .fixed(subsects.take(subsect_hdr.length) catch return null);
+            if (subsect_hdr.kind == .inlinee_lines) {
+                const inlinee_source_line_signature = subsect.takeEnum(pdb.InlineeSourceLineSignature, .little)
+                    catch return error.InvalidDebugInfo;
+                const has_extra_files = switch (inlinee_source_line_signature) {
+                    .normal => false,
+                    .ex => true,
+                    else => continue,
+                };
+                while (subsect.takeStructPointer(pdb.InlineeSourceLine) catch null) |info| {
+                    if (has_extra_files) {
+                        const file_count = subsect.takeInt(u32, .little) catch
+                            return error.InvalidDebugInfo;
+                        const file_bytes = std.math.mul(usize, file_count, @sizeOf(u32))
+                            catch return error.InvalidDebugInfo;
+                        subsect.discardAll(file_bytes) catch
+                            return error.InvalidDebugInfo;
+                    }
+
+                    try inlinee_source_lines.append(gpa, .{
+                        .signature = inlinee_source_line_signature,
+                        .info = info,
+                    });
+                }
+            }
+        }
+        
+        std.mem.sort(InlineeSourceLine, inlinee_source_lines.items, {}, InlineeSourceLine.lessThan);
+        break :b try inlinee_source_lines.toOwnedSlice(gpa);
+    };
+    errdefer gpa.free(mod.inlinee_source_lines);
 
     var sect_offset: usize = 0;
     var skip_len: usize = undefined;
