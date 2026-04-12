@@ -606,8 +606,6 @@ fn waitForOtherThreadToFinishPanicking() void {
     }
 }
 
-/// This data structure is used by the Zig language code generation and
-/// therefore must be kept in sync with the compiler implementation.
 pub const StackTrace = struct {
     /// Each element is the "return address" of a function call, meaning the instruction address
     /// which control flow will return to when the function returns.
