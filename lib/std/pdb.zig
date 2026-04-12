@@ -616,11 +616,7 @@ pub const InlineSiteSym2 = extern struct {
     invocations: u32,
 };
 
-pub const InlineeSourceLineSignature = enum(u32) {
-    normal = 0,
-    ex = 1,
-    _
-};
+pub const InlineeSourceLineSignature = enum(u32) { normal = 0, ex = 1, _ };
 
 pub const InlineeSourceLine = extern struct {
     inlinee: u32,
@@ -651,4 +647,3 @@ pub const BinaryAnnotationOpcode = enum(u8) {
     change_code_length_and_code_offset = 12,
     change_column_end = 13,
 };
-

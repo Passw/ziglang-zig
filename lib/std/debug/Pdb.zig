@@ -285,7 +285,7 @@ pub const InlineSiteSymIterator = struct {
                 .inlinesite,
                 .inlinesite2,
                 => return @ptrCast(inline_prefix),
-                else => {}
+                else => {},
             }
         }
 
@@ -332,9 +332,9 @@ pub const BinaryAnnotation = union(enum) {
                     .file_id = self.file_id,
                     .code_offset = self.code_offset,
                     .code_length = b: {
-                       if (self.code_length) |l| break :b l; 
-                       const end = next_code_offset orelse return null;
-                       break :b end - self.code_offset;
+                        if (self.code_length) |l| break :b l;
+                        const end = next_code_offset orelse return null;
+                        break :b end - self.code_offset;
                     },
                 };
             }
@@ -345,7 +345,7 @@ pub const BinaryAnnotation = union(enum) {
                 .annotations = annotations,
                 .curr = .{
                     .line_offset = 0,
-                    .file_id  = null,
+                    .file_id = null,
                     .code_offset = 0,
                     .code_length = null,
                 },
@@ -395,22 +395,22 @@ pub const BinaryAnnotation = union(enum) {
                     },
 
                     // Not emitted by LLVM at the time of writing, and we don't want to add support
-                    // without a test csae. Safe to ignore since we don't use this info right now.
+                    // without a test case. Safe to ignore since we don't use this info right now.
                     .change_line_end_delta,
                     .change_column_start,
                     .change_column_end_delta,
                     .change_column_end,
-                     => {},
+                    => {},
 
-                     // Not emitted by LLVM at the time of writing. Various sources conflict on how
-                     // these opcodes should be interpreted, so we make no attempt to handle them.
+                    // Not emitted by LLVM at the time of writing. Various sources conflict on how
+                    // these opcodes should be interpreted, so we make no attempt to handle them.
                     .code_offset,
                     .change_code_offset_base,
                     .change_range_kind,
                     => {
-                       self.annotations = .empty; 
-                       self.prev = null;
-                       return null;
+                        self.annotations = .empty;
+                        self.prev = null;
+                        return null;
                     },
                 }
 
@@ -457,8 +457,8 @@ pub const BinaryAnnotation = union(enum) {
         switch (op) {
             // Microsoft's docs say that invalid is used as padding, though it is left ambiguous
             // whether padding is allowed internally or only after all instructions are complete.
-            // Empircally, the latter appears to be the case, at lest with the output from LLVM that
-            // I've tested.
+            // Empirically, the latter appears to be the case, at least with the output from LLVM
+            // that I've tested.
             .invalid => return error.EndOfStream,
             .code_offset => return .{
                 .code_offset = try expect(takePackedU32(reader)),
@@ -547,7 +547,7 @@ pub const BinaryAnnotation = union(enum) {
         }
     }
 
-    fn expect(value: anytype) error { ReadFailed }!@typeInfo(@TypeOf(value)).error_union.payload {
+    fn expect(value: anytype) error{ReadFailed}!@typeInfo(@TypeOf(value)).error_union.payload {
         comptime assert(@typeInfo(@TypeOf(value)).error_union.error_set == Io.Reader.Error);
         return value catch error.ReadFailed;
     }
@@ -661,16 +661,16 @@ pub fn getSymbolName(self: *Pdb, proc_sym: *align(1) const pdb.ProcSym) []const 
 }
 
 pub const InlineeSourceLine = struct {
-   signature: pdb.InlineeSourceLineSignature,
-   info: *align(1) const pdb.InlineeSourceLine, 
+    signature: pdb.InlineeSourceLineSignature,
+    info: *align(1) const pdb.InlineeSourceLine,
 
-   fn lessThan(_: void, lhs: InlineeSourceLine, rhs: InlineeSourceLine) bool {
-       return lhs.info.inlinee < rhs.info.inlinee;
-   }
+    fn lessThan(_: void, lhs: InlineeSourceLine, rhs: InlineeSourceLine) bool {
+        return lhs.info.inlinee < rhs.info.inlinee;
+    }
 
-   fn compare(inlinee: u32, self: InlineeSourceLine) std.math.Order {
-       return std.math.order(inlinee, self.info.inlinee);
-   }
+    fn compare(inlinee: u32, self: InlineeSourceLine) std.math.Order {
+        return std.math.order(inlinee, self.info.inlinee);
+    }
 };
 
 /// Returns all `InlineeSourceLine`s for a given module with the given inlinee. Ideally there would
@@ -694,7 +694,7 @@ pub fn getInlineeSourceLines(
 
     // Linearly scan to the first match
     const begin = b: {
-        var begin = any; 
+        var begin = any;
         while (begin > 0) {
             const prev = begin - 1;
             if (mod.inlinee_source_lines[prev].info.inlinee != inlinee) break;
@@ -706,10 +706,9 @@ pub fn getInlineeSourceLines(
     // Linearly scan to the last match
     const end = b: {
         var end = any + 1;
-        while (
-            end < mod.inlinee_source_lines.len and
-            mod.inlinee_source_lines[end].info.inlinee == inlinee
-        ) : (end += 1) {}
+        while (end < mod.inlinee_source_lines.len and
+            mod.inlinee_source_lines[end].info.inlinee == inlinee) : (end += 1)
+        {}
         break :b end;
     };
 
@@ -844,8 +843,7 @@ pub fn getModule(self: *Pdb, index: usize) !?*Module {
         while (subsects.takeStructPointer(pdb.DebugSubsectionHeader) catch null) |subsect_hdr| {
             var subsect: Io.Reader = .fixed(subsects.take(subsect_hdr.length) catch return null);
             if (subsect_hdr.kind == .inlinee_lines) {
-                const inlinee_source_line_signature = subsect.takeEnum(pdb.InlineeSourceLineSignature, .little)
-                    catch return error.InvalidDebugInfo;
+                const inlinee_source_line_signature = subsect.takeEnum(pdb.InlineeSourceLineSignature, .little) catch return error.InvalidDebugInfo;
                 const has_extra_files = switch (inlinee_source_line_signature) {
                     .normal => false,
                     .ex => true,
@@ -855,8 +853,7 @@ pub fn getModule(self: *Pdb, index: usize) !?*Module {
                     if (has_extra_files) {
                         const file_count = subsect.takeInt(u32, .little) catch
                             return error.InvalidDebugInfo;
-                        const file_bytes = std.math.mul(usize, file_count, @sizeOf(u32))
-                            catch return error.InvalidDebugInfo;
+                        const file_bytes = std.math.mul(usize, file_count, @sizeOf(u32)) catch return error.InvalidDebugInfo;
                         subsect.discardAll(file_bytes) catch
                             return error.InvalidDebugInfo;
                     }
@@ -868,7 +865,7 @@ pub fn getModule(self: *Pdb, index: usize) !?*Module {
                 }
             }
         }
-        
+
         std.mem.sort(InlineeSourceLine, inlinee_source_lines.items, {}, InlineeSourceLine.lessThan);
         break :b try inlinee_source_lines.toOwnedSlice(gpa);
     };

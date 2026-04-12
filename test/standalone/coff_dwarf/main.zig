@@ -12,13 +12,13 @@ pub fn main(init: std.process.Init) void {
     var add_addr: usize = undefined;
     _ = add(1, 2, &add_addr);
 
-    const symbols = di.getSymbols(io, add_addr) catch |err| fatal("failed to get symbol: {t}", .{err});
+    const symbols = di.getSymbols(io, add_addr, false) catch |err| fatal("failed to get symbol: {t}", .{err});
     const debug_gpa = std.debug.getDebugInfoAllocator();
     defer for (symbols) |symbol| {
         if (symbol.source_location) |sl| {
             debug_gpa.free(sl.file_name);
         }
-    }
+    };
 
     if (symbols.len != 1) fatal("expected 1 symbol, found {}", .{symbols.len});
     const symbol = symbols[0];

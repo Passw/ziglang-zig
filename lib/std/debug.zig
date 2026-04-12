@@ -622,7 +622,6 @@ pub const StackTrace = struct {
     return_addresses: []usize,
     /// Indicates whether any stack frames were omitted from `return_addresses`.
     skipped: SkippedAddresses,
-
 };
 
 /// Indicates how many addresses were skipped in a trace.

@@ -22,20 +22,6 @@ pub fn deinit(si: *SelfInfo, io: Io) void {
     si.modules.deinit(gpa);
 }
 
-pub const SymbolIterator = struct {
-    curr: ?Error!std.debug.Symbol,
-
-    pub fn deinit(self: *SymbolIterator, _: Io) void {
-        self.* = undefined;
-    }
-
-    pub fn next(self: *SymbolIterator) ?Error!std.debug.Symbol {
-        const result = self.curr;
-        self.curr = null;
-        return result;
-    }
-};
-
 pub fn getSymbols(si: *SelfInfo, io: Io, address: usize, resolve_inline_callers: bool) Error![]std.debug.Symbol {
     _ = resolve_inline_callers;
 

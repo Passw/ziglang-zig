@@ -466,8 +466,7 @@ pub fn addCases(cases: *@import("tests.zig").ErrorTracesContext, os: std.Target.
         \\}
         ,
         .expect_error = "ThisIsSoSad",
-        .expect_trace =
-        switch (os) {
+        .expect_trace = switch (os) {
             // LLVM doesn't emit column info in the binary annotations for inlinee callees in PDBs,
             // so our expected result is slightly different for Windows than on other operating
             // systems.

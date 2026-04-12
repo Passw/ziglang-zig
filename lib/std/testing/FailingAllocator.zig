@@ -138,8 +138,8 @@ pub fn getStackTrace(self: *FailingAllocator) std.debug.StackTrace {
         len += 1;
     }
     return .{
-        .return_addresses = &self.stack_addresses,
-        .index = len,
+        .return_addresses = self.stack_addresses[0..len],
+        .skipped = if (len == self.stack_addresses.len) .unknown else .none,
     };
 }
 
