@@ -1704,7 +1704,7 @@ test "manage resources correctly" {
     const t: Io.Terminal = .{ .writer = &discarding.writer, .mode = .no_color };
     try printSourceAtAddress(io, &di, t, .{
         .address = S.showMyTrace(),
-        .inlines = true,
+        .resolve_inline_callers = true,
     });
 }
 
