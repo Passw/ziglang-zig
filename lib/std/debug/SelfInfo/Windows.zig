@@ -25,13 +25,24 @@ pub fn deinit(si: *SelfInfo, io: Io) void {
     si.modules.deinit(gpa);
 }
 
-pub fn getSymbols(si: *SelfInfo, io: Io, address: usize, resolve_inline_callers: bool) Error![]std.debug.Symbol {
-    const gpa = std.debug.getDebugInfoAllocator();
+pub fn getSymbols(
+    si: *SelfInfo,
+    io: Io,
+    gpa: Allocator, 
+    address: usize,
+    resolve_inline_callers: bool,
+    symbols: *std.ArrayList(std.debug.Symbol),
+) Error!void {
     try si.lock.lockShared(io);
     defer si.lock.unlockShared(io);
     const module = try si.findModule(gpa, address);
     const di = try module.getDebugInfo(gpa, io);
-    return di.getSymbols(gpa, address - @intFromPtr(module.entry.DllBase), resolve_inline_callers);
+    return di.getSymbols(
+        gpa,
+        address - @intFromPtr(module.entry.DllBase),
+        resolve_inline_callers,
+        symbols,
+    );
 }
 
 pub fn getModuleName(si: *SelfInfo, io: Io, address: usize) Error![]const u8 {
@@ -241,7 +252,13 @@ const Module = struct {
             arena.deinit();
         }
 
-        fn getSymbols(di: *DebugInfo, gpa: Allocator, vaddr: usize, resolve_inline_callers: bool) Error![]std.debug.Symbol {
+        fn getSymbols(
+            di: *DebugInfo,
+            gpa: Allocator,
+            vaddr: usize,
+            resolve_inline_callers: bool,
+            symbols: *std.ArrayList(std.debug.Symbol),
+        ) Error!void {
             pdb: {
                 const pdb = &(di.pdb orelse break :pdb);
                 var coff_section: *align(1) const coff.SectionHeader = undefined;
@@ -275,12 +292,7 @@ const Module = struct {
                 const addr = vaddr - coff_section.virtual_address;
                 const maybe_proc = pdb.getProcSym(module, addr);
                 const compile_unit_name = fs.path.basename(module.obj_file_name);
-                var symbols: std.ArrayList(std.debug.Symbol) = try .initCapacity(gpa, 1);
-                errdefer {
-                    for (symbols.items) |*symbol| symbol.deinit(gpa);
-                    symbols.deinit(gpa);
-                }
-
+                const symbols_top = symbols.items.len;
                 if (maybe_proc) |proc| {
                     const offset_in_func = addr - proc.code_offset;
                     var last_inlinee: ?u32 = null;
@@ -308,9 +320,10 @@ const Module = struct {
                             const loc = maybe_loc orelse continue;
 
                             // If we aren't trying to resolve inline callers, and we've matched a
-                            // new inline site, we want to overwrite the previous results.
+                            // new inline site, we want to overwrite the previously appended
+                            // results.
                             if (!resolve_inline_callers and inline_site.inlinee != last_inlinee) {
-                                symbols.items.len = 0;
+                                symbols.items.len = symbols_top;
                             }
 
                             // Only resolve the name if we're resolving inline callers, otherwise
@@ -353,13 +366,13 @@ const Module = struct {
                     });
                 }
 
-                return symbols.toOwnedSlice(gpa);
+                return;
             }
 
             dwarf: {
                 const dwarf = &(di.dwarf orelse break :dwarf);
                 const addr = vaddr + di.coff_image_base;
-                return dwarf.getSymbols(gpa, native_endian, addr, resolve_inline_callers);
+                return dwarf.getSymbols(gpa, native_endian, addr, resolve_inline_callers, symbols);
             }
 
             return error.MissingDebugInfo;

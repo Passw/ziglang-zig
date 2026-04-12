@@ -30,8 +30,14 @@ pub fn deinit(si: *SelfInfo, io: Io) void {
     if (si.unwind_cache) |cache| gpa.free(cache);
 }
 
-pub fn getSymbols(si: *SelfInfo, io: Io, address: usize, resolve_inline_callers: bool) Error![]std.debug.Symbol {
-    const gpa = std.debug.getDebugInfoAllocator();
+pub fn getSymbols(
+    si: *SelfInfo,
+    io: Io,
+    gpa: Allocator,
+    address: usize,
+    resolve_inline_callers: bool,
+    symbols: *std.ArrayList(std.debug.Symbol),
+) Error!void {
     const module = try si.findModule(gpa, io, address, .exclusive);
     defer si.rwlock.unlock(io);
 
@@ -53,20 +59,14 @@ pub fn getSymbols(si: *SelfInfo, io: Io, address: usize, resolve_inline_callers:
             };
             loaded_elf.scanned_dwarf = true;
         }
-        return dwarf.getSymbols(gpa, native_endian, vaddr, resolve_inline_callers);
+        return dwarf.getSymbols(gpa, native_endian, vaddr, resolve_inline_callers, symbols);
     }
     // When DWARF is unavailable, fall back to searching the symtab.
-    var symbols: std.ArrayList(std.debug.Symbol) = try .initCapacity(gpa, 1);
-    errdefer {
-        for (symbols.items) |*symbol| symbol.deinit(gpa);
-        symbols.deinit(gpa);
-    }
-    symbols.appendAssumeCapacity(loaded_elf.file.searchSymtab(gpa, vaddr) catch |err| switch (err) {
+    try symbols.append(gpa, loaded_elf.file.searchSymtab(gpa, vaddr) catch |err| switch (err) {
         error.NoSymtab, error.NoStrtab => return error.MissingDebugInfo,
         error.BadSymtab => return error.InvalidDebugInfo,
         error.OutOfMemory => |e| return e,
     });
-    return symbols.toOwnedSlice(gpa);
 }
 pub fn getModuleName(si: *SelfInfo, io: Io, address: usize) Error![]const u8 {
     const gpa = std.debug.getDebugInfoAllocator();

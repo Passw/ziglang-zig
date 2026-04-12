@@ -38,8 +38,8 @@ pub const cpu_context = @import("debug/cpu_context.zig");
 /// pub const init: SelfInfo;
 /// pub fn deinit(si: *SelfInfo, io: Io) void;
 ///
-/// /// Returns the the symbols and source locations of the instruction at `address`.
-/// pub fn getSymbols(si: *SelfInfo, io: Io, address: usize, include_inline_callers: bool) SelfInfoError![]Symbol;
+/// /// Appends the symbols for the instruction at `address` to `symbols`.
+/// pub fn getSymbols(si: *SelfInfo, io: Io, gpa: Allocator, address: usize, include_inline_callers: bool, symbols: *std.ArrayList(Symbol)) SelfInfoError!void;
 /// /// Returns a name for the "module" (e.g. shared library or executable image) containing `address`.
 /// pub fn getModuleName(si: *SelfInfo, io: Io, address: usize) SelfInfoError![]const u8;
 /// pub fn getModuleSlide(si: *SelfInfo, io: Io, address: usize) SelfInfoError!usize;
@@ -1190,8 +1190,17 @@ fn printSourceAtAddress(
     t: Io.Terminal,
     options: PrintSourceAddressOptions,
 ) Writer.Error!void {
-    const gpa = getDebugInfoAllocator();
-    const symbols: []Symbol = debug_info.getSymbols(io, options.address, options.resolve_inline_callers) catch |err| {
+    // In the common case where there's only one symbol, allocate it on the stack. Reserve enough
+    // space for one item regardless of alignment.
+    var stack_fallback = std.heap.stackFallback(@sizeOf(Symbol) + @alignOf(Symbol) - 1, getDebugInfoAllocator());
+    const sfa = stack_fallback.get();
+    var symbols = std.ArrayList(Symbol).initCapacity(sfa, 1) catch unreachable;
+    defer {
+        for (symbols.items) |*symbol| symbol.deinit(sfa);
+        symbols.deinit(sfa);
+    }
+
+    debug_info.getSymbols(io, sfa, options.address, options.resolve_inline_callers, &symbols) catch |err| {
         t.setColor(.dim) catch {};
         defer t.setColor(.reset) catch {};
         switch (err) {
@@ -1208,13 +1217,13 @@ fn printSourceAtAddress(
                 t.setColor(.reset) catch {};
             },
         }
-        return printLineInfo(io, t, debug_info, null, options.address, null, null);
     };
-    defer {
-        for (symbols) |*symbol| symbol.deinit(gpa);
-        gpa.free(symbols);
-    }
-    for (symbols) |symbol| {
+
+    // If we failed to get any symbols, append the unknown symbol. We initialized with a capacity of
+    // one using a stack fallback allocator so this can't fail.
+    if (symbols.items.len == 0) symbols.appendAssumeCapacity(.unknown);
+
+    for (symbols.items) |symbol| {
         try printLineInfo(
             io,
             t,
