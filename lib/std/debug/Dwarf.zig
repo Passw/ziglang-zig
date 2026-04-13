@@ -1220,6 +1220,7 @@ pub fn populateSrcLocCache(d: *Dwarf, gpa: Allocator, endian: Endian, cu: *Compi
 pub fn getLineNumberInfo(
     d: *Dwarf,
     gpa: Allocator,
+    text_arena: Allocator,
     endian: Endian,
     compile_unit: *CompileUnit,
     target_address: u64,
@@ -1232,7 +1233,7 @@ pub fn getLineNumberInfo(
     const file_entry = &slc.files[file_index];
     if (file_entry.dir_index >= slc.directories.len) return bad();
     const dir_name = slc.directories[file_entry.dir_index].path;
-    const file_name = try std.fs.path.join(gpa, &.{ dir_name, file_entry.path });
+    const file_name = try std.fs.path.join(text_arena, &.{ dir_name, file_entry.path });
     return .{
         .line = entry.line,
         .column = entry.column,
@@ -1547,25 +1548,27 @@ fn getStringGeneric(opt_str: ?[]const u8, offset: u64) ![:0]const u8 {
 
 pub fn getSymbols(
     di: *Dwarf,
-    gpa: Allocator,
+    symbol_allocator: Allocator,
+    text_arena: Allocator,
     endian: Endian,
     address: u64,
     resolve_inline_callers: bool,
     symbols: *std.ArrayList(std.debug.Symbol),
 ) std.debug.SelfInfoError!void {
     _ = resolve_inline_callers;
+    const gpa = std.debug.getDebugInfoAllocator();
 
     const compile_unit = di.findCompileUnit(endian, address) catch |err| switch (err) {
         error.EndOfStream => return error.MissingDebugInfo,
         error.Overflow => return error.InvalidDebugInfo,
         error.ReadFailed, error.InvalidDebugInfo, error.MissingDebugInfo => |e| return e,
     };
-    try symbols.append(gpa, .{
+    try symbols.append(symbol_allocator, .{
         .name = di.getSymbolName(address),
         .compile_unit_name = compile_unit.die.getAttrString(di, endian, std.dwarf.AT.name, di.section(.debug_str), compile_unit) catch |err| switch (err) {
             error.MissingDebugInfo, error.InvalidDebugInfo => null,
         },
-        .source_location = di.getLineNumberInfo(gpa, endian, compile_unit, address) catch |err| switch (err) {
+        .source_location = di.getLineNumberInfo(gpa, text_arena, endian, compile_unit, address) catch |err| switch (err) {
             error.MissingDebugInfo, error.InvalidDebugInfo => null,
             error.ReadFailed,
             error.EndOfStream,

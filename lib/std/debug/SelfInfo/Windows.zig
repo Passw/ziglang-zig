@@ -28,17 +28,20 @@ pub fn deinit(si: *SelfInfo, io: Io) void {
 pub fn getSymbols(
     si: *SelfInfo,
     io: Io,
-    gpa: Allocator, 
+    symbol_allocator: Allocator,
+    text_arena: Allocator,
     address: usize,
     resolve_inline_callers: bool,
     symbols: *std.ArrayList(std.debug.Symbol),
 ) Error!void {
+    const gpa = std.debug.getDebugInfoAllocator();
     try si.lock.lockShared(io);
     defer si.lock.unlockShared(io);
     const module = try si.findModule(gpa, address);
     const di = try module.getDebugInfo(gpa, io);
     return di.getSymbols(
-        gpa,
+        symbol_allocator,
+        text_arena,
         address - @intFromPtr(module.entry.DllBase),
         resolve_inline_callers,
         symbols,
@@ -254,7 +257,8 @@ const Module = struct {
 
         fn getSymbols(
             di: *DebugInfo,
-            gpa: Allocator,
+            symbol_allocator: Allocator,
+            text_arena: Allocator,
             vaddr: usize,
             resolve_inline_callers: bool,
             symbols: *std.ArrayList(std.debug.Symbol),
@@ -312,6 +316,7 @@ const Module = struct {
                             inline_site.inlinee,
                         )) |inlinee_src_line| {
                             const maybe_loc = pdb.getInlineSiteSourceLocation(
+                                text_arena,
                                 module,
                                 inline_site,
                                 inlinee_src_line.info,
@@ -333,7 +338,7 @@ const Module = struct {
                             else
                                 null;
 
-                            try symbols.append(gpa, .{
+                            try symbols.append(symbol_allocator, .{
                                 .name = name,
                                 .compile_unit_name = compile_unit_name,
                                 .source_location = loc,
@@ -359,10 +364,10 @@ const Module = struct {
 
                 // If there's room for another symbol, add the actual proc
                 if (resolve_inline_callers or symbols.items.len == 0) {
-                    try symbols.append(gpa, .{
+                    try symbols.append(symbol_allocator, .{
                         .name = if (maybe_proc) |proc| pdb.getSymbolName(proc) else null,
                         .compile_unit_name = compile_unit_name,
-                        .source_location = pdb.getLineNumberInfo(module, addr) catch null,
+                        .source_location = pdb.getLineNumberInfo(text_arena, module, addr) catch null,
                     });
                 }
 
@@ -372,7 +377,14 @@ const Module = struct {
             dwarf: {
                 const dwarf = &(di.dwarf orelse break :dwarf);
                 const addr = vaddr + di.coff_image_base;
-                return dwarf.getSymbols(gpa, native_endian, addr, resolve_inline_callers, symbols);
+                return dwarf.getSymbols(
+                    symbol_allocator,
+                    text_arena,
+                    native_endian,
+                    addr,
+                    resolve_inline_callers,
+                    symbols,
+                );
             }
 
             return error.MissingDebugInfo;

@@ -25,12 +25,14 @@ pub fn deinit(si: *SelfInfo, io: Io) void {
 pub fn getSymbols(
     si: *SelfInfo,
     io: Io,
-    gpa: Allocator,
+    symbol_allocator: Allocator,
+    text_arena: Allocator,
     address: usize,
     resolve_inline_callers: bool,
     symbols: *std.ArrayList(std.debug.Symbol),
 ) Error!void {
     _ = resolve_inline_callers;
+    const gpa = std.debug.getDebugInfoAllocator();
 
     const module = try si.findModule(gpa, io, address);
     defer si.mutex.unlock(io);
@@ -51,7 +53,7 @@ pub fn getSymbols(
 
     const ofile_dwarf, const ofile_vaddr = file.getDwarfForAddress(gpa, io, vaddr) catch {
         // Return at least the symbol name if available.
-        return symbols.append(gpa, .{
+        return symbols.append(symbol_allocator, .{
             .name = try file.lookupSymbolName(vaddr),
             .compile_unit_name = null,
             .source_location = null,
@@ -60,14 +62,14 @@ pub fn getSymbols(
 
     const compile_unit = ofile_dwarf.findCompileUnit(native_endian, ofile_vaddr) catch {
         // Return at least the symbol name if available.
-        return symbols.append(gpa, .{
+        return symbols.append(symbol_allocator, .{
             .name = try file.lookupSymbolName(vaddr),
             .compile_unit_name = null,
             .source_location = null,
         });
     };
 
-    try symbols.append(gpa, .{
+    try symbols.append(symbol_allocator, .{
         .name = ofile_dwarf.getSymbolName(ofile_vaddr) orelse
             try file.lookupSymbolName(vaddr),
         .compile_unit_name = compile_unit.die.getAttrString(
@@ -81,6 +83,7 @@ pub fn getSymbols(
         },
         .source_location = ofile_dwarf.getLineNumberInfo(
             gpa,
+            text_arena,
             native_endian,
             compile_unit,
             ofile_vaddr,

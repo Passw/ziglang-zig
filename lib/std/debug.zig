@@ -39,7 +39,7 @@ pub const cpu_context = @import("debug/cpu_context.zig");
 /// pub fn deinit(si: *SelfInfo, io: Io) void;
 ///
 /// /// Appends the symbols for the instruction at `address` to `symbols`.
-/// pub fn getSymbols(si: *SelfInfo, io: Io, gpa: Allocator, address: usize, include_inline_callers: bool, symbols: *std.ArrayList(Symbol)) SelfInfoError!void;
+/// pub fn getSymbols(si: *SelfInfo, io: Io, symbol_allocator: Allocator, text_arena: Allocator, address: usize, include_inline_callers: bool, symbols: *std.ArrayList(Symbol)) SelfInfoError!void;
 /// /// Returns a name for the "module" (e.g. shared library or executable image) containing `address`.
 /// pub fn getModuleName(si: *SelfInfo, io: Io, address: usize) SelfInfoError![]const u8;
 /// pub fn getModuleSlide(si: *SelfInfo, io: Io, address: usize) SelfInfoError!usize;
@@ -229,11 +229,6 @@ pub const Symbol = struct {
         .compile_unit_name = null,
         .source_location = null,
     };
-
-    pub fn deinit(self: *Symbol, gpa: Allocator) void {
-        if (self.source_location) |sl| gpa.free(sl.file_name);
-        self.* = undefined;
-    }
 };
 
 /// Deprecated because it returns the optimization mode of the standard
@@ -699,6 +694,10 @@ pub noinline fn captureCurrentStackTrace(options: StackUnwindOptions, addr_buf: 
 /// See `captureCurrentStackTrace` to capture the trace addresses into a buffer instead of printing.
 pub noinline fn writeCurrentStackTrace(options: StackUnwindOptions, t: Io.Terminal) Writer.Error!void {
     const writer = t.writer;
+
+    var text_arena: std.heap.ArenaAllocator = .init(getDebugInfoAllocator());
+    defer text_arena.deinit();
+
     if (!std.options.allow_stack_tracing) {
         t.setColor(.dim) catch {};
         try writer.print("Cannot print stack trace: stack tracing is disabled\n", .{});
@@ -776,7 +775,7 @@ pub noinline fn writeCurrentStackTrace(options: StackUnwindOptions, t: Io.Termin
             }
             // `ret_addr` is the return address, which is *after* the function call.
             // Subtract 1 to get an address *in* the function call for a better source location.
-            try printSourceAtAddress(io, di, t, .{
+            try printSourceAtAddress(io, &text_arena, di, t, .{
                 .address = ret_addr -| StackIterator.ra_call_offset,
                 .resolve_inline_callers = true,
             });
@@ -832,6 +831,9 @@ fn writeTrace(
     t: Io.Terminal,
     resolve_inline_callers: bool,
 ) Writer.Error!void {
+    var text_arena: std.heap.ArenaAllocator = .init(getDebugInfoAllocator());
+    defer text_arena.deinit();
+
     const writer = t.writer;
     if (!std.options.allow_stack_tracing) {
         t.setColor(.dim) catch {};
@@ -853,7 +855,7 @@ fn writeTrace(
     for (addresses) |addr| {
         // `addr` is the return address, which is *after* the function call.
         // Subtract 1 to get an address *in* the function call for a better source location.
-        try printSourceAtAddress(io, di, t, .{
+        try printSourceAtAddress(io, &text_arena, di, t, .{
             .address = addr -| StackIterator.ra_call_offset,
             .resolve_inline_callers = resolve_inline_callers,
         });
@@ -1186,21 +1188,28 @@ const PrintSourceAddressOptions = struct {
 
 fn printSourceAtAddress(
     io: Io,
+    text_arena: *std.heap.ArenaAllocator,
     debug_info: *SelfInfo,
     t: Io.Terminal,
     options: PrintSourceAddressOptions,
 ) Writer.Error!void {
-    // In the common case where there's only one symbol, allocate it on the stack. Reserve enough
-    // space for one item regardless of alignment.
-    var stack_fallback = std.heap.stackFallback(@sizeOf(Symbol) + @alignOf(Symbol) - 1, getDebugInfoAllocator());
-    const sfa = stack_fallback.get();
-    var symbols = std.ArrayList(Symbol).initCapacity(sfa, 1) catch unreachable;
-    defer {
-        for (symbols.items) |*symbol| symbol.deinit(sfa);
-        symbols.deinit(sfa);
-    }
+    defer _ = text_arena.reset(.retain_capacity);
 
-    debug_info.getSymbols(io, sfa, options.address, options.resolve_inline_callers, &symbols) catch |err| {
+    // Initialize the symbol array with space for at least one element, allocating this on the stack
+    // in the common case where only one element is needed
+    var symbol_fallback_allocator = std.heap.stackFallback(@sizeOf(Symbol) + @alignOf(Symbol) - 1, getDebugInfoAllocator());
+    const symbol_allocator = symbol_fallback_allocator.get();
+    var symbols = std.ArrayList(Symbol).initCapacity(symbol_allocator, 1) catch unreachable;
+    defer symbols.deinit(symbol_allocator);
+
+    debug_info.getSymbols(
+        io,
+        symbol_allocator,
+        text_arena.allocator(),
+        options.address,
+        options.resolve_inline_callers,
+        &symbols,
+    ) catch |err| {
         t.setColor(.dim) catch {};
         defer t.setColor(.reset) catch {};
         switch (err) {
@@ -1219,35 +1228,25 @@ fn printSourceAtAddress(
         }
     };
 
-    // If we failed to get any symbols, append the unknown symbol. We initialized with a capacity of
-    // one using a stack fallback allocator so this can't fail.
+    // If we failed to write any symbols, at least write the unknown symbol. Can't fail since we
+    // initialized with a capacity of 1.
     if (symbols.items.len == 0) symbols.appendAssumeCapacity(.unknown);
 
     for (symbols.items) |symbol| {
-        try printLineInfo(
-            io,
-            t,
-            debug_info,
-            symbol.source_location,
-            options.address,
-            symbol.name,
-            symbol.compile_unit_name,
-        );
+        try printLineInfo(io, t, debug_info, options.address, symbol);
     }
 }
 fn printLineInfo(
     io: Io,
     t: Io.Terminal,
     debug_info: *SelfInfo,
-    source_location: ?SourceLocation,
     address: usize,
-    symbol_name: ?[]const u8,
-    compile_unit_name: ?[]const u8,
+    symbol: Symbol,
 ) Writer.Error!void {
     const writer = t.writer;
     t.setColor(.bold) catch {};
 
-    if (source_location) |*sl| {
+    if (symbol.source_location) |*sl| {
         if (sl.column == 0) {
             try writer.print("{s}:{d}", .{ sl.file_name, sl.line });
         } else {
@@ -1262,14 +1261,14 @@ fn printLineInfo(
     t.setColor(.dim) catch {};
     try writer.print("0x{x} in {s} ({s})", .{
         address,
-        symbol_name orelse "???",
-        compile_unit_name orelse debug_info.getModuleName(io, address) catch "???",
+        symbol.name orelse "???",
+        symbol.compile_unit_name orelse debug_info.getModuleName(io, address) catch "???",
     });
     t.setColor(.reset) catch {};
     try writer.writeAll("\n");
 
     // Show the matching source code line if possible
-    if (source_location) |sl| {
+    if (symbol.source_location) |sl| {
         if (printLineFromFile(io, writer, sl)) {
             if (sl.column > 0) {
                 // The caret already takes one char
@@ -1708,7 +1707,9 @@ test "manage resources correctly" {
     var di: SelfInfo = .init;
     defer di.deinit(io);
     const t: Io.Terminal = .{ .writer = &discarding.writer, .mode = .no_color };
-    try printSourceAtAddress(io, &di, t, .{
+    var text_arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer text_arena.deinit();
+    try printSourceAtAddress(io, &text_arena, &di, t, .{
         .address = S.showMyTrace(),
         .resolve_inline_callers = true,
     });

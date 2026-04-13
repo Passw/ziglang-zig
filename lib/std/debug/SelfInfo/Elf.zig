@@ -33,11 +33,13 @@ pub fn deinit(si: *SelfInfo, io: Io) void {
 pub fn getSymbols(
     si: *SelfInfo,
     io: Io,
-    gpa: Allocator,
+    symbol_allocator: Allocator,
+    text_arena: Allocator,
     address: usize,
     resolve_inline_callers: bool,
     symbols: *std.ArrayList(std.debug.Symbol),
 ) Error!void {
+    const gpa = std.debug.getDebugInfoAllocator();
     const module = try si.findModule(gpa, io, address, .exclusive);
     defer si.rwlock.unlock(io);
 
@@ -59,10 +61,17 @@ pub fn getSymbols(
             };
             loaded_elf.scanned_dwarf = true;
         }
-        return dwarf.getSymbols(gpa, native_endian, vaddr, resolve_inline_callers, symbols);
+        return dwarf.getSymbols(
+            symbol_allocator,
+            text_arena,
+            native_endian,
+            vaddr,
+            resolve_inline_callers,
+            symbols,
+        );
     }
     // When DWARF is unavailable, fall back to searching the symtab.
-    try symbols.append(gpa, loaded_elf.file.searchSymtab(gpa, vaddr) catch |err| switch (err) {
+    try symbols.append(symbol_allocator, loaded_elf.file.searchSymtab(gpa, vaddr) catch |err| switch (err) {
         error.NoSymtab, error.NoStrtab => return error.MissingDebugInfo,
         error.BadSymtab => return error.InvalidDebugInfo,
         error.OutOfMemory => |e| return e,

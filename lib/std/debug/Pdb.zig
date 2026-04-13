@@ -617,6 +617,7 @@ pub fn getBinaryAnnotations(self: *Pdb, module: *Module, site: *align(1) const p
 
 pub fn getInlineSiteSourceLocation(
     self: *Pdb,
+    gpa: Allocator,
     mod: *Module,
     site: *align(1) const pdb.InlineSiteSym,
     inlinee_src_line: *align(1) const pdb.InlineeSourceLine,
@@ -627,7 +628,7 @@ pub fn getInlineSiteSourceLocation(
         if (!range.contains(offset_in_func)) continue;
 
         const file_id = range.file_id orelse inlinee_src_line.file_id;
-        const file_name = try self.getFileName(mod, file_id);
+        const file_name = try self.getFileName(gpa, mod, file_id);
         errdefer self.allocator.free(file_name);
 
         return .{
@@ -640,14 +641,14 @@ pub fn getInlineSiteSourceLocation(
     return null;
 }
 
-pub fn getFileName(self: *Pdb, mod: *Module, file_id: u32) ![]const u8 {
+pub fn getFileName(self: *Pdb, gpa: Allocator, mod: *Module, file_id: u32) ![]const u8 {
     const checksum_offset = mod.checksum_offset orelse return error.MissingDebugInfo;
     const subsect_index = checksum_offset + file_id;
     const chksum_hdr: *align(1) pdb.FileChecksumEntryHeader = @ptrCast(&mod.subsect_info[subsect_index]);
     const strtab_offset = @sizeOf(pdb.StringTableHeader) + chksum_hdr.file_name_offset;
     self.string_table.?.seekTo(strtab_offset) catch return error.InvalidDebugInfo;
     const string_reader = &self.string_table.?.interface;
-    var source_file_name: Io.Writer.Allocating = .init(self.allocator);
+    var source_file_name: Io.Writer.Allocating = .init(gpa);
     defer source_file_name.deinit();
     _ = try string_reader.streamDelimiterLimit(&source_file_name.writer, 0, .limited(1024));
     assert(string_reader.buffered()[0] == 0); // TODO change streamDelimiterLimit API
@@ -716,10 +717,9 @@ pub fn getInlineeSourceLines(
     return mod.inlinee_source_lines[begin..end];
 }
 
-pub fn getLineNumberInfo(self: *Pdb, module: *Module, address: u64) !std.debug.SourceLocation {
+pub fn getLineNumberInfo(self: *Pdb, gpa: Allocator, module: *Module, address: u64) !std.debug.SourceLocation {
     std.debug.assert(module.populated);
     const subsect_info = module.subsect_info;
-    const gpa = self.allocator;
 
     var sect_offset: usize = 0;
     var skip_len: usize = undefined;
@@ -769,7 +769,7 @@ pub fn getLineNumberInfo(self: *Pdb, module: *Module, address: u64) !std.debug.S
 
                         // line_i == 0 would mean that no matching pdb.LineNumberEntry was found.
                         if (line_i > 0) {
-                            const file_name = try self.getFileName(module, block_hdr.name_index);
+                            const file_name = try self.getFileName(gpa, module, block_hdr.name_index);
                             errdefer gpa.free(file_name);
 
                             const line_entry_idx = line_i - 1;
