@@ -566,9 +566,11 @@ fn getauxvalImpl(index: usize) callconv(.c) usize {
 // in a even-aligned register pair.
 const require_aligned_register_pair =
     builtin.cpu.arch.isArm() or
+    builtin.cpu.arch == .csky or
     builtin.cpu.arch == .hexagon or
     builtin.cpu.arch.isMIPS32() or
-    builtin.cpu.arch.isPowerPC32();
+    builtin.cpu.arch.isPowerPC32() or
+    builtin.cpu.arch.isXtensa();
 
 // Split a 64bit value into a {LSB,MSB} pair.
 // The LE/BE variants specify the endianness to assume.
