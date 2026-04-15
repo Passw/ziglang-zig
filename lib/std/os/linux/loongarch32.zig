@@ -87,7 +87,6 @@ pub fn syscall6(
         : .{ .r12 = true, .r13 = true, .r14 = true, .r15 = true, .r16 = true, .r17 = true, .r18 = true, .r19 = true, .r20 = true, .memory = true });
 }
 
-// FIXME
 pub fn clone() callconv(.naked) u32 {
     // __clone(func, stack, flags, arg, ptid, tls, ctid)
     //           a0,    a1,    a2,  a3,   a4,  a5,   a6
