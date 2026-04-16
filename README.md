@@ -658,38 +658,31 @@ WebAssembly-related.
 
 ### Improving Translate-C
 
-`translate-c` is a feature provided by Zig that converts C source code into
-Zig source code. It powers the `zig translate-c` command as well as
-[@cImport](https://ziglang.org/documentation/master/#cImport), allowing Zig
-code to not only take advantage of function prototypes defined in .h files,
-but also `static inline` functions written in C, and even some macros.
+`translate-c` is a feature provided by Zig that converts C source code into Zig
+source code. It powers the `zig translate-c` command, allowing Zig code to not
+only take advantage of function prototypes defined in C header files, but also
+`static inline` functions written in C, and even some macros.
 
 This feature used to work by using libclang API to parse and semantically
 analyze C/C++ files, and then based on the provided AST and type information,
 generating Zig AST, and finally using the mechanisms of `zig fmt` to render the
 Zig AST to a file.
 
-However, C translation is in a transitional period right now. It used to be
-based on Clang, but is now based on Aro:
+However, it is now based on [arocc](https://github.com/Vexu/arocc/), a
+third-party C compiler written in Zig. Test coverage, bug reports, and official
+implementation live in this repository: [ziglang/translate-c](https://codeberg.org/ziglang/translate-c/)
 
-[Pull Request: update aro and translate-c to latest; delete clang translate-c](https://github.com/ziglang/zig/pull/24497)
-
-Test coverage as well as bug reports have been moved to this repository:
-
-[ziglang/translate-c](https://codeberg.org/ziglang/translate-c/)
-
-In the future, [@cImport will move to the build system](https://github.com/ziglang/zig/issues/20630),
-but for now, the translate-c logic is copy-pasted from that project into
-[ziglang/zig](https://codeberg.org/ziglang/zig/), powering both `zig translate-c`
-and `@cImport`.
+This package is currently vendored into the Zig source tree. The TranslateC
+build step takes advantage of this to provide the ability to setup C
+translation in one's build.zig script.
 
 Please see the readme of the translate-c project for how to contribute. Once an
 issue is resolved (and test coverage added) there, the changes can be
 immediately backported to the zig compiler.
 
-Once we fix the problems people are facing from this transition from Clang to
-Aro, we can move on to enhancing the translate-c package such that `@cImport`
-becomes redundant and can therefore be eliminated from the language.
+However, in the future, this build step will be removed in favor of explicit
+dependency on the translate-c package via build system / package manager. At
+that point, Zig will stop vendoring arocc.
 
 ### Autodoc
 
