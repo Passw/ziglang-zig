@@ -685,15 +685,6 @@ pub fn fork() usize {
     }
 }
 
-/// This must be inline, and inline call the syscall function, because if the
-/// child does a return it will clobber the parent's stack.
-/// It is advised to avoid this function and use clone instead, because
-/// the compiler is not aware of how vfork affects control flow and you may
-/// see different results in optimized builds.
-pub inline fn vfork() usize {
-    return @call(.always_inline, syscall0, .{.vfork});
-}
-
 pub fn futimens(fd: fd_t, times: ?*const [2]timespec) usize {
     return utimensat(fd, null, times, 0);
 }
