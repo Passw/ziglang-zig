@@ -1359,12 +1359,7 @@ fn buildOutputType(
                     } else if (mem.eql(u8, arg, "--zig-lib-dir")) {
                         override_lib_dir = args_iter.nextOrFatal();
                     } else if (mem.eql(u8, arg, "--debug-log")) {
-                        if (!build_options.enable_logging) {
-                            warn("Zig was compiled without logging enabled (-Dlog). --debug-log has no effect.", .{});
-                            _ = args_iter.nextOrFatal();
-                        } else {
-                            try log_scopes.append(arena, args_iter.nextOrFatal());
-                        }
+                        try addDebugLog(arena, args_iter.nextOrFatal());
                     } else if (mem.eql(u8, arg, "--listen")) {
                         const next_arg = args_iter.nextOrFatal();
                         if (mem.eql(u8, next_arg, "-")) {
@@ -5098,11 +5093,7 @@ fn cmdBuild(gpa: Allocator, arena: Allocator, io: Io, args: []const []const u8, 
                     if (i + 1 >= args.len) fatal("expected argument after '{s}'", .{arg});
                     try child_argv.appendSlice(arena, args[i .. i + 2]);
                     i += 1;
-                    if (!build_options.enable_logging) {
-                        warn("Zig was compiled without logging enabled (-Dlog). --debug-log has no effect.", .{});
-                    } else {
-                        try log_scopes.append(arena, args[i]);
-                    }
+                    try addDebugLog(arena, args[i]);
                     continue;
                 } else if (mem.eql(u8, arg, "--debug-compile-errors")) {
                     if (build_options.enable_debug_extensions) {
@@ -5380,6 +5371,7 @@ fn cmdBuild(gpa: Allocator, arena: Allocator, io: Io, args: []const []const u8, 
                     .hash_tok = .none,
                     .name_tok = 0,
                     .lazy_status = .eager,
+                    .remote_package_root = phantom_package_root,
                     .parent_package_root = phantom_package_root,
                     .parent_manifest_ast = null,
                     .prog_node = fetch_prog_node,
@@ -5400,6 +5392,7 @@ fn cmdBuild(gpa: Allocator, arena: Allocator, io: Io, args: []const []const u8, 
 
                     .module = build_mod,
                 };
+
                 job_queue.all_fetches.appendAssumeCapacity(&fetch);
 
                 job_queue.table.putAssumeCapacityNoClobber(
@@ -7034,6 +7027,7 @@ const usage_fetch =
     \\  --cache-dir [path]            Override path to local cache directory
     \\  --pkg-dir [path]              Override path to local package directory
     \\  --debug-hash                  Print verbose hash information to stdout
+    \\  --debug-log [scope]           Enable printing debug/info log messages for scope
     \\  --save                        Add the fetched package to build.zig.zon
     \\  --save=[name]                 Add the fetched package to build.zig.zon as name
     \\  --save-exact                  Add the fetched package to build.zig.zon, storing the URL verbatim
@@ -7071,19 +7065,23 @@ fn cmdFetch(
                     try Io.File.stdout().writeStreamingAll(io, usage_fetch);
                     return cleanExit(io);
                 } else if (mem.eql(u8, arg, "--global-cache-dir")) {
-                    if (i + 1 >= args.len) fatal("expected argument after '{s}'", .{arg});
+                    if (i + 1 >= args.len) fatal("expected argument after: {s}", .{arg});
                     i += 1;
                     override_global_cache_dir = args[i];
                 } else if (mem.eql(u8, arg, "--cache-dir")) {
-                    if (i + 1 >= args.len) fatal("expected argument after '{s}'", .{arg});
+                    if (i + 1 >= args.len) fatal("expected argument after: {s}", .{arg});
                     i += 1;
                     override_local_cache_dir = args[i];
                 } else if (mem.eql(u8, arg, "--pkg-dir")) {
-                    if (i + 1 >= args.len) fatal("expected argument after '{s}'", .{arg});
+                    if (i + 1 >= args.len) fatal("expected argument after: {s}", .{arg});
                     i += 1;
                     override_pkg_dir = args[i];
                 } else if (mem.eql(u8, arg, "--debug-hash")) {
                     debug_hash = true;
+                } else if (mem.eql(u8, arg, "--debug-log")) {
+                    if (i + 1 >= args.len) fatal("expected argument after: {s}", .{arg});
+                    i += 1;
+                    try addDebugLog(arena, args[i]);
                 } else if (mem.eql(u8, arg, "--save")) {
                     save = .{ .yes = null };
                 } else if (mem.cutPrefix(u8, arg, "--save=")) |rest| {
@@ -7172,6 +7170,7 @@ fn cmdFetch(
         .hash_tok = .none,
         .name_tok = 0,
         .lazy_status = .eager,
+        .remote_package_root = undefined,
         .parent_package_root = undefined,
         .parent_manifest_ast = null,
         .prog_node = root_prog_node,
@@ -7815,4 +7814,12 @@ fn randInt(io: Io, comptime T: type) T {
     var x: T = undefined;
     io.random(@ptrCast(&x));
     return x;
+}
+
+fn addDebugLog(arena: Allocator, scope_name: []const u8) error{OutOfMemory}!void {
+    if (!build_options.enable_logging) {
+        warn("Zig was compiled without logging enabled (-Dlog). --debug-log has no effect.", .{});
+    } else {
+        try log_scopes.append(arena, scope_name);
+    }
 }
