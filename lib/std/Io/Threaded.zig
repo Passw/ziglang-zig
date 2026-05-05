@@ -14655,6 +14655,11 @@ fn lookupDns(
     };
 
     send: while (now_ts.nanoseconds < final_ts.nanoseconds) : (now_ts = clock.now(t_io)) {
+        const timeout: Io.Timeout = .{ .deadline = .{
+            .raw = now_ts.addDuration(attempt_duration),
+            .clock = clock,
+        } };
+
         const max_messages = queries_buffer.len * HostName.ResolvConf.max_nameservers;
         {
             var message_buffer: [max_messages]net.OutgoingMessage = undefined;
@@ -14670,13 +14675,13 @@ fn lookupDns(
                     message_i += 1;
                 }
             }
-            _ = netSendPosix(t, socket.handle, message_buffer[0..message_i], .{}, false);
+            const send_err, _ = socket.sendManyTimeout(t_io, message_buffer[0..message_i], .{}, timeout);
+            if (send_err) |err| switch (err) {
+                error.Canceled => |e| return e,
+                error.Timeout => continue :send,
+                else => {},
+            };
         }
-
-        const timeout: Io.Timeout = .{ .deadline = .{
-            .raw = now_ts.addDuration(attempt_duration),
-            .clock = clock,
-        } };
 
         while (true) {
             var message_buffer: [max_messages]net.IncomingMessage = @splat(.init);
@@ -14713,12 +14718,11 @@ fn lookupDns(
                         if (answers_remaining == 0) break :send;
                     },
                     2 => {
-                        var retry_message: net.OutgoingMessage = .{
-                            .address = ns,
-                            .data_ptr = query.ptr,
-                            .data_len = query.len,
+                        socket.sendTimeout(t_io, ns, query, timeout) catch |err| switch (err) {
+                            error.Canceled => |e| return e,
+                            error.Timeout => continue :send,
+                            else => {},
                         };
-                        _ = netSendPosix(t, socket.handle, (&retry_message)[0..1], .{}, false);
                         continue;
                     },
                     else => continue,
