@@ -176,32 +176,6 @@ fn blake2bLong(out: []u8, in: []const u8) void {
     @memcpy(out_slice, out_buf[0..out_slice.len]);
 }
 
-fn initBlocks(
-    blocks: *Blocks,
-    h0: *H0,
-    memory: u32,
-    threads: u24,
-) void {
-    var block0: [1024]u8 = undefined;
-    var lane: u24 = 0;
-    while (lane < threads) : (lane += 1) {
-        const j = lane * (memory / threads);
-        mem.writeInt(u32, h0[Blake2b512.digest_length + 4 ..][0..4], lane, .little);
-
-        mem.writeInt(u32, h0[Blake2b512.digest_length..][0..4], 0, .little);
-        blake2bLong(&block0, h0);
-        for (&blocks.items[j + 0], 0..) |*v, i| {
-            v.* = mem.readInt(u64, block0[i * 8 ..][0..8], .little);
-        }
-
-        mem.writeInt(u32, h0[Blake2b512.digest_length..][0..4], 1, .little);
-        blake2bLong(&block0, h0);
-        for (&blocks.items[j + 1], 0..) |*v, i| {
-            v.* = mem.readInt(u64, block0[i * 8 ..][0..8], .little);
-        }
-    }
-}
-
 fn processBlocks(
     blocks: *Blocks,
     time: u32,
@@ -529,9 +503,27 @@ pub fn kdf(
     var blocks = try Blocks.initCapacity(allocator, memory);
     defer blocks.deinit();
 
-    _ = blocks.addManyAsSliceAssumeCapacity(memory);
+    const items = blocks.addManyAsSliceAssumeCapacity(memory);
 
-    initBlocks(&blocks, &h0, memory, params.p);
+    var block0: [1024]u8 = undefined;
+    var lane: u24 = 0;
+    while (lane < params.p) : (lane += 1) {
+        const j = lane * (memory / params.p);
+        mem.writeInt(u32, h0[Blake2b512.digest_length + 4 ..][0..4], lane, .little);
+
+        mem.writeInt(u32, h0[Blake2b512.digest_length..][0..4], 0, .little);
+        blake2bLong(&block0, &h0);
+        for (&items[j + 0], 0..) |*v, i| {
+            v.* = mem.readInt(u64, block0[i * 8 ..][0..8], .little);
+        }
+
+        mem.writeInt(u32, h0[Blake2b512.digest_length..][0..4], 1, .little);
+        blake2bLong(&block0, &h0);
+        for (&items[j + 1], 0..) |*v, i| {
+            v.* = mem.readInt(u64, block0[i * 8 ..][0..8], .little);
+        }
+    }
+
     try processBlocks(&blocks, params.t, memory, params.p, mode, io);
     finalize(&blocks, memory, params.p, derived_key);
 }
