@@ -364,17 +364,20 @@ fn processBlockGeneric(
 
 const BlamkaVector = @Vector(4, u64);
 
-inline fn fBlaMka(x: BlamkaVector, y: BlamkaVector) BlamkaVector {
+fn fBlaMka(x: BlamkaVector, y: BlamkaVector) BlamkaVector {
     const x_lo: @Vector(4, u32) = @truncate(x);
     const y_lo: @Vector(4, u32) = @truncate(y);
     const xy = @as(BlamkaVector, x_lo) * @as(BlamkaVector, y_lo);
     return x +% y +% @as(BlamkaVector, @splat(2)) *% xy;
 }
 
-inline fn rotrVector(x: BlamkaVector, comptime n: comptime_int) BlamkaVector {
+fn rotrVector(x: BlamkaVector, comptime n: comptime_int) BlamkaVector {
     return (x >> @splat(n)) | (x << @splat(64 - n));
 }
 
+// The `inline` is load-bearing: without it ReleaseSmall keeps this out of line
+// and shuffles the four vectors through memory across every call, costing
+// roughly 9% on  Apple Silicon.
 inline fn blamkaRound(a: *BlamkaVector, b: *BlamkaVector, c: *BlamkaVector, d: *BlamkaVector) void {
     a.* = fBlaMka(a.*, b.*);
     d.* = rotrVector(d.* ^ a.*, 32);
