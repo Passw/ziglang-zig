@@ -4137,8 +4137,8 @@ fn createModule(
             error.LldUnavailable => fatal("zig was compiled without LLD libraries", .{}),
             error.ClangUnavailable => fatal("zig was compiled without Clang libraries", .{}),
             error.DllExportFnsRequiresWindows => fatal("only Windows OS targets support DLLs", .{}),
-            error.NewLinkerIncompatibleObjectFormat => fatal("using the new linker to link {s} files is unsupported", .{@tagName(target.ofmt)}),
             error.NewLinkerIncompatibleWithLld => fatal("using the new linker is incompatible with using lld", .{}),
+            error.NewLinkerIncompatibleObjectFormat => fatal("no new linker available for '{t}' files", .{target.ofmt}),
         };
     }
 
