@@ -69,7 +69,7 @@ static void assert_or_panic(bool ok) {
 #  define ZIG_NO_COMPLEX
 #endif
 
-#ifdef __powerpc__
+#ifdef ZIG_PPC32
 #  define ZIG_NO_COMPLEX
 #endif
 
