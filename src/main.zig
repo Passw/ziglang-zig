@@ -987,7 +987,7 @@ fn buildOutputType(
     var test_no_exec = false;
     var test_execve = false;
     var entry: Compilation.CreateOptions.Entry = .default;
-    var force_undefined_symbols: std.StringArrayHashMapUnmanaged(void) = .empty;
+    var force_undefined_symbols: std.array_hash_map.String(void) = .empty;
     var stack_size: ?u64 = null;
     var image_base: ?u64 = null;
     var link_eh_frame_hdr = false;
@@ -1024,7 +1024,7 @@ fn buildOutputType(
     // These are before resolving sysroot.
     var extra_cflags: std.ArrayList([]const u8) = .empty;
     var extra_rcflags: std.ArrayList([]const u8) = .empty;
-    var symbol_wrap_set: std.StringArrayHashMapUnmanaged(void) = .empty;
+    var symbol_wrap_set: std.array_hash_map.String(void) = .empty;
     var rc_includes: std.zig.RcIncludes = .any;
     var manifest_file: ?[]const u8 = null;
     var linker_export_symbol_names: std.ArrayList([]const u8) = .empty;
@@ -3592,7 +3592,7 @@ fn buildOutputType(
     defer file_system_inputs.deinit(gpa);
 
     // Deduplicate rpath entries
-    var rpath_dedup = std.StringArrayHashMapUnmanaged(void){};
+    var rpath_dedup = std.array_hash_map.String(void){};
     for (create_module.rpath_list.items) |rpath| {
         try rpath_dedup.put(arena, rpath, {});
     }
@@ -3896,7 +3896,7 @@ fn buildOutputType(
 
 const CreateModule = struct {
     dirs: Compilation.Directories,
-    modules: std.StringArrayHashMapUnmanaged(CliModule),
+    modules: std.array_hash_map.String(CliModule),
     opts: Compilation.Config.Options,
     dynamic_linker: ?[]const u8,
     object_format: ?[]const u8,
@@ -3908,7 +3908,7 @@ const CreateModule = struct {
     /// link_libcpp, and then the libraries are filtered into
     /// `unresolved_link_inputs` and `windows_libs`.
     cli_link_inputs: std.ArrayList(link.UnresolvedInput),
-    windows_libs: std.StringArrayHashMapUnmanaged(void),
+    windows_libs: std.array_hash_map.String(void),
     /// The local variable `unresolved_link_inputs` is fed into library
     /// resolution, mutating the input array, and producing this data as
     /// output. Allocated with gpa.
@@ -3926,7 +3926,7 @@ const CreateModule = struct {
     lib_dir_args: std.ArrayList([]const u8),
     libc_installation: ?LibCInstallation,
     want_native_include_dirs: bool,
-    frameworks: std.StringArrayHashMapUnmanaged(Framework),
+    frameworks: std.array_hash_map.String(Framework),
     native_system_include_paths: []const []const u8,
     framework_dirs: std.ArrayList([]const u8),
     rpath_list: std.ArrayList([]const u8),
@@ -4419,7 +4419,7 @@ fn serveUpdateResults(s: *Server, comp: *Compilation) !void {
 
         var file_name_bytes: std.ArrayList(u8) = .empty;
         defer file_name_bytes.deinit(gpa);
-        var files: std.AutoArrayHashMapUnmanaged(Zcu.File.Index, void) = .empty;
+        var files: std.array_hash_map.Auto(Zcu.File.Index, void) = .empty;
         defer files.deinit(gpa);
         var decl_data: std.ArrayList(u8) = .empty;
         defer decl_data.deinit(gpa);
