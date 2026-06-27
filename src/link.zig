@@ -25,11 +25,14 @@ const Package = @import("Package.zig");
 const dev = @import("dev.zig");
 const target_util = @import("target.zig");
 const codegen = @import("codegen.zig");
+const crash_report = @import("crash_report.zig");
 
 pub const aarch64 = @import("link/aarch64.zig");
 pub const LdScript = @import("link/LdScript.zig");
 pub const Queue = @import("link/Queue.zig");
 pub const ConstPool = @import("link/ConstPool.zig");
+
+pub const loongarch = @import("link/loongarch.zig");
 
 pub const Error = Allocator.Error || Io.Cancelable || error{
     /// An error message has already been stored in persistent state on `Compilation` or `Zcu`, for
@@ -471,7 +474,7 @@ pub const File = struct {
         /// wrapper for a system function. The wrapper function should be called
         /// __wrap_symbol. If it wishes to call the system function, it should call
         /// __real_symbol.
-        symbol_wrap_set: std.StringArrayHashMapUnmanaged(void),
+        symbol_wrap_set: std.array_hash_map.String(void),
 
         compatibility_version: ?std.SemanticVersion,
 
@@ -481,7 +484,7 @@ pub const File = struct {
         rpath_list: []const []const u8,
 
         /// Zig compiler development linker flags.
-        /// Enable dumping of linker's state as JSON.
+        /// Enable dumping of linker's state.
         enable_link_snapshots: bool,
 
         /// Darwin-specific linker flags:
@@ -790,6 +793,7 @@ pub const File = struct {
         assert(base.comp.zcu.?.llvm_object == null);
         const nav = pt.zcu.intern_pool.getNav(nav_index);
         assert(nav.resolved.?.value != .none);
+
         switch (base.tag) {
             .lld => unreachable,
             .plan9 => unreachable,
@@ -841,7 +845,6 @@ pub const File = struct {
         assert(base.comp.zcu.?.llvm_object == null);
         switch (base.tag) {
             .lld => unreachable,
-            .spirv => unreachable, // see corresponding special case in `Zcu.PerThread.runCodegenInner`
             .plan9 => unreachable,
             inline else => |tag| {
                 dev.check(tag.devFeature());
@@ -925,6 +928,9 @@ pub const File = struct {
     /// Commit pending changes and write headers. Takes into account final output mode.
     /// `arena` has the lifetime of the call to `Compilation.update`.
     pub fn flush(base: *File, arena: Allocator, tid: Zcu.PerThread.Id, prog_node: std.Progress.Node) Error!void {
+        crash_report.LinkerOp.start(base, tid);
+        defer crash_report.LinkerOp.stop(base, tid);
+
         const comp = base.comp;
         const io = comp.io;
         if (comp.clang_preprocessor_mode == .yes or comp.clang_preprocessor_mode == .pch) {
@@ -934,8 +940,8 @@ pub const File = struct {
             // Until then, we do `lld -r -o output.o input.o` even though the output is the same
             // as the input. For the preprocessing case (`zig cc -E -o foo`) we copy the file
             // to the final location. See also the corresponding TODO in Coff linking.
-            assert(comp.c_object_table.count() == 1);
-            const the_key = comp.c_object_table.keys()[0];
+            assert(comp.c_objects.items.len == 1);
+            const the_key = comp.c_objects.items[0];
             const cached_pp_file_path = the_key.status.success.object_path;
             Io.Dir.copyFile(
                 cached_pp_file_path.root_dir.handle,
@@ -976,6 +982,10 @@ pub const File = struct {
         export_indices: []const Zcu.Export.Index,
     ) Error!void {
         assert(base.comp.zcu.?.llvm_object == null);
+
+        crash_report.LinkerOp.start(base, pt.tid);
+        defer crash_report.LinkerOp.stop(base, pt.tid);
+
         switch (base.tag) {
             .lld => unreachable,
             .plan9 => unreachable,
@@ -1007,6 +1017,7 @@ pub const File = struct {
     /// Never called when LLVM is codegenning the ZCU.
     pub fn getNavVAddr(base: *File, pt: Zcu.PerThread, nav_index: InternPool.Nav.Index, reloc_info: RelocInfo) Error!u64 {
         assert(base.comp.zcu.?.llvm_object == null);
+
         switch (base.tag) {
             .lld => unreachable,
             .c => unreachable,
@@ -1028,6 +1039,7 @@ pub const File = struct {
         decl_align: InternPool.Alignment,
     ) Error!SymbolId {
         assert(base.comp.zcu.?.llvm_object == null);
+
         switch (base.tag) {
             .lld => unreachable,
             .c => unreachable,
@@ -1044,6 +1056,7 @@ pub const File = struct {
     /// Never called when LLVM is codegenning the ZCU.
     pub fn getUavVAddr(base: *File, decl_val: InternPool.Index, reloc_info: RelocInfo) Error!u64 {
         assert(base.comp.zcu.?.llvm_object == null);
+
         switch (base.tag) {
             .lld => unreachable,
             .c => unreachable,
@@ -1064,6 +1077,7 @@ pub const File = struct {
         name: InternPool.NullTerminatedString,
     ) void {
         assert(base.comp.zcu.?.llvm_object == null);
+
         switch (base.tag) {
             .lld => unreachable,
             .plan9 => unreachable,
@@ -1074,6 +1088,31 @@ pub const File = struct {
             inline else => |tag| {
                 dev.check(tag.devFeature());
                 return @as(*tag.Type(), @fieldParentPtr("base", base)).deleteExport(exported, name);
+            },
+        }
+    }
+
+    pub const DumpResult = enum {
+        unimplemented,
+        needs_extensions,
+        disabled,
+        enabled,
+    };
+
+    pub fn dump(base: *File, w: *Io.Writer, tid: Zcu.PerThread.Id) !DumpResult {
+        if (!build_options.enable_debug_extensions) return .not_built;
+        switch (base.tag) {
+            .elf,
+            .macho,
+            .c,
+            .wasm,
+            .spirv,
+            .plan9,
+            .lld,
+            => return .unimplemented,
+            inline else => |tag| {
+                dev.check(tag.devFeature());
+                return @as(*tag.Type(), @fieldParentPtr("base", base)).dump(w, tid);
             },
         }
     }
@@ -1179,8 +1218,9 @@ pub const File = struct {
     pub fn loadInput(base: *File, input: Input) anyerror!void {
         if (base.tag == .lld) return;
         assert(!base.post_prelink);
+
         switch (base.tag) {
-            inline .elf, .elf2, .wasm => |tag| {
+            inline .coff2, .elf, .elf2, .wasm, .spirv => |tag| {
                 dev.check(tag.devFeature());
                 return @as(*tag.Type(), @fieldParentPtr("base", base)).loadInput(input);
             },
@@ -1442,7 +1482,8 @@ pub fn doPrelinkTask(comp: *Compilation, task: PrelinkTask) void {
 
             const target = &comp.root_mod.resolved_target.result;
             const flags = target_util.libcFullLinkFlags(target);
-            const crt_dir = comp.libc_installation.?.crt_dir.?;
+            const libc_installation = comp.libc_installation.?;
+            const crt_dir = libc_installation.crt_dir.?;
             const sep = std.fs.path.sep_str;
             for (flags) |flag| {
                 assert(mem.startsWith(u8, flag, "-l"));
@@ -1494,6 +1535,54 @@ pub fn doPrelinkTask(comp: *Compilation, task: PrelinkTask) void {
                     },
                 }
             }
+
+            if (target.os.tag == .windows and target.abi == .msvc) {
+                const inputs: []const struct {
+                    dir: enum { crt, msvc_lib, kernel32_lib },
+                    name: []const u8,
+                } = switch (comp.config.link_mode) {
+                    .dynamic => &.{
+                        .{ .dir = .msvc_lib, .name = "msvcrt.lib" },
+                        .{ .dir = .msvc_lib, .name = "vcruntime.lib" },
+                        .{ .dir = .msvc_lib, .name = "legacy_stdio_definitions.lib" },
+                        .{ .dir = .crt, .name = "ucrt.lib" },
+                        .{ .dir = .kernel32_lib, .name = "kernel32.lib" },
+                        .{ .dir = .kernel32_lib, .name = "ntdll.lib" },
+                    },
+                    .static => &.{
+                        .{ .dir = .msvc_lib, .name = "libcmt.lib" },
+                        .{ .dir = .msvc_lib, .name = "libvcruntime.lib" },
+                        .{ .dir = .msvc_lib, .name = "legacy_stdio_definitions.lib" },
+                        .{ .dir = .crt, .name = "libucrt.lib" },
+                        .{ .dir = .kernel32_lib, .name = "kernel32.lib" },
+                        .{ .dir = .kernel32_lib, .name = "ntdll.lib" },
+                    },
+                };
+
+                for (inputs) |lib| {
+                    const path = Path.initCwd(
+                        std.fmt.allocPrint(comp.arena, "{s}" ++ sep ++ "{s}", .{
+                            switch (lib.dir) {
+                                .crt => crt_dir,
+                                .msvc_lib => libc_installation.msvc_lib_dir.?,
+                                .kernel32_lib => libc_installation.kernel32_lib_dir.?,
+                            },
+                            lib.name,
+                        }) catch return diags.setAllocFailure(),
+                    );
+                    if (std.mem.endsWith(u8, lib.name, "lib")) {
+                        base.openLoadArchive(path, false) catch |err| switch (err) {
+                            error.LinkFailure => return, // error reported via diags
+                            else => |e| diags.addParseError(path, "failed to parse archive: {s}", .{@errorName(e)}),
+                        };
+                    } else {
+                        base.openLoadObject(path) catch |err| switch (err) {
+                            error.LinkFailure => return, // error reported via diags
+                            else => |e| diags.addParseError(path, "failed to parse object: {s}", .{@errorName(e)}),
+                        };
+                    }
+                }
+            }
         },
         .load_object => |path| {
             const prog_node = comp.link_prog_node.start("Parse Object", 0);
@@ -1529,8 +1618,9 @@ pub fn doZcuTask(comp: *Compilation, tid: Zcu.PerThread.Id, task: ZcuTask) void 
     const diags = &comp.link_diags;
     const zcu = comp.zcu.?;
     const ip = &zcu.intern_pool;
-    const pt: Zcu.PerThread = .activate(zcu, tid);
-    defer pt.deactivate();
+    const active = zcu.activate(tid);
+    defer active.deactivate();
+    const pt = active.pt;
 
     var timer = comp.startTimer();
 

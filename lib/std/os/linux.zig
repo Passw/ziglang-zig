@@ -43,7 +43,7 @@ const arch_bits = switch (native_arch) {
     .microblaze, .microblazeel => @import("linux/microblaze.zig"),
     .mips, .mipsel => @import("linux/mips.zig"),
     .mips64, .mips64el => switch (builtin.abi) {
-        .gnuabin32, .muslabin32 => @import("linux/mipsn32.zig"),
+        .gnuabin32, .muslabin32, .abin32 => @import("linux/mipsn32.zig"),
         else => @import("linux/mips64.zig"),
     },
     .or1k => @import("linux/or1k.zig"),
@@ -57,7 +57,7 @@ const arch_bits = switch (native_arch) {
     .sparc64 => @import("linux/sparc64.zig"),
     .x86 => @import("linux/x86.zig"),
     .x86_64 => switch (builtin.abi) {
-        .gnux32, .muslx32 => @import("linux/x32.zig"),
+        .gnux32, .muslx32, .x32 => @import("linux/x32.zig"),
         else => @import("linux/x86_64.zig"),
     },
     .xtensa, .xtensaeb => @import("linux/xtensa.zig"),
@@ -80,6 +80,7 @@ pub const restore_rt = syscall_bits.restore_rt;
 pub const socketcall = syscall_bits.socketcall;
 pub const syscall_pipe = syscall_bits.syscall_pipe;
 pub const syscall_fork = syscall_bits.syscall_fork;
+pub const syscall_lseek = syscall_bits.syscall_lseek;
 
 pub fn clone(
     func: *const fn (arg: usize) callconv(.c) u8,
@@ -143,7 +144,7 @@ pub const SYS = switch (native_arch) {
     .microblaze, .microblazeel => syscalls.Microblaze,
     .mips, .mipsel => syscalls.MipsO32,
     .mips64, .mips64el => switch (builtin.abi) {
-        .gnuabin32, .muslabin32 => syscalls.MipsN32,
+        .gnuabin32, .muslabin32, .abin32 => syscalls.MipsN32,
         else => syscalls.MipsN64,
     },
     .or1k => syscalls.OpenRisc,
@@ -157,7 +158,7 @@ pub const SYS = switch (native_arch) {
     .sparc64 => syscalls.Sparc64,
     .x86 => syscalls.X86,
     .x86_64 => switch (builtin.abi) {
-        .gnux32, .muslx32 => syscalls.X32,
+        .gnux32, .muslx32, .x32 => syscalls.X32,
         else => syscalls.X64,
     },
     .xtensa, .xtensaeb => syscalls.Xtensa,
@@ -751,8 +752,8 @@ fn splitValue64(val: i64) [2]u32 {
 }
 
 /// Get the errno from a syscall return value. SUCCESS means no error.
-pub fn errno(r: usize) E {
-    const signed_r: isize = @bitCast(r);
+pub fn errno(r: u64) E {
+    const signed_r: i32 = @bitCast(@as(u32, @truncate(r)));
     const int = if (signed_r > -4096 and signed_r < 0) -signed_r else 0;
     return @enumFromInt(int);
 }
@@ -1809,7 +1810,7 @@ pub fn fchmodat2(fd: fd_t, path: [*:0]const u8, mode: mode_t, flags: u32) usize 
 }
 
 /// Can only be called on 32 bit systems. For 64 bit see `lseek`.
-pub fn llseek(fd: fd_t, offset: off_t, result: ?*off_t, whence: u32) usize {
+pub fn llseek(fd: fd_t, offset: off_t, result: ?*off_t, whence: u32) u32 {
     // NOTE: The offset parameter splitting is independent from the target
     // endianness.
     return syscall5(
@@ -1823,8 +1824,17 @@ pub fn llseek(fd: fd_t, offset: off_t, result: ?*off_t, whence: u32) usize {
 }
 
 /// Can only be called on 64 bit systems. For 32 bit see `llseek`.
-pub fn lseek(fd: fd_t, offset: off_t, whence: u32) usize {
-    return syscall3(.lseek, @as(u32, @bitCast(fd)), @as(u64, @bitCast(offset)), whence);
+pub fn lseek(fd: fd_t, offset: off_t, whence: u32) u64 {
+    return switch (builtin.abi) {
+        .gnuabin32,
+        .muslabin32,
+        .abin32,
+        .gnux32,
+        .muslx32,
+        .x32,
+        => syscall_lseek(fd, offset, whence),
+        else => syscall3(.lseek, @as(u32, @bitCast(fd)), @as(u64, @bitCast(offset)), whence),
+    };
 }
 
 pub fn exit(status: i32) noreturn {
@@ -1998,7 +2008,7 @@ pub const F = struct {
             const SETLKW = 35;
         },
         .mips64, .mips64el => switch (native_abi) {
-            .gnuabin32, .muslabin32 => struct {
+            .gnuabin32, .muslabin32, .abin32 => struct {
                 const GETLK = 33;
                 const SETLK = 34;
                 const SETLKW = 35;
@@ -3179,7 +3189,7 @@ pub fn tee(src: fd_t, dest: fd_t, len: usize, flags: u32) usize {
 }
 
 pub const Sysinfo = switch (native_abi) {
-    .gnux32, .muslx32 => extern struct {
+    .gnux32, .muslx32, .x32 => extern struct {
         /// Seconds since boot
         uptime: i64,
         /// 1, 5, and 15 minute load averages
@@ -9450,7 +9460,11 @@ pub const UTIME = struct {
 };
 
 // https://github.com/ziglang/zig/issues/4726#issuecomment-2190337877
-pub const timespec = if (native_arch == .hexagon or native_arch == .riscv32) kernel_timespec else extern struct {
+const use_kernel_timespec = native_arch == .hexagon or native_arch == .riscv32 or switch (native_abi) {
+    .gnux32, .muslx32, .x32 => true,
+    else => false,
+};
+pub const timespec = if (use_kernel_timespec) kernel_timespec else extern struct {
     sec: isize,
     nsec: isize,
 };
@@ -10745,11 +10759,11 @@ pub const AUDIT = struct {
             .mips => .MIPS,
             .mipsel => .MIPSEL,
             .mips64 => switch (native_abi) {
-                .gnuabin32, .muslabin32 => .MIPS64N32,
+                .gnuabin32, .muslabin32, .abin32 => .MIPS64N32,
                 else => .MIPS64,
             },
             .mips64el => switch (native_abi) {
-                .gnuabin32, .muslabin32 => .MIPSEL64N32,
+                .gnuabin32, .muslabin32, .abin32 => .MIPSEL64N32,
                 else => .MIPSEL64,
             },
             .or1k => .OPENRISC,

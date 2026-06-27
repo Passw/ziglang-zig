@@ -51,7 +51,7 @@ const InnerError = codegen.Error || error{OutOfRegisters};
 
 pub fn legalizeFeatures(_: *const std.Target) *const Air.Legalize.Features {
     return comptime &.initMany(&.{
-        .expand_intcast_safe,
+        .expand_int_cast_safe,
         .expand_int_from_float_safe,
         .expand_int_from_float_optimized_safe,
         .expand_add_safe,
@@ -112,7 +112,7 @@ const_tracking: ConstTrackingMap = .{},
 inst_tracking: InstTrackingMap = .{},
 
 frame_allocs: std.MultiArrayList(FrameAlloc) = .{},
-free_frame_indices: std.AutoArrayHashMapUnmanaged(FrameIndex, void) = .empty,
+free_frame_indices: std.array_hash_map.Auto(FrameIndex, void) = .empty,
 frame_locs: std.MultiArrayList(Mir.FrameLoc) = .{},
 
 loops: std.AutoHashMapUnmanaged(Air.Inst.Index, struct {
@@ -338,7 +338,7 @@ const MCValue = union(enum) {
 };
 
 const Branch = struct {
-    inst_table: std.AutoArrayHashMapUnmanaged(Air.Inst.Index, MCValue) = .empty,
+    inst_table: std.array_hash_map.Auto(Air.Inst.Index, MCValue) = .empty,
 
     fn deinit(func: *Branch, gpa: Allocator) void {
         func.inst_table.deinit(gpa);
@@ -346,8 +346,8 @@ const Branch = struct {
     }
 };
 
-const InstTrackingMap = std.AutoArrayHashMapUnmanaged(Air.Inst.Index, InstTracking);
-const ConstTrackingMap = std.AutoArrayHashMapUnmanaged(InternPool.Index, InstTracking);
+const InstTrackingMap = std.array_hash_map.Auto(Air.Inst.Index, InstTracking);
+const ConstTrackingMap = std.array_hash_map.Auto(InternPool.Index, InstTracking);
 
 const InstTracking = struct {
     long: MCValue,
@@ -1453,7 +1453,7 @@ fn genBody(func: *Func, body: []const Air.Inst.Index) InnerError!void {
             .add_safe,
             .sub_safe,
             .mul_safe,
-            .intcast_safe,
+            .int_cast_safe,
             .int_from_float_safe,
             .int_from_float_optimized_safe,
             => return func.fail("TODO implement safety_checked_instructions", .{}),
@@ -1479,7 +1479,14 @@ fn genBody(func: *Func, body: []const Air.Inst.Index) InnerError!void {
             .ret_ptr         => try func.airRetPtr(inst),
             .arg             => try func.airArg(inst),
             .assembly        => try func.airAsm(inst),
-            .bitcast         => try func.airBitCast(inst),
+            .bit_cast        => try func.airBitCast(inst),
+            .ptr_cast        => try func.airBitCast(inst),
+            .ptr_from_int    => try func.airBitCast(inst),
+            .int_from_ptr    => try func.airBitCast(inst),
+            .error_cast      => try func.airBitCast(inst),
+            .error_from_int  => try func.airBitCast(inst),
+            .int_from_error  => try func.airBitCast(inst),
+            .union_from_enum => try func.airBitCast(inst),
             .block           => try func.airBlock(inst),
             .br              => try func.airBr(inst),
             .repeat          => try func.airRepeat(inst),
@@ -1493,7 +1500,7 @@ fn genBody(func: *Func, body: []const Air.Inst.Index) InnerError!void {
             .dbg_empty_stmt  => func.finishAirBookkeeping(),
             .fptrunc         => try func.airFptrunc(inst),
             .fpext           => try func.airFpext(inst),
-            .intcast         => try func.airIntCast(inst),
+            .int_cast        => try func.airIntCast(inst),
             .trunc           => try func.airTrunc(inst),
             .is_non_null     => try func.airIsNonNull(inst),
             .is_non_null_ptr => try func.airIsNonNullPtr(inst),
@@ -1642,6 +1649,7 @@ fn genBody(func: *Func, body: []const Air.Inst.Index) InnerError!void {
             .work_item_id => unreachable,
             .work_group_size => unreachable,
             .work_group_id => unreachable,
+            .spirv_runtime_array_len => unreachable,
             // zig fmt: on
         }
 
@@ -3162,7 +3170,7 @@ fn airMulWithOverflow(func: *Func, inst: Air.Inst.Index) !void {
         switch (lhs_ty.zigTypeTag(zcu)) {
             else => |x| return func.fail("TODO: airMulWithOverflow {s}", .{@tagName(x)}),
             .int => {
-                if (std.debug.runtime_safety) assert(lhs_ty.eql(rhs_ty, zcu));
+                if (std.debug.runtime_safety) assert(lhs_ty.eql(rhs_ty));
 
                 const trunc_reg = try func.copyToTmpRegister(lhs_ty, .{ .register = dest_reg });
                 const trunc_reg_lock = func.register_manager.lockRegAssumeUnused(trunc_reg);
@@ -3952,9 +3960,7 @@ fn airPtrElemPtr(func: *Func, inst: Air.Inst.Index) !void {
         const elem_ptr_ty = func.typeOfIndex(inst);
         const base_ptr_ty = func.typeOf(extra.lhs);
 
-        if (elem_ptr_ty.ptrInfo(zcu).flags.vector_index != .none) {
-            @panic("audit");
-        }
+        assert(elem_ptr_ty.ptrInfo(zcu).flags.vector_index == .none);
 
         const base_ptr_mcv = try func.resolveInst(extra.lhs);
         const base_ptr_lock: ?RegisterLock = switch (base_ptr_mcv) {

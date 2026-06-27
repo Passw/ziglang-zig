@@ -87,7 +87,7 @@ link_inputs: []const link.Input,
 framework_dirs: []const []const u8,
 /// These are only for DLLs dependencies fulfilled by the `.def` files shipped
 /// with Zig. Static libraries are provided as `link.Input` values.
-windows_libs: std.StringArrayHashMapUnmanaged(void),
+windows_libs: std.array_hash_map.String(void),
 /// The number of items in `windows_libs` which we have already built. All items at or after this
 /// index will be built in `performAllTheWork`.
 windows_libs_num_done: u32,
@@ -101,18 +101,14 @@ native_system_include_paths: []const []const u8,
 /// List of symbols forced as undefined in the symbol table
 /// thus forcing their resolution by the linker.
 /// Corresponds to `-u <symbol>` for ELF/MachO and `/include:<symbol>` for COFF/PE.
-force_undefined_symbols: std.StringArrayHashMapUnmanaged(void),
+force_undefined_symbols: std.array_hash_map.String(void),
 
-c_object_table: std.AutoArrayHashMapUnmanaged(*CObject, void) = .empty,
-win32_resource_table: if (dev.env.supports(.win32_resource)) std.AutoArrayHashMapUnmanaged(*Win32Resource, void) else struct {
-    pub fn keys(_: @This()) [0]void {
-        return .{};
-    }
-    pub fn count(_: @This()) u0 {
-        return 0;
-    }
+c_objects: std.ArrayList(*CObject) = .empty,
+win32_resources: if (dev.env.supports(.win32_resource)) std.ArrayList(*Win32Resource) else struct {
+    items: [0]*struct {},
+    pub const empty: @This() = .{ .items = .{} };
     pub fn deinit(_: @This(), _: Allocator) void {}
-} = .{},
+} = .empty,
 
 link_diags: link.Diags,
 link_queue: link.Queue = .empty,
@@ -145,11 +141,11 @@ win32_resource_work_queue: if (dev.env.supports(.win32_resource)) std.Deque(*Win
 
 /// The ErrorMsg memory is owned by the `CObject`, using Compilation's general purpose allocator.
 /// This data is accessed by multiple threads and is protected by `mutex`.
-failed_c_objects: std.AutoArrayHashMapUnmanaged(*CObject, *CObject.Diag.Bundle) = .empty,
+failed_c_objects: std.array_hash_map.Auto(*CObject, *CObject.Diag.Bundle) = .empty,
 
 /// The ErrorBundle memory is owned by the `Win32Resource`, using Compilation's general purpose allocator.
 /// This data is accessed by multiple threads and is protected by `mutex`.
-failed_win32_resources: if (dev.env.supports(.win32_resource)) std.AutoArrayHashMapUnmanaged(*Win32Resource, ErrorBundle) else struct {
+failed_win32_resources: if (dev.env.supports(.win32_resource)) std.array_hash_map.Auto(*Win32Resource, ErrorBundle) else struct {
     pub fn values(_: @This()) [0]void {
         return .{};
     }
@@ -157,7 +153,7 @@ failed_win32_resources: if (dev.env.supports(.win32_resource)) std.AutoArrayHash
 } = .{},
 
 /// Miscellaneous things that can fail.
-misc_failures: std.AutoArrayHashMapUnmanaged(MiscTask, MiscError) = .empty,
+misc_failures: std.array_hash_map.Auto(MiscTask, MiscError) = .empty,
 
 /// When this is `true` it means invoking clang as a sub-process is expected to inherit
 /// stdin, stdout, stderr, and if it returns non success, to forward the exit code.
@@ -227,8 +223,6 @@ compiler_rt_lib: ?CrtFile = null,
 /// Populated when we build the compiler_rt_obj object. A Job to build this is indicated
 /// by setting `queued_jobs.compiler_rt_obj` and resolved before calling linker.flush().
 compiler_rt_obj: ?CrtFile = null,
-/// hack for stage2_x86_64 + coff
-compiler_rt_dyn_lib: ?CrtFile = null,
 /// Populated when we build the libfuzzer static library. A Job to build this
 /// is indicated by setting `queued_jobs.fuzzer_lib` and resolved before
 /// calling linker.flush().
@@ -291,8 +285,6 @@ emit_llvm_bc: ?[]const u8,
 emit_docs: ?[]const u8,
 
 const QueuedJobs = struct {
-    /// hack for stage2_x86_64 + coff
-    compiler_rt_dyn_lib: bool = false,
     compiler_rt_lib: bool = false,
     compiler_rt_obj: bool = false,
     ubsan_rt_lib: bool = false,
@@ -865,7 +857,7 @@ pub const TimeReport = struct {
     /// a function) all generic instances of this function. It also includes time spent analyzing
     /// function bodies if this is a function (generic or otherwise).
     /// An entry not existing means the declaration has not been analyzed (so far).
-    decl_sema_info: std.AutoArrayHashMapUnmanaged(InternPool.TrackedInst.Index, struct {
+    decl_sema_info: std.array_hash_map.Auto(InternPool.TrackedInst.Index, struct {
         ns: u64,
         count: u32,
     }),
@@ -875,14 +867,14 @@ pub const TimeReport = struct {
     /// instances, both of this function itself and of its parent namespace.
     /// An entry not existing means the declaration has not been codegenned (so far).
     /// Every key in `decl_codegen_ns` is also in `decl_sema_ns`.
-    decl_codegen_ns: std.AutoArrayHashMapUnmanaged(InternPool.TrackedInst.Index, u64),
+    decl_codegen_ns: std.array_hash_map.Auto(InternPool.TrackedInst.Index, u64),
 
     /// Key is a ZIR `declaration` instruction which is anything other than a `comptime` decl; value
     /// is the number of nanoseconds spent linking it into the binary. As above, this is the total
     /// across all generic instances.
     /// An entry not existing means the declaration has not been linked (so far).
     /// Every key in `decl_link_ns` is also in `decl_sema_ns`.
-    decl_link_ns: std.AutoArrayHashMapUnmanaged(InternPool.TrackedInst.Index, u64),
+    decl_link_ns: std.array_hash_map.Auto(InternPool.TrackedInst.Index, u64),
 
     pub fn deinit(tr: *TimeReport, gpa: Allocator) void {
         tr.stats = undefined;
@@ -914,21 +906,6 @@ pub const CrtFile = struct {
         self.* = undefined;
     }
 };
-
-/// Supported languages for "zig clang -x <lang>".
-/// Loosely based on llvm-project/clang/include/clang/Driver/Types.def
-pub const LangToExt = std.StaticStringMap(FileExt).initComptime(.{
-    .{ "c", .c },
-    .{ "c-header", .h },
-    .{ "c++", .cpp },
-    .{ "c++-header", .hpp },
-    .{ "objective-c", .m },
-    .{ "objective-c-header", .hm },
-    .{ "objective-c++", .mm },
-    .{ "objective-c++-header", .hmm },
-    .{ "assembler", .assembly },
-    .{ "assembler-with-cpp", .assembly_with_cpp },
-});
 
 /// For passing to a C compiler.
 pub const CSourceFile = struct {
@@ -1068,8 +1045,8 @@ pub const CObject = struct {
         }
 
         pub const Bundle = struct {
-            file_names: std.AutoArrayHashMapUnmanaged(u32, []const u8) = .empty,
-            category_names: std.AutoArrayHashMapUnmanaged(u32, []const u8) = .empty,
+            file_names: std.array_hash_map.Auto(u32, []const u8) = .empty,
+            category_names: std.array_hash_map.Auto(u32, []const u8) = .empty,
             diags: []Diag = &.{},
 
             pub fn destroy(bundle: *Bundle, gpa: Allocator) void {
@@ -1122,13 +1099,13 @@ pub const CObject = struct {
                 var bc = std.zig.llvm.BitcodeReader.init(gpa, .{ .reader = &file_reader.interface });
                 defer bc.deinit();
 
-                var file_names: std.AutoArrayHashMapUnmanaged(u32, []const u8) = .empty;
+                var file_names: std.array_hash_map.Auto(u32, []const u8) = .empty;
                 errdefer {
                     for (file_names.values()) |file_name| gpa.free(file_name);
                     file_names.deinit(gpa);
                 }
 
-                var category_names: std.AutoArrayHashMapUnmanaged(u32, []const u8) = .empty;
+                var category_names: std.array_hash_map.Auto(u32, []const u8) = .empty;
                 errdefer {
                     for (category_names.values()) |category_name| gpa.free(category_name);
                     category_names.deinit(gpa);
@@ -1604,7 +1581,7 @@ pub const CreateOptions = struct {
     /// implementations still do.
     lib_directories: []const Cache.Directory = &.{},
     rpath_list: []const []const u8 = &[0][]const u8{},
-    symbol_wrap_set: std.StringArrayHashMapUnmanaged(void) = .empty,
+    symbol_wrap_set: std.array_hash_map.String(void) = .empty,
     c_source_files: []const CSourceFile = &.{},
     rc_source_files: []const RcSourceFile = &.{},
     manifest_file: ?[]const u8 = null,
@@ -1683,7 +1660,7 @@ pub const CreateOptions = struct {
     skip_linker_dependencies: bool = false,
     hash_style: link.File.Lld.Elf.HashStyle = .both,
     entry: Entry = .default,
-    force_undefined_symbols: std.StringArrayHashMapUnmanaged(void) = .empty,
+    force_undefined_symbols: std.array_hash_map.String(void) = .empty,
     stack_size: ?u64 = null,
     image_base: ?u64 = null,
     version: ?std.SemanticVersion = null,
@@ -1800,7 +1777,7 @@ fn addModuleTableToCacheHash(
     }
 }
 
-const RtStrat = enum { none, lib, obj, zcu, dyn_lib };
+const RtStrat = enum { none, lib, obj, zcu };
 
 pub const CreateDiagnostic = union(enum) {
     export_table_import_table_conflict,
@@ -1921,12 +1898,6 @@ pub fn create(gpa: Allocator, arena: Allocator, io: Io, diag: *CreateDiagnostic,
             };
             if (have_zcu and (!need_llvm or use_llvm)) {
                 if (output_mode == .Obj) break :s .zcu;
-                switch (target_util.zigBackend(target, use_llvm)) {
-                    else => {},
-                    .stage2_aarch64, .stage2_x86_64 => if (target.ofmt == .coff) {
-                        break :s if (is_exe_or_dyn_lib and build_options.have_llvm) .dyn_lib else .zcu;
-                    },
-                }
             }
             if (need_llvm and !build_options.have_llvm) break :s .none; // impossible to build without llvm
             if (is_exe_or_dyn_lib) break :s .lib;
@@ -2308,9 +2279,9 @@ pub fn create(gpa: Allocator, arena: Allocator, io: Io, diag: *CreateDiagnostic,
 
         if (opt_zcu) |zcu| {
             // Populate `zcu.module_roots`.
-            const pt: Zcu.PerThread = .activate(zcu, .main);
-            defer pt.deactivate();
-            pt.populateModuleRootTable() catch |err| switch (err) {
+            const active = zcu.acquire();
+            defer active.release();
+            active.pt.populateModuleRootTable() catch |err| switch (err) {
                 error.OutOfMemory => |e| return e,
                 error.IllegalZigImport => return diag.fail(.illegal_zig_import),
             };
@@ -2476,7 +2447,14 @@ pub fn create(gpa: Allocator, arena: Allocator, io: Io, diag: *CreateDiagnostic,
             },
         }
 
-        if (use_llvm) {
+        if (use_llvm and
+            (comp.emit_bin != null or
+                comp.emit_asm != null or
+                comp.emit_llvm_ir != null or
+                comp.emit_llvm_bc != null or
+                comp.verbose_llvm_ir != null or
+                comp.verbose_llvm_bc != null))
+        {
             if (opt_zcu) |zcu| {
                 zcu.llvm_object = try LlvmObject.create(arena, zcu);
             }
@@ -2486,8 +2464,10 @@ pub fn create(gpa: Allocator, arena: Allocator, io: Io, diag: *CreateDiagnostic,
     };
     errdefer comp.destroy();
 
+    if (target.ofmt == .c) return comp;
+
     // Add a `CObject` for each `c_source_files`.
-    try comp.c_object_table.ensureTotalCapacity(gpa, options.c_source_files.len);
+    try comp.c_objects.ensureTotalCapacity(gpa, options.c_source_files.len);
     for (options.c_source_files) |c_source_file| {
         const c_object = try gpa.create(CObject);
         errdefer gpa.destroy(c_object);
@@ -2496,7 +2476,7 @@ pub fn create(gpa: Allocator, arena: Allocator, io: Io, diag: *CreateDiagnostic,
             .status = .{ .new = {} },
             .src = c_source_file,
         };
-        comp.c_object_table.putAssumeCapacityNoClobber(c_object, {});
+        comp.c_objects.appendAssumeCapacity(c_object);
     }
 
     // Add a `Win32Resource` for each `rc_source_files` and one for `manifest_file`.
@@ -2504,7 +2484,7 @@ pub fn create(gpa: Allocator, arena: Allocator, io: Io, diag: *CreateDiagnostic,
         options.rc_source_files.len + @intFromBool(options.manifest_file != null);
     if (win32_resource_count > 0) {
         dev.check(.win32_resource);
-        try comp.win32_resource_table.ensureTotalCapacity(gpa, win32_resource_count);
+        try comp.win32_resources.ensureTotalCapacity(gpa, win32_resource_count);
         for (options.rc_source_files) |rc_source_file| {
             const win32_resource = try gpa.create(Win32Resource);
             errdefer gpa.destroy(win32_resource);
@@ -2513,7 +2493,7 @@ pub fn create(gpa: Allocator, arena: Allocator, io: Io, diag: *CreateDiagnostic,
                 .status = .{ .new = {} },
                 .src = .{ .rc = rc_source_file },
             };
-            comp.win32_resource_table.putAssumeCapacityNoClobber(win32_resource, {});
+            comp.win32_resources.appendAssumeCapacity(win32_resource);
         }
 
         if (options.manifest_file) |manifest_path| {
@@ -2524,11 +2504,11 @@ pub fn create(gpa: Allocator, arena: Allocator, io: Io, diag: *CreateDiagnostic,
                 .status = .{ .new = {} },
                 .src = .{ .manifest = manifest_path },
             };
-            comp.win32_resource_table.putAssumeCapacityNoClobber(win32_resource, {});
+            comp.win32_resources.appendAssumeCapacity(win32_resource);
         }
     }
 
-    if (comp.emit_bin != null and target.ofmt != .c) {
+    if (comp.emit_bin != null) {
         if (!comp.skip_linker_dependencies) {
             // If we need to build libc for the target, add work items for it.
             // We go through the work queue so that building can be done in parallel.
@@ -2645,11 +2625,6 @@ pub fn create(gpa: Allocator, arena: Allocator, io: Io, diag: *CreateDiagnostic,
                     log.debug("queuing a job to build compiler_rt_obj", .{});
                     comp.queued_jobs.compiler_rt_obj = true;
                 },
-                .dyn_lib => {
-                    // hack for stage2_x86_64 + coff
-                    log.debug("queuing a job to build compiler_rt_dyn_lib", .{});
-                    comp.queued_jobs.compiler_rt_dyn_lib = true;
-                },
             }
 
             switch (comp.ubsan_rt_strat) {
@@ -2662,7 +2637,6 @@ pub fn create(gpa: Allocator, arena: Allocator, io: Io, diag: *CreateDiagnostic,
                     log.debug("queuing a job to build ubsan_rt_obj", .{});
                     comp.queued_jobs.ubsan_rt_obj = true;
                 },
-                .dyn_lib => unreachable, // hack for compiler_rt only
             }
 
             switch (comp.zigc_strat) {
@@ -2671,7 +2645,7 @@ pub fn create(gpa: Allocator, arena: Allocator, io: Io, diag: *CreateDiagnostic,
                     log.debug("queuing a job to build libzigc", .{});
                     comp.queued_jobs.zigc_lib = true;
                 },
-                .obj, .dyn_lib => unreachable, // only available as a static library or inside an existing ZCU
+                .obj => unreachable, // only available as a static library or inside an existing ZCU
             }
 
             if (is_exe_or_dyn_lib and comp.config.any_fuzz) {
@@ -2730,7 +2704,6 @@ pub fn destroy(comp: *Compilation) void {
     if (comp.zigc_static_lib) |*crt_file| crt_file.deinit(gpa, io);
     if (comp.compiler_rt_lib) |*crt_file| crt_file.deinit(gpa, io);
     if (comp.compiler_rt_obj) |*crt_file| crt_file.deinit(gpa, io);
-    if (comp.compiler_rt_dyn_lib) |*crt_file| crt_file.deinit(gpa, io);
     if (comp.fuzzer_lib) |*crt_file| crt_file.deinit(gpa, io);
 
     if (comp.glibc_so_files) |*glibc_file| {
@@ -2749,20 +2722,20 @@ pub fn destroy(comp: *Compilation) void {
         openbsd_file.deinit(gpa, io);
     }
 
-    for (comp.c_object_table.keys()) |key| {
-        key.destroy(gpa, io);
+    for (comp.c_objects.items) |c_object| {
+        c_object.destroy(gpa, io);
     }
-    comp.c_object_table.deinit(gpa);
+    comp.c_objects.deinit(gpa);
 
     for (comp.failed_c_objects.values()) |bundle| {
         bundle.destroy(gpa);
     }
     comp.failed_c_objects.deinit(gpa);
 
-    for (comp.win32_resource_table.keys()) |key| {
-        key.destroy(gpa, io);
+    for (comp.win32_resources.items) |win32_resource| {
+        win32_resource.destroy(gpa, io);
     }
-    comp.win32_resource_table.deinit(gpa);
+    comp.win32_resources.deinit(gpa);
 
     for (comp.failed_win32_resources.values()) |*value| {
         value.deinit(gpa);
@@ -3016,8 +2989,8 @@ pub fn update(comp: *Compilation, main_progress_node: std.Progress.Node) UpdateE
         // changes. For now, to avoid crashing the linker in this case, don't kick off C object
         // updates if we've done prelink already. https://codeberg.org/ziglang/zig/issues/32081
     } else {
-        try comp.c_object_work_queue.ensureUnusedCapacity(gpa, comp.c_object_table.count());
-        for (comp.c_object_table.keys()) |c_object| {
+        try comp.c_object_work_queue.ensureUnusedCapacity(gpa, comp.c_objects.items.len);
+        for (comp.c_objects.items) |c_object| {
             comp.c_object_work_queue.pushBackAssumeCapacity(c_object);
             try comp.appendFileSystemInput(try .fromUnresolved(arena, comp.dirs, &.{c_object.src.src_path}));
         }
@@ -3032,8 +3005,8 @@ pub fn update(comp: *Compilation, main_progress_node: std.Progress.Node) UpdateE
 
     // For compiling Win32 resources, we rely on the cache hash system to avoid duplicating work.
     // Add a Job for each Win32 resource file.
-    try comp.win32_resource_work_queue.ensureUnusedCapacity(gpa, comp.win32_resource_table.count());
-    for (comp.win32_resource_table.keys()) |win32_resource| {
+    try comp.win32_resource_work_queue.ensureUnusedCapacity(gpa, comp.win32_resources.items.len);
+    for (comp.win32_resources.items) |win32_resource| {
         comp.win32_resource_work_queue.pushBackAssumeCapacity(win32_resource);
         switch (win32_resource.src) {
             .rc => |f| {
@@ -3044,9 +3017,6 @@ pub fn update(comp: *Compilation, main_progress_node: std.Progress.Node) UpdateE
     }
 
     if (comp.zcu) |zcu| {
-        const pt: Zcu.PerThread = .activate(zcu, .main);
-        defer pt.deactivate();
-
         assert(zcu.cur_analysis_timer == null);
 
         zcu.skip_analysis_this_update = false;
@@ -3099,8 +3069,9 @@ pub fn update(comp: *Compilation, main_progress_node: std.Progress.Node) UpdateE
     try comp.performAllTheWork(main_progress_node, arena);
 
     if (comp.zcu) |zcu| {
-        const pt: Zcu.PerThread = .activate(zcu, .main);
-        defer pt.deactivate();
+        const active = zcu.acquire();
+        defer active.release();
+        const pt = active.pt;
 
         assert(zcu.cur_analysis_timer == null);
 
@@ -3142,18 +3113,16 @@ pub fn update(comp: *Compilation, main_progress_node: std.Progress.Node) UpdateE
         return;
     }
 
-    if (comp.zcu == null and comp.config.output_mode == .Obj and comp.c_object_table.count() == 1) {
+    if (comp.zcu == null and comp.config.output_mode == .Obj and comp.c_objects.items.len == 1) {
         // This is `zig build-obj foo.c`. We can emit asm and LLVM IR/bitcode.
-        const c_obj_path = comp.c_object_table.keys()[0].status.success.object_path;
+        const c_obj_path = comp.c_objects.items[0].status.success.object_path;
         if (comp.emit_asm) |path| try comp.emitFromCObject(arena, c_obj_path, ".s", path);
         if (comp.emit_llvm_ir) |path| try comp.emitFromCObject(arena, c_obj_path, ".ll", path);
         if (comp.emit_llvm_bc) |path| try comp.emitFromCObject(arena, c_obj_path, ".bc", path);
     }
 
     switch (comp.cache_use) {
-        .none, .incremental => {
-            try flush(comp, arena, .main);
-        },
+        .none, .incremental => try flush(comp, arena),
         .whole => |whole| {
             if (comp.file_system_inputs) |buf| try man.populateFileSystemInputs(buf);
             if (comp.parent_whole_cache) |pwc| {
@@ -3234,7 +3203,7 @@ pub fn update(comp: *Compilation, main_progress_node: std.Progress.Node) UpdateE
                 };
             }
 
-            try flush(comp, arena, .main);
+            try flush(comp, arena);
 
             // Calling `flush` may have produced errors, in which case the
             // cache manifest must not be written.
@@ -3325,12 +3294,12 @@ pub fn resolveEmitPathFlush(
     }
 }
 
-fn flush(comp: *Compilation, arena: Allocator, tid: Zcu.PerThread.Id) (Io.Cancelable || Allocator.Error)!void {
+fn flush(comp: *Compilation, arena: Allocator) (Io.Cancelable || Allocator.Error)!void {
     const io = comp.io;
+    const tid: Zcu.PerThread.Id = .acquire(io);
+    defer tid.release(io);
     if (comp.zcu) |zcu| {
         if (zcu.llvm_object) |llvm_object| {
-            const pt: Zcu.PerThread = .activate(zcu, tid);
-            defer pt.deactivate();
 
             // Emit the ZCU object from LLVM now; it's required to flush the output file.
             // If there's an output file, it wants to decide where the LLVM object goes!
@@ -3348,7 +3317,9 @@ fn flush(comp: *Compilation, arena: Allocator, tid: Zcu.PerThread.Id) (Io.Cancel
                 break :p try comp.resolveEmitPathFlush(arena, .temp, llvm_object.out_bin_basename);
             } else null;
 
-            llvm_object.emit(pt, .{
+            const active = zcu.activate(tid);
+            defer active.deactivate();
+            llvm_object.emit(active.pt, .{
                 .pre_ir_path = comp.verbose_llvm_ir,
                 .pre_bc_path = comp.verbose_llvm_bc,
 
@@ -3484,14 +3455,14 @@ fn addNonIncrementalStuffToCacheManifest(
 
     try link.hashInputs(man, comp.link_inputs);
 
-    for (comp.c_object_table.keys()) |key| {
-        _ = try man.addFile(key.src.src_path, null);
-        man.hash.addOptional(key.src.ext);
-        man.hash.addListOfBytes(key.src.extra_flags);
+    for (comp.c_objects.items) |c_object| {
+        _ = try man.addFile(c_object.src.src_path, null);
+        man.hash.addOptional(c_object.src.ext);
+        man.hash.addListOfBytes(c_object.src.extra_flags);
     }
 
-    for (comp.win32_resource_table.keys()) |key| {
-        switch (key.src) {
+    for (comp.win32_resources.items) |win32_resource| {
+        switch (win32_resource.src) {
             .rc => |rc_src| {
                 _ = try man.addFile(rc_src.src_path, null);
                 man.hash.addListOfBytes(rc_src.extra_flags);
@@ -4066,7 +4037,7 @@ pub fn getAllErrorsAlloc(comp: *Compilation) error{OutOfMemory}!ErrorBundle {
             }
         }
         if (zcu.skip_analysis_this_update) break :zcu_errors;
-        var sorted_failed_analysis: std.AutoArrayHashMapUnmanaged(InternPool.AnalUnit, *Zcu.ErrorMsg).DataList.Slice = s: {
+        var sorted_failed_analysis: std.array_hash_map.Auto(InternPool.AnalUnit, *Zcu.ErrorMsg).DataList.Slice = s: {
             const SortOrder = struct {
                 zcu: *Zcu,
                 errors: []const *Zcu.ErrorMsg,
@@ -4362,7 +4333,7 @@ pub fn addModuleErrorMsg(
 
     // De-duplicate error notes. The main use case in mind for this is
     // too many "note: called from here" notes when eval branch quota is reached.
-    var notes: std.ArrayHashMapUnmanaged(ErrorBundle.ErrorMessage, void, ErrorNoteHashContext, true) = .empty;
+    var notes: std.array_hash_map.Custom(ErrorBundle.ErrorMessage, void, ErrorNoteHashContext, true) = .empty;
     defer notes.deinit(gpa);
 
     var last_note_loc: ?std.zig.Loc = null;
@@ -4502,33 +4473,25 @@ fn performAllTheWork(
 
     defer if (comp.zcu) |zcu| zcu.codegen_task_pool.cancel(zcu);
     if (comp.zcu) |zcu| {
-        const pt: Zcu.PerThread = .activate(zcu, .main);
-        defer {
-            pt.deactivate();
-            // Regardless of errors, `comp.zcu` needs to update its generation number.
-            zcu.generation += 1;
-        }
-        try pt.update(main_progress_node, &decl_work_timer);
+        // Regardless of errors, `comp.zcu` needs to update its generation number.
+        defer zcu.generation += 1;
+        const active = zcu.acquire();
+        defer active.release();
+        try active.pt.update(main_progress_node, &decl_work_timer);
     }
 
     comp.link_queue.finishZcuQueue(comp);
 
-    // This has to happen after the main semantic analysis loop because it is possible for Sema to
-    // call `addLinkLib` and hence add more items to `comp.windows_libs`.
-    for (comp.windows_libs.keys()[comp.windows_libs_num_done..]) |link_lib| {
-        mingw.buildImportLib(comp, link_lib) catch |err| {
-            // TODO Surface more error details.
-            comp.lockAndSetMiscFailure(
-                .windows_import_lib,
-                "unable to generate DLL import .lib file for {s}: {t}",
-                .{ link_lib, err },
-            );
-        };
-    }
-    comp.windows_libs_num_done = @intCast(comp.windows_libs.count());
-
     // Main thread work is all done, now just wait for all async work.
     try misc_group.await(io);
+
+    // This has to happen again after the main semantic analysis loop because it is possible for Sema to
+    // call `addLinkLib` and hence add more items to `comp.windows_libs`.
+    for (comp.windows_libs.keys()[comp.windows_libs_num_done..]) |lib_name|
+        misc_group.async(io, buildMingwImportLib, .{ comp, lib_name, false, main_progress_node });
+    comp.windows_libs_num_done = @intCast(comp.windows_libs.count());
+    try misc_group.await(io);
+
     comp.link_queue.wait(io);
 }
 
@@ -4584,24 +4547,6 @@ fn dispatchPrelinkWork(comp: *Compilation, main_progress_node: std.Progress.Node
                 .allow_lto = false,
             },
             &comp.compiler_rt_obj,
-        });
-    }
-
-    // hack for stage2_x86_64 + coff
-    if (comp.queued_jobs.compiler_rt_dyn_lib and comp.compiler_rt_dyn_lib == null) {
-        prelink_group.async(io, buildRt, .{
-            comp,
-            "compiler_rt.zig",
-            "compiler_rt",
-            .Lib,
-            .dynamic,
-            .compiler_rt,
-            main_progress_node,
-            RtOptions{
-                .checks_valgrind = true,
-                .allow_lto = false,
-            },
-            &comp.compiler_rt_dyn_lib,
         });
     }
 
@@ -4748,6 +4693,16 @@ fn dispatchPrelinkWork(comp: *Compilation, main_progress_node: std.Progress.Node
         });
     }
 
+    while (comp.windows_libs_num_done < comp.windows_libs.count()) {
+        prelink_group.async(io, buildMingwImportLib, .{
+            comp,
+            comp.windows_libs.keys()[comp.windows_libs_num_done],
+            true,
+            main_progress_node,
+        });
+        comp.windows_libs_num_done += 1;
+    }
+
     prelink_group.await(io) catch |err| switch (err) {
         error.Canceled => unreachable, // see swapCancelProtection above
     };
@@ -4835,7 +4790,7 @@ fn docsCopyFallible(comp: *Compilation) anyerror!void {
     var buffer: [1024]u8 = undefined;
     var tar_file_writer = tar_file.writer(io, &buffer);
 
-    var seen_table: std.AutoArrayHashMapUnmanaged(*Package.Module, []const u8) = .empty;
+    var seen_table: std.array_hash_map.Auto(*Package.Module, []const u8) = .empty;
     defer seen_table.deinit(comp.gpa);
 
     try seen_table.put(comp.gpa, zcu.main_mod, comp.root_name);
@@ -5433,6 +5388,39 @@ fn buildMingwCrtFile(comp: *Compilation, crt_file: mingw.CrtFile, prog_node: std
     }
 }
 
+fn buildMingwImportLib(comp: *Compilation, lib_name: []const u8, is_prelink: bool, prog_node: std.Progress.Node) void {
+    const crt_file_path = mingw.buildImportLib(comp, lib_name, prog_node) catch |err| switch (err) {
+        // TODO: This isn't actually true for self-hosted
+        // In the non-prelink case we will end up putting foo.lib onto the linker line and letting the linker
+        // use its library paths to look for libraries and report any problems.
+        error.DefNotFound => return if (is_prelink) {
+            comp.lockAndSetMiscFailure(
+                .windows_import_lib,
+                "definition not found for required mingw DLL import .lib {s}",
+                .{lib_name},
+            );
+        },
+        // TODO Surface more error details.
+        else => |e| return comp.lockAndSetMiscFailure(
+            .windows_import_lib,
+            "unable to generate mingw DLL import .lib file for {s}: {t}",
+            .{ lib_name, e },
+        ),
+    };
+
+    if (is_prelink)
+        comp.queuePrelinkTasks(&.{.{
+            .load_archive = .{
+                .path = crt_file_path,
+                .must_link = false,
+            },
+        }}) catch |err| comp.lockAndSetMiscFailure(
+            .windows_import_lib,
+            "unable to queue prelink task for mingw import lib {f}: {t}",
+            .{ crt_file_path, err },
+        );
+}
+
 fn buildWasiLibcCrtFile(comp: *Compilation, crt_file: wasi_libc.CrtFile, prog_node: std.Progress.Node) void {
     if (wasi_libc.buildCrtFile(comp, crt_file, prog_node)) |_| {
         comp.queued_jobs.wasi_libc_crt_file[@intFromEnum(crt_file)] = false;
@@ -5596,9 +5584,10 @@ fn updateCObject(comp: *Compilation, c_object: *CObject, c_obj_prog_node: std.Pr
         c_source_basename[0 .. c_source_basename.len - fs.path.extension(c_source_basename).len];
 
     const target = comp.getTarget();
+    assert(target.ofmt != .c);
     const o_ext = target.ofmt.fileExt(target.cpu.arch);
     const digest = if (!comp.disable_c_depfile and try man.hit()) man.final() else blk: {
-        var argv = std.array_list.Managed([]const u8).init(gpa);
+        var argv: std.array_list.Managed([]const u8) = .init(gpa);
         defer argv.deinit();
 
         // In case we are doing passthrough mode, we need to detect -S and -emit-llvm.
@@ -6357,6 +6346,8 @@ fn addCommonCCArgs(
                 .serenity => try argv.append("__serenity__"),
                 // Homebrew targets without LLVM support; use communities's preferred macros.
                 .@"3ds" => try argv.append("-D__3DS__"),
+                .wiiu => try argv.append("-D__WIIU__"),
+                .psx => try argv.append("-D__psx__"),
                 .psp => try argv.append("-D__PSP__"),
                 .vita => try argv.append("-D__vita__"),
                 else => {},
@@ -7059,13 +7050,41 @@ pub const FileExt = enum {
             .unknown => "",
         };
     }
+
+    /// The value accepted by "zig clang -x <lang>" and passed to "clang -x <lang>".
+    pub fn toLang(ext: FileExt) ?[]const u8 {
+        return switch (ext) {
+            else => null,
+            .c => "c",
+            .h => "c-header",
+            .cpp => "c++",
+            .hpp => "c++-header",
+            .m => "objective-c",
+            .hm => "objective-c-header",
+            .mm => "objective-c++",
+            .hmm => "objective-c++-header",
+            .assembly => "assembler",
+            .assembly_with_cpp => "assembler-with-cpp",
+        };
+    }
+
+    /// Supported languages for "zig clang -x <lang>".
+    /// Loosely based on llvm-project/clang/include/clang/Driver/Types.def
+    pub const from_lang = std.StaticStringMap(FileExt).initComptime(init: {
+        var init: []const struct { []const u8, FileExt } = &.{};
+        for (std.enums.values(FileExt)) |file_ext| if (file_ext.toLang()) |lang| {
+            init = init ++ .{.{ lang, file_ext }};
+        };
+        break :init init;
+    });
 };
 
 pub fn hasObjectExt(filename: []const u8) bool {
     return mem.endsWith(u8, filename, ".o") or
         mem.endsWith(u8, filename, ".lo") or
         mem.endsWith(u8, filename, ".obj") or
-        mem.endsWith(u8, filename, ".rmeta");
+        mem.endsWith(u8, filename, ".rmeta") or
+        mem.endsWith(u8, filename, ".spv");
 }
 
 pub fn hasStaticLibraryExt(filename: []const u8) bool {

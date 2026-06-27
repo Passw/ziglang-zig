@@ -200,7 +200,7 @@ const MCValue = union(enum) {
 };
 
 const Branch = struct {
-    inst_table: std.AutoArrayHashMapUnmanaged(Air.Inst.Index, MCValue) = .empty,
+    inst_table: std.array_hash_map.Auto(Air.Inst.Index, MCValue) = .empty,
 
     fn deinit(self: *Branch, gpa: Allocator) void {
         self.inst_table.deinit(gpa);
@@ -538,7 +538,14 @@ fn genBody(self: *Self, body: []const Air.Inst.Index) InnerError!void {
             .ret_ptr         => try self.airRetPtr(inst),
             .arg             => try self.airArg(inst),
             .assembly        => try self.airAsm(inst),
-            .bitcast         => try self.airBitCast(inst),
+            .bit_cast        => try self.airBitCast(inst),
+            .ptr_cast        => try self.airBitCast(inst),
+            .ptr_from_int    => try self.airBitCast(inst),
+            .int_from_ptr    => try self.airBitCast(inst),
+            .error_cast      => try self.airBitCast(inst),
+            .error_from_int  => try self.airBitCast(inst),
+            .int_from_error  => try self.airBitCast(inst),
+            .union_from_enum => try self.airBitCast(inst),
             .block           => try self.airBlock(inst),
             .br              => try self.airBr(inst),
             .repeat          => return self.fail("TODO implement `repeat`", .{}),
@@ -550,7 +557,7 @@ fn genBody(self: *Self, body: []const Air.Inst.Index) InnerError!void {
             .cond_br         => try self.airCondBr(inst),
             .fptrunc         => @panic("TODO try self.airFptrunc(inst)"),
             .fpext           => @panic("TODO try self.airFpext(inst)"),
-            .intcast         => try self.airIntCast(inst),
+            .int_cast        => try self.airIntCast(inst),
             .trunc           => try self.airTrunc(inst),
             .is_non_null     => try self.airIsNonNull(inst),
             .is_non_null_ptr => @panic("TODO try self.airIsNonNullPtr(inst)"),
@@ -689,7 +696,7 @@ fn genBody(self: *Self, body: []const Air.Inst.Index) InnerError!void {
             .add_safe,
             .sub_safe,
             .mul_safe,
-            .intcast_safe,
+            .int_cast_safe,
             .int_from_float_safe,
             .int_from_float_optimized_safe,
             => @panic("TODO implement safety_checked_instructions"),
@@ -709,6 +716,7 @@ fn genBody(self: *Self, body: []const Air.Inst.Index) InnerError!void {
             .work_item_id => unreachable,
             .work_group_size => unreachable,
             .work_group_id => unreachable,
+            .spirv_runtime_array_len => unreachable,
             // zig fmt: on
         }
 
@@ -743,7 +751,7 @@ fn airAddSubWithOverflow(self: *Self, inst: Air.Inst.Index) !void {
         switch (lhs_ty.zigTypeTag(zcu)) {
             .vector => return self.fail("TODO implement add_with_overflow/sub_with_overflow for vectors", .{}),
             .int => {
-                assert(lhs_ty.eql(rhs_ty, zcu));
+                assert(lhs_ty.eql(rhs_ty));
                 const int_info = lhs_ty.intInfo(zcu);
                 switch (int_info.bits) {
                     32, 64 => {
@@ -1658,7 +1666,7 @@ fn airIntCast(self: *Self, inst: Air.Inst.Index) !void {
     const info_a = operand_ty.intInfo(zcu);
     const info_b = self.typeOfIndex(inst).intInfo(zcu);
     if (info_a.signedness != info_b.signedness)
-        return self.fail("TODO gen intcast sign safety in semantic analysis", .{});
+        return self.fail("TODO gen int_cast sign safety in semantic analysis", .{});
 
     if (info_a.bits == info_b.bits)
         return self.finishAir(inst, operand, .{ ty_op.operand, .none, .none });
@@ -1796,7 +1804,7 @@ fn airMod(self: *Self, inst: Air.Inst.Index) !void {
     const rhs = try self.resolveInst(bin_op.rhs);
     const lhs_ty = self.typeOf(bin_op.lhs);
     const rhs_ty = self.typeOf(bin_op.rhs);
-    assert(lhs_ty.eql(rhs_ty, self.pt.zcu));
+    assert(lhs_ty.eql(rhs_ty));
 
     if (self.liveness.isUnused(inst))
         return self.finishAir(inst, .dead, .{ bin_op.lhs, bin_op.rhs, .none });
@@ -1949,7 +1957,7 @@ fn airMulWithOverflow(self: *Self, inst: Air.Inst.Index) !void {
         switch (lhs_ty.zigTypeTag(zcu)) {
             .vector => return self.fail("TODO implement mul_with_overflow for vectors", .{}),
             .int => {
-                assert(lhs_ty.eql(rhs_ty, zcu));
+                assert(lhs_ty.eql(rhs_ty));
                 const int_info = lhs_ty.intInfo(zcu);
                 switch (int_info.bits) {
                     1...32 => {
@@ -2779,7 +2787,7 @@ fn binOp(
                 .float => return self.fail("TODO binary operations on floats", .{}),
                 .vector => return self.fail("TODO binary operations on vectors", .{}),
                 .int => {
-                    assert(lhs_ty.eql(rhs_ty, zcu));
+                    assert(lhs_ty.eql(rhs_ty));
                     const int_info = lhs_ty.intInfo(zcu);
                     if (int_info.bits <= 64) {
                         // Only say yes if the operation is
@@ -2869,7 +2877,7 @@ fn binOp(
             switch (lhs_ty.zigTypeTag(zcu)) {
                 .vector => return self.fail("TODO binary operations on vectors", .{}),
                 .int => {
-                    assert(lhs_ty.eql(rhs_ty, zcu));
+                    assert(lhs_ty.eql(rhs_ty));
                     const int_info = lhs_ty.intInfo(zcu);
                     if (int_info.bits <= 64) {
                         const rhs_immediate_ok = switch (tag) {
@@ -4225,7 +4233,7 @@ fn minMax(
 ) InnerError!MCValue {
     const pt = self.pt;
     const zcu = pt.zcu;
-    assert(lhs_ty.eql(rhs_ty, zcu));
+    assert(lhs_ty.eql(rhs_ty));
     switch (lhs_ty.zigTypeTag(zcu)) {
         .float => return self.fail("TODO min/max on floats", .{}),
         .vector => return self.fail("TODO min/max on vectors", .{}),

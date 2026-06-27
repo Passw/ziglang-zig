@@ -27,11 +27,11 @@ address_size: AddressSize,
 
 const_pool: link.ConstPool,
 
-mods: std.AutoArrayHashMapUnmanaged(*Module, ModInfo),
+mods: std.array_hash_map.Auto(*Module, ModInfo),
 /// Indices are `link.ConstPool.Index`.
 values: std.ArrayList(struct { Unit.Index, Entry.Index }),
-navs: std.AutoArrayHashMapUnmanaged(InternPool.Nav.Index, Entry.Index),
-decls: std.AutoArrayHashMapUnmanaged(InternPool.TrackedInst.Index, Entry.Index),
+navs: std.array_hash_map.Auto(InternPool.Nav.Index, Entry.Index),
+decls: std.array_hash_map.Auto(InternPool.TrackedInst.Index, Entry.Index),
 
 debug_abbrev: DebugAbbrev,
 debug_aranges: DebugAranges,
@@ -69,8 +69,8 @@ pub const AddressSize = enum(u8) {
 
 const ModInfo = struct {
     root_dir_path: Entry.Index,
-    dirs: std.AutoArrayHashMapUnmanaged(Unit.Index, void),
-    files: std.AutoArrayHashMapUnmanaged(Zcu.File.Index, void),
+    dirs: std.array_hash_map.Auto(Unit.Index, void),
+    files: std.array_hash_map.Auto(Zcu.File.Index, void),
 
     fn deinit(mod_info: *ModInfo, gpa: Allocator) void {
         mod_info.dirs.deinit(gpa);
@@ -236,7 +236,7 @@ const DebugRngLists = struct {
 
 const StringSection = struct {
     contents: std.ArrayList(u8),
-    map: std.AutoArrayHashMapUnmanaged(void, void),
+    map: std.array_hash_map.Auto(void, void),
     section: Section,
 
     const unit: Unit.Index = @enumFromInt(0);
@@ -3047,6 +3047,7 @@ fn updateComptimeNavInner(dwarf: *Dwarf, pt: Zcu.PerThread, nav_index: InternPoo
         .func_type,
         .error_set_type,
         .inferred_error_set_type,
+        .spirv_type,
         => .alias,
 
         .struct_type => tag: {
@@ -3533,6 +3534,7 @@ fn updateConstInner(dwarf: *Dwarf, pt: Zcu.PerThread, debug_const_index: link.Co
     switch (value_ip_key) {
         .func => unreachable, // handled above
         .@"extern" => unreachable, // handled above
+        .spirv_type => unreachable,
 
         .int_type => |int_type| {
             try wip_nav.abbrevCode(.numeric_type);

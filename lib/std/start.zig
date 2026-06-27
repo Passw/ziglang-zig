@@ -70,7 +70,19 @@ comptime {
             // case it's not required to provide an entrypoint such as main.
             if (!@hasDecl(root, start_sym_name) and @hasDecl(root, "main")) @export(&wasm_freestanding_start, .{ .name = start_sym_name });
         } else switch (native_os) {
-            .other, .freestanding, .@"3ds", .psp, .vita => {},
+            .other,
+            .freestanding,
+            .vulkan,
+            .opengl,
+            .opencl,
+
+            .@"3ds",
+            .wiiu,
+
+            .psx,
+            .psp,
+            .vita,
+            => {},
             else => if (!@hasDecl(root, start_sym_name)) @export(&_start, .{ .name = start_sym_name }),
         }
     }
@@ -81,7 +93,7 @@ fn DllMainCRTStartup(
     fdwReason: std.os.windows.DWORD,
     lpReserved: std.os.windows.LPVOID,
 ) callconv(.winapi) std.os.windows.BOOL {
-    if (!builtin.single_threaded and !builtin.link_libc) {
+    if (!builtin.single_threaded) {
         _ = @import("os/windows/tls.zig");
     }
 
@@ -373,7 +385,7 @@ fn _start() callconv(.naked) noreturn {
             \\ jalr $t9
             ,
             .mips64, .mips64el => switch (builtin.abi) {
-                .gnuabin32, .muslabin32 =>
+                .gnuabin32, .muslabin32, .abin32 =>
                 \\ move $fp, $zero
                 \\ bal 1f
                 \\ .gpword .

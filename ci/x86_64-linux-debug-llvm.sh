@@ -11,7 +11,7 @@ CACHE_BASENAME="zig+llvm+lld+clang-$TARGET-0.17.0-dev.203+073889523"
 PREFIX="$HOME/deps/$CACHE_BASENAME"
 ZIG="$PREFIX/bin/zig"
 
-export PATH="$HOME/deps/wasmtime-v44.0.0-x86_64-linux:$HOME/deps/qemu-linux-x86_64-11.0.1/bin:$HOME/local/bin:$PATH"
+export PATH="$HOME/deps/wasmtime-v46.0.1-x86_64-linux:$HOME/deps/qemu-linux-x86_64-11.0.1/bin:$HOME/local/bin:$PATH"
 
 # Override the cache directories because they won't actually help other CI runs
 # which will be testing alternate versions of zig, and ultimately would just
@@ -51,7 +51,7 @@ stage3-debug/bin/zig build \
 stage3-debug/bin/zig build test docs \
   --maxrss ${ZSF_MAX_RSS:-0} \
   -Dlldb=$HOME/deps/lldb-zig/Debug-7c1090fd46/bin/lldb \
-  -Dlibc-test-path=$HOME/deps/libc-test-f2bac77 \
+  -Dlibc-test-path=$HOME/deps/libc-test-b95fe84 \
   -fqemu \
   --libc-runtimes $HOME/deps/glibc-2.43-musl-1.2.5 \
   -fwasmtime \
