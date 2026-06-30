@@ -175,6 +175,9 @@ pub fn build(b: *std.Build) !void {
                 ".tar",
                 // exclude files from lib/std/zip/testdata
                 ".zip",
+                // exclude files from lib/compiler/Maker/Fetch/git/testdata
+                ".idx",
+                ".pack",
                 // others
                 "README.md",
             },
@@ -264,9 +267,8 @@ pub fn build(b: *std.Build) !void {
             std.process.exit(1);
         }
 
-        // Ensure git version changes get picked up
-        // https://codeberg.org/ziglang/zig/issues/35473
-        b.graph.poisonCache();
+        // Ensure git version changes get picked up.
+        b.dependOnFileContents(b.path(".git/HEAD"));
 
         const version_string = b.fmt("{d}.{d}.{d}", .{ zig_version.major, zig_version.minor, zig_version.patch });
 
