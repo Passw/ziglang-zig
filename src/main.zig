@@ -4305,11 +4305,8 @@ fn serve(
     const gpa = comp.gpa;
     const io = comp.io;
 
-    var server = try Server.init(.{
-        .in = in,
-        .out = out,
-        .zig_version = build_options.version,
-    });
+    var server: Server = .{ .in = in, .out = out };
+    try server.serveStringMessage(.zig_version, build_options.version);
 
     var child_pid: ?std.process.Child.Id = null;
 
