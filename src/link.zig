@@ -1243,7 +1243,7 @@ pub const File = struct {
                 dev.check(tag.devFeature());
                 try @as(*tag.Type(), @fieldParentPtr("base", base)).prelink(base.comp.link_prog_node);
             },
-            else => {},
+            else => base.comp.link_prog_node.completeOne(),
         }
 
         base.post_prelink = true;
