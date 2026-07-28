@@ -50,8 +50,8 @@ pub fn failPrint(comptime fmt: []const u8, args: anytype) void {
     }
 }
 
-/// This function is intended to be used only in tests. It prints diagnostics to stderr
-/// and then returns a test failure error when actual_error_union is not expected_error.
+/// This function is intended to be used only in tests. When `actual_error_union` is not
+/// `expected_error`, it prints diagnostics to stderr, then returns a test failure error.
 pub fn expectError(expected_error: anyerror, actual_error_union: anytype) !void {
     if (actual_error_union) |actual_payload| {
         failPrint("expected error.{s}, found {any}\n", .{ @errorName(expected_error), actual_payload });
@@ -358,7 +358,7 @@ test expectApproxEqRel {
 }
 
 /// This function is intended to be used only in tests. When the two slices are
-/// not equal, prints diagnostics to stderr to show exactly how they are not
+/// not equal, it prints diagnostics to stderr to show exactly how they are not
 /// equal (with the differences highlighted in red), then returns a test
 /// failure error.
 pub fn expectEqualSlices(comptime T: type, expected: []const T, actual: []const T) !void {
@@ -567,8 +567,10 @@ test {
     );
 }
 
-/// This function is intended to be used only in tests. Checks that two slices or two arrays are equal,
-/// including that their sentinel (if any) are the same. Will error if given another type.
+/// This function is intended to be used only in tests. When the two slices or two arrays are not equal,
+/// or their sentinel (if any) are not the same, it prints diagnostics to stderr to show exactly how
+/// they are not equal (with the differences highlighted in red), then returns a test failure error.
+/// It partially depends on `expectEquaSlices` for printing diagnostics.
 pub fn expectEqualSentinel(comptime T: type, comptime sentinel: T, expected: [:sentinel]const T, actual: [:sentinel]const T) !void {
     try expectEqualSlices(T, expected, actual);
 
@@ -654,6 +656,8 @@ pub fn tmpDir(opts: Io.Dir.OpenOptions) TmpDir {
     };
 }
 
+/// This function is intended to be used only in test. When the two strings are not equal,
+/// it prints diagnostics to stderr to show how they are not equal, then returns an error.
 pub fn expectEqualStrings(expected: []const u8, actual: []const u8) !void {
     if (std.mem.findDiff(u8, actual, expected)) |diff_index| {
         if (@inComptime()) {
@@ -683,6 +687,8 @@ pub fn expectEqualStrings(expected: []const u8, actual: []const u8) !void {
     }
 }
 
+/// This function is intended to be used only in test. When the start of `actual` and `expected_starts_with`
+/// are not equal, it prints diagnostics to stderr to show how they are not equal, then returns an error.
 pub fn expectStringStartsWith(actual: []const u8, expected_starts_with: []const u8) !void {
     if (std.mem.startsWith(u8, actual, expected_starts_with))
         return;
@@ -703,6 +709,8 @@ pub fn expectStringStartsWith(actual: []const u8, expected_starts_with: []const 
     return error.TestExpectedStartsWith;
 }
 
+/// This function is intended to be used only in test. When the end of `actual` and `expected_ends_with`
+/// are not equal, it prints diagnostics to stderr to show how they are not equal, then returns an error.
 pub fn expectStringEndsWith(actual: []const u8, expected_ends_with: []const u8) !void {
     if (std.mem.endsWith(u8, actual, expected_ends_with))
         return;
