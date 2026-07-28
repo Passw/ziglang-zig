@@ -41,7 +41,8 @@ pub const backend_can_print = switch (builtin.zig_backend) {
     else => true,
 };
 
-fn failPrint(comptime fmt: []const u8, args: anytype) void {
+/// Helper function for printing test failure information.
+pub fn failPrint(comptime fmt: []const u8, args: anytype) void {
     if (@inComptime()) {
         @compileError(std.fmt.comptimePrint(fmt, args));
     } else if (backend_can_print) {
@@ -998,7 +999,8 @@ test "expectEqualDeep composite type" {
     );
 }
 
-fn failPrintIndicatorLine(source: []const u8, indicator_index: usize) void {
+/// Helper function for printing test failure information.
+pub fn failPrintIndicatorLine(source: []const u8, indicator_index: usize) void {
     const line_begin_index = if (std.mem.findScalarLast(u8, source[0..indicator_index], '\n')) |line_begin|
         line_begin + 1
     else
@@ -1017,7 +1019,8 @@ fn failPrintIndicatorLine(source: []const u8, indicator_index: usize) void {
         failPrint("^ ('\\x{x:0>2}')\n", .{source[indicator_index]});
 }
 
-fn failPrintWithVisibleNewlines(source: []const u8) void {
+/// Helper function for printing test failure information.
+pub fn failPrintWithVisibleNewlines(source: []const u8) void {
     var i: usize = 0;
     while (std.mem.findScalar(u8, source[i..], '\n')) |nl| : (i += nl + 1) {
         failPrintLine(source[i..][0..nl]);
@@ -1025,7 +1028,8 @@ fn failPrintWithVisibleNewlines(source: []const u8) void {
     failPrint("{s}␃\n", .{source[i..]}); // End of Text symbol (ETX)
 }
 
-fn failPrintLine(line: []const u8) void {
+/// Helper function for printing test failure information.
+pub fn failPrintLine(line: []const u8) void {
     if (line.len != 0) switch (line[line.len - 1]) {
         ' ', '\t' => return failPrint("{s}⏎\n", .{line}), // Return symbol
         else => {},
