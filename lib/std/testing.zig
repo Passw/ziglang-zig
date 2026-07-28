@@ -18,10 +18,7 @@ var failing_allocator_instance = FailingAllocator.init(base_allocator_instance.a
 var base_allocator_instance = std.heap.FixedBufferAllocator.init("");
 
 pub var allocator_instance: std.heap.SafeAllocator = undefined;
-pub const allocator = if (builtin.is_test)
-    allocator_instance.allocator()
-else
-    @compileError("not testing");
+pub const allocator = if (builtin.is_test) allocator_instance.allocator() else @compileError("not testing");
 
 pub var io_instance: Io.Threaded = undefined;
 pub const io = if (builtin.is_test) io_instance.io() else @compileError("not testing");
@@ -47,23 +44,6 @@ pub fn failPrint(comptime fmt: []const u8, args: anytype) void {
         @compileError(std.fmt.comptimePrint(fmt, args));
     } else if (backend_can_print) {
         std.debug.print(fmt, args);
-    }
-}
-
-/// This function is intended to be used only in tests. When `actual_error_union` is not
-/// `expected_error`, it prints diagnostics to stderr, then returns a test failure error.
-pub fn expectError(expected_error: anyerror, actual_error_union: anytype) !void {
-    if (actual_error_union) |actual_payload| {
-        failPrint("expected error.{s}, found {any}\n", .{ @errorName(expected_error), actual_payload });
-        return error.TestExpectedError;
-    } else |actual_error| {
-        if (expected_error != actual_error) {
-            failPrint("expected error.{s}, found error.{s}\n", .{
-                @errorName(expected_error),
-                @errorName(actual_error),
-            });
-            return error.TestUnexpectedError;
-        }
     }
 }
 
@@ -219,7 +199,7 @@ fn expectEqualInner(comptime T: type, expected: T, actual: T) !void {
     }
 }
 
-test "expectEqual.union(enum)" {
+test "expectEqual union(enum)" {
     const T = union(enum) {
         a: i32,
         b: f32,
@@ -266,20 +246,6 @@ test "expectEqual null" {
     const b = @Vector(1, ?*u8){null};
 
     try expectEqual(a, b);
-}
-
-/// This function is intended to be used only in tests. When the formatted result of the template
-/// and its arguments does not equal the expected text, it prints diagnostics to stderr to show how
-/// they are not equal, then returns an error. It depends on `expectEqualStrings` for printing
-/// diagnostics.
-pub fn expectFmt(expected: []const u8, comptime template: []const u8, args: anytype) !void {
-    if (@inComptime()) {
-        var buffer: [std.fmt.count(template, args)]u8 = undefined;
-        return expectEqualStrings(expected, try std.fmt.bufPrint(&buffer, template, args));
-    }
-    const actual = try std.fmt.allocPrint(allocator, template, args);
-    defer allocator.free(actual);
-    return expectEqualStrings(expected, actual);
 }
 
 /// This function is intended to be used only in tests. When the actual value is
@@ -553,7 +519,7 @@ const BytesDiffer = struct {
     }
 };
 
-test {
+test expectEqualSlices {
     try expectEqualSlices(u8, "foo\x00", "foo\x00");
     try expectEqualSlices(u16, &[_]u16{ 100, 200, 300, 400 }, &[_]u16{ 100, 200, 300, 400 });
     const E = enum { foo, bar };
@@ -656,7 +622,47 @@ pub fn tmpDir(opts: Io.Dir.OpenOptions) TmpDir {
     };
 }
 
-/// This function is intended to be used only in test. When the two strings are not equal,
+/// This function is intended to be used only in tests. When `actual_error_union` is not
+/// `expected_error`, it prints diagnostics to stderr, then returns a test failure error.
+pub fn expectError(expected_error: anyerror, actual_error_union: anytype) !void {
+    if (actual_error_union) |actual_payload| {
+        failPrint("expected error.{s}, found {any}\n", .{ @errorName(expected_error), actual_payload });
+        return error.TestExpectedError;
+    } else |actual_error| {
+        if (expected_error != actual_error) {
+            failPrint("expected error.{s}, found error.{s}\n", .{
+                @errorName(expected_error),
+                @errorName(actual_error),
+            });
+            return error.TestUnexpectedError;
+        }
+    }
+}
+
+fn returnErrorUnion() !u8 {
+    return error.Expected;
+}
+
+test expectError {
+    const actualErrorUnion = returnErrorUnion();
+    try expectError(error.Expected, actualErrorUnion);
+}
+
+/// This function is intended to be used only in tests. When the formatted result of the template
+/// and its arguments does not equal the expected text, it prints diagnostics to stderr to show how
+/// they are not equal, then returns an error. It depends on `expectEqualStrings` for printing
+/// diagnostics.
+pub fn expectFmt(expected: []const u8, comptime template: []const u8, args: anytype) !void {
+    if (@inComptime()) {
+        var buffer: [std.fmt.count(template, args)]u8 = undefined;
+        return expectEqualStrings(expected, try std.fmt.bufPrint(&buffer, template, args));
+    }
+    const actual = try std.fmt.allocPrint(allocator, template, args);
+    defer allocator.free(actual);
+    return expectEqualStrings(expected, actual);
+}
+
+// This function is intended to be used only in test. When the two strings are not equal,
 /// it prints diagnostics to stderr to show how they are not equal, then returns an error.
 pub fn expectEqualStrings(expected: []const u8, actual: []const u8) !void {
     if (std.mem.findDiff(u8, actual, expected)) |diff_index| {
@@ -687,6 +693,10 @@ pub fn expectEqualStrings(expected: []const u8, actual: []const u8) !void {
     }
 }
 
+test expectEqualStrings {
+    try expectEqualStrings("foo", "foo");
+}
+
 /// This function is intended to be used only in test. When the start of `actual` and `expected_starts_with`
 /// are not equal, it prints diagnostics to stderr to show how they are not equal, then returns an error.
 pub fn expectStringStartsWith(actual: []const u8, expected_starts_with: []const u8) !void {
@@ -709,6 +719,10 @@ pub fn expectStringStartsWith(actual: []const u8, expected_starts_with: []const 
     return error.TestExpectedStartsWith;
 }
 
+test expectStringStartsWith {
+    try expectStringStartsWith("foobar", "foo");
+}
+
 /// This function is intended to be used only in test. When the end of `actual` and `expected_ends_with`
 /// are not equal, it prints diagnostics to stderr to show how they are not equal, then returns an error.
 pub fn expectStringEndsWith(actual: []const u8, expected_ends_with: []const u8) !void {
@@ -729,6 +743,10 @@ pub fn expectStringEndsWith(actual: []const u8, expected_ends_with: []const u8) 
     failPrint("\n======================================\n", .{});
 
     return error.TestExpectedEndsWith;
+}
+
+test expectStringEndsWith {
+    try expectStringEndsWith("foobar", "bar");
 }
 
 /// This function is intended to be used only in tests. When the two values are not
@@ -1043,10 +1061,6 @@ pub fn failPrintLine(line: []const u8) void {
         else => {},
     };
     failPrint("{s}\n", .{line});
-}
-
-test {
-    try expectEqualStrings("foo", "foo");
 }
 
 /// Exhaustively check that allocation failures within `test_fn` are handled without
