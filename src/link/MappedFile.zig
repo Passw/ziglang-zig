@@ -636,9 +636,31 @@ pub const Node = extern struct {
             return mf.memory_map.memory[@intCast(file_loc.offset)..][0..@intCast(file_loc.size)];
         }
 
+        pub fn slicePadding(ni: Node.Index, mf: *const MappedFile) []u8 {
+            const file_loc = ni.fileLocation(mf, false);
+            return mf.memory_map.memory[@intCast(file_loc.offset)..][0..@intCast(file_loc.size)];
+        }
+
         pub fn sliceConst(ni: Node.Index, mf: *const MappedFile) []const u8 {
             const file_loc = ni.fileLocation(mf, false);
             return mf.memory_map.memory[@intCast(file_loc.offset)..][0..@intCast(file_loc.size)];
+        }
+
+        pub fn trimStart(ni: Node.Index, mf: *MappedFile, gpa: Allocator) Allocator.Error!void {
+            mf.nodes_lock.assertUnlocked();
+            const node = ni.get(mf);
+            const first_ni = node.first.unwrap() orelse return;
+            const shift, _ = first_ni.location(mf).resolve(mf);
+            if (shift == 0) return;
+            const offset, const size = node.location().resolve(mf);
+            try ni.setLocation(mf, gpa, offset + shift, size - shift);
+            var child_oni = node.first;
+            while (child_oni.unwrap()) |child_ni| {
+                const child_node = child_ni.get(mf);
+                const child_offset, const child_size = child_node.location().resolve(mf);
+                try child_ni.setLocation(mf, gpa, child_offset - shift, child_size);
+                child_oni = child_node.next;
+            }
         }
 
         /// Ensures that the size of `ni` is at least `min_size`. Valid for any node.

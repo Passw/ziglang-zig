@@ -757,6 +757,8 @@ pub const File = struct {
 
     pub const DebugInfoOutput = union(enum) {
         dwarf: *Dwarf.WipNav,
+        eh_frame: *Dwarf2.WipNav,
+        dwarf2: *Dwarf2.WipNav.Debug,
         none,
     };
     pub const UpdateDebugInfoError = Dwarf.UpdateError;
@@ -1391,6 +1393,7 @@ pub const File = struct {
     pub const SpirV = @import("link/SpirV.zig");
     pub const Wasm = @import("link/Wasm.zig");
     pub const Dwarf = @import("link/Dwarf.zig");
+    pub const Dwarf2 = @import("link/Dwarf2.zig");
 };
 
 pub const PrelinkTask = union(enum) {
