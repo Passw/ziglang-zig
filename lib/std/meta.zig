@@ -1,10 +1,9 @@
 const builtin = @import("builtin");
+
 const std = @import("std.zig");
-const debug = std.debug;
+const assert = std.debug.assert;
 const mem = std.mem;
-const math = std.math;
 const testing = std.testing;
-const root = @import("root");
 
 pub const TrailerFlags = @import("meta/trailer_flags.zig").TrailerFlags;
 
@@ -821,8 +820,8 @@ pub fn isError(error_union: anytype) bool {
 }
 
 test isError {
-    try std.testing.expect(isError(math.divTrunc(u8, 5, 0)));
-    try std.testing.expect(!isError(math.divTrunc(u8, 5, 5)));
+    try std.testing.expect(isError(std.math.divTrunc(u8, 5, 0)));
+    try std.testing.expect(!isError(std.math.divTrunc(u8, 5, 5)));
 }
 
 /// Returns true if a type has a namespace and the namespace contains `name`;
@@ -1069,4 +1068,29 @@ test hasUniqueRepresentation {
     };
 
     try testing.expect(hasUniqueRepresentation(StructWithComptimeFields));
+}
+
+/// Given a pointer type, type-erases the array length if present, returning an
+/// equivalent pointer type that is always a slice.
+pub fn Slice(comptime Pointer: type) type {
+    const info = @typeInfo(Pointer).pointer;
+    switch (info.size) {
+        .slice => return Pointer,
+        .one => {
+            const child_info = @typeInfo(info.child);
+            comptime assert(child_info == .array);
+            const sentinel_ptr: ?*const child_info.array.child = @ptrCast(@alignCast(child_info.array.sentinel_ptr));
+            return @Pointer(
+                .slice,
+                info.attrs,
+                child_info.array.child,
+                if (sentinel_ptr) |ptr| ptr.* else null,
+            );
+        },
+        else => unreachable,
+    }
+}
+
+test Slice {
+    try testing.expectEqual([]i32, Slice(*[10]i32));
 }
