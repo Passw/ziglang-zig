@@ -68,9 +68,11 @@ rename_step_with_output_arg: bool,
 /// executed binary will not fail the build if the binary cannot be executed
 /// due to being for a foreign binary to the host system which is running the
 /// build graph.
+///
 /// Command-line arguments such as -fqemu and -fwasmtime may affect whether a
 /// binary is detected as foreign, as well as system configuration such as
 /// Rosetta (macOS) and binfmt_misc (Linux).
+///
 /// If this Run step is considered to have side-effects, then this flag does
 /// nothing.
 skip_foreign_checks: bool,
