@@ -2455,29 +2455,25 @@ pub fn addStackTraceTests(
     };
     stack_traces.addCases(host_cases, b.graph.host.result.os.tag);
 
-    if (b.enable_wine) {
-        const wine_cases = b.allocator.create(StackTracesContext) catch @panic("OOM");
-        wine_cases.* = .{
-            .b = b,
-            .step = step,
-            .test_filters = test_filters,
-            .targets = wineAndCompatible32bit(b, skip_non_native),
-            .convert_exe = convert_exe,
-        };
-        stack_traces.addCases(wine_cases, .windows);
-    }
+    const wine_cases = b.allocator.create(StackTracesContext) catch @panic("OOM");
+    wine_cases.* = .{
+        .b = b,
+        .step = step,
+        .test_filters = test_filters,
+        .targets = wineAndCompatible32bit(b, skip_non_native),
+        .convert_exe = convert_exe,
+    };
+    stack_traces.addCases(wine_cases, .windows);
 
-    if (b.enable_darling) {
-        const darling_cases = b.allocator.create(StackTracesContext) catch @panic("OOM");
-        darling_cases.* = .{
-            .b = b,
-            .step = step,
-            .test_filters = test_filters,
-            .targets = darlingTargets(b),
-            .convert_exe = convert_exe,
-        };
-        stack_traces.addCases(darling_cases, .macos);
-    }
+    const darling_cases = b.allocator.create(StackTracesContext) catch @panic("OOM");
+    darling_cases.* = .{
+        .b = b,
+        .step = step,
+        .test_filters = test_filters,
+        .targets = darlingTargets(b),
+        .convert_exe = convert_exe,
+    };
+    stack_traces.addCases(darling_cases, .macos);
 
     return step;
 }
@@ -2510,31 +2506,27 @@ pub fn addErrorTraceTests(
     };
     error_traces.addCases(host_cases, b.graph.host.result.os.tag);
 
-    if (b.enable_wine) {
-        const wine_cases = b.allocator.create(ErrorTracesContext) catch @panic("OOM");
-        wine_cases.* = .{
-            .b = b,
-            .step = step,
-            .test_filters = test_filters,
-            .targets = wineAndCompatible32bit(b, skip_non_native),
-            .optimize_modes = optimize_modes,
-            .convert_exe = convert_exe,
-        };
-        error_traces.addCases(wine_cases, .windows);
-    }
+    const wine_cases = b.allocator.create(ErrorTracesContext) catch @panic("OOM");
+    wine_cases.* = .{
+        .b = b,
+        .step = step,
+        .test_filters = test_filters,
+        .targets = wineAndCompatible32bit(b, skip_non_native),
+        .optimize_modes = optimize_modes,
+        .convert_exe = convert_exe,
+    };
+    error_traces.addCases(wine_cases, .windows);
 
-    if (b.enable_darling) {
-        const darling_cases = b.allocator.create(ErrorTracesContext) catch @panic("OOM");
-        darling_cases.* = .{
-            .b = b,
-            .step = step,
-            .test_filters = test_filters,
-            .targets = darlingTargets(b),
-            .optimize_modes = optimize_modes,
-            .convert_exe = convert_exe,
-        };
-        error_traces.addCases(darling_cases, .macos);
-    }
+    const darling_cases = b.allocator.create(ErrorTracesContext) catch @panic("OOM");
+    darling_cases.* = .{
+        .b = b,
+        .step = step,
+        .test_filters = test_filters,
+        .targets = darlingTargets(b),
+        .optimize_modes = optimize_modes,
+        .convert_exe = convert_exe,
+    };
+    error_traces.addCases(darling_cases, .macos);
 
     return step;
 }

@@ -105,6 +105,7 @@ fn addCaseConfig(
     exe.bundle_ubsan_rt = false;
 
     const run = b.addRunArtifact(exe);
+    run.skip_foreign_checks = true;
     run.removeEnvironmentVariable("CLICOLOR_FORCE");
     run.setEnvironmentVariable("NO_COLOR", "1");
     run.expectExitCode(1);
@@ -116,6 +117,7 @@ fn addCaseConfig(
     };
 
     const check_run = b.addRunArtifact(self.convert_exe);
+    check_run.skip_foreign_checks = true;
     check_run.setName(annotated_case_name);
     check_run.addFileArg(run.captureStdErr(.{}));
     check_run.expectStdOutEqual(expected_stderr);

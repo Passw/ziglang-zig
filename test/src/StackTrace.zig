@@ -224,6 +224,7 @@ fn addCaseInstance(
     exe.bundle_ubsan_rt = false;
 
     const run = b.addRunArtifact(exe);
+    run.skip_foreign_checks = true;
     run.removeEnvironmentVariable("CLICOLOR_FORCE");
     run.setEnvironmentVariable("NO_COLOR", "1");
     run.addCheck(.{ .expect_term = term: {
@@ -234,6 +235,7 @@ fn addCaseInstance(
     run.expectStdOutEqual("");
 
     const check_run = b.addRunArtifact(self.convert_exe);
+    check_run.skip_foreign_checks = true;
     check_run.setName(annotated_case_name);
     check_run.addFileArg(run.captureStdErr(.{}));
     check_run.expectExitCode(0);
