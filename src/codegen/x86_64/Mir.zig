@@ -1978,7 +1978,7 @@ pub fn emit(
     atom_id: link.File.AtomId,
     w: *std.Io.Writer,
     debug_output: link.File.DebugInfoOutput,
-) codegen.EmitError!void {
+) link.EmitError!void {
     const zcu = pt.zcu;
     const comp = zcu.comp;
     const gpa = comp.gpa;
@@ -2021,7 +2021,7 @@ pub fn emit(
         error.LowerFail, error.EmitFail => return zcu.codegenFailMsg(nav, em.lower.err_msg.?),
         error.InvalidInstruction, error.CannotEncode => return zcu.codegenFail(nav, "emit MIR failed: {s} (Zig compiler bug)", .{@errorName(err)}),
         else => return zcu.codegenFail(nav, "emit MIR failed: {s}", .{@errorName(err)}),
-        error.AlreadyReported, error.Canceled, error.MappedFileIo, error.WriteFailed => |e| return e,
+        error.AlreadyReported, error.Canceled, error.WriteFailed => |e| return e,
     };
 }
 
@@ -2033,7 +2033,7 @@ pub fn emitLazy(
     atom_id: link.File.AtomId,
     w: *std.Io.Writer,
     debug_output: link.File.DebugInfoOutput,
-) codegen.EmitError!void {
+) link.EmitError!void {
     const zcu = pt.zcu;
     const comp = zcu.comp;
     const gpa = comp.gpa;
@@ -2065,7 +2065,7 @@ pub fn emitLazy(
         error.LowerFail, error.EmitFail => return zcu.codegenFailTypeMsg(lazy_sym.ty, em.lower.err_msg.?),
         error.InvalidInstruction, error.CannotEncode => return zcu.codegenFailType(lazy_sym.ty, "emit MIR failed: {s} (Zig compiler bug)", .{@errorName(err)}),
         else => return zcu.codegenFailType(lazy_sym.ty, "emit MIR failed: {s}", .{@errorName(err)}),
-        error.AlreadyReported, error.Canceled, error.MappedFileIo, error.WriteFailed => |e| return e,
+        error.AlreadyReported, error.Canceled, error.WriteFailed => |e| return e,
     };
 }
 

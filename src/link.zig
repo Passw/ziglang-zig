@@ -38,6 +38,7 @@ pub const Error = Allocator.Error || Io.Cancelable || error{
     /// instance in `Compilation.link_diags`.
     AlreadyReported,
 };
+pub const EmitError = Error || Io.Writer.Error;
 
 pub const Diags = struct {
     /// Stored here so that function definitions can distinguish between

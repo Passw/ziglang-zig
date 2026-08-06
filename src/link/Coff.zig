@@ -7356,7 +7356,7 @@ fn updateExportInner(
     pt: Zcu.PerThread,
     export_index: Zcu.Export.Index,
     alias_syms: *std.array_hash_map.Auto(Symbol.Index, Symbol.Index),
-) !void {
+) Error!void {
     const zcu = pt.zcu;
     const gpa = zcu.gpa;
     const ip = &zcu.intern_pool;
@@ -7519,17 +7519,19 @@ fn updateExportInner(
     }
 }
 
-fn dumpStderr(coff: *Coff, tid: Zcu.PerThread.Id) !void {
+fn dumpStderr(coff: *Coff, tid: Zcu.PerThread.Id) Io.File.Writer.Error!void {
     const comp = coff.base.comp;
     const io = comp.io;
     var buffer: [512]u8 = undefined;
     const stderr = try io.lockStderr(&buffer, null);
     defer io.unlockStderr();
     const w = &stderr.file_writer.interface;
-    _ = try coff.dump(w, tid);
+    _ = coff.dump(w, tid) catch |err| switch (err) {
+        error.WriteFailed => return stderr.file_writer.err.?,
+    };
 }
 
-pub fn dump(coff: *Coff, w: *Io.Writer, tid: Zcu.PerThread.Id) !link.File.DumpResult {
+pub fn dump(coff: *Coff, w: *Io.Writer, tid: Zcu.PerThread.Id) Io.Writer.Error!link.File.DumpResult {
     if (coff.options.enable_link_snapshots) {
         try coff.printNode(tid, w, .root, 0);
         try w.writeAll("Section table:\n");
@@ -7544,7 +7546,7 @@ pub fn dump(coff: *Coff, w: *Io.Writer, tid: Zcu.PerThread.Id) !link.File.DumpRe
     return .disabled;
 }
 
-fn printSection(coff: *Coff, w: *Io.Writer, name: String, si: Symbol.Index) !void {
+fn printSection(coff: *Coff, w: *Io.Writer, name: String, si: Symbol.Index) Io.Writer.Error!void {
     const sym = si.get(coff);
     try w.print("{d:0>6}@{d:0>2} {x:08} n{d:0>8} | {s}\n", .{
         si,
@@ -7560,7 +7562,7 @@ fn printSymbol(
     w: *Io.Writer,
     tid: Zcu.PerThread.Id,
     si: Symbol.Index,
-) !void {
+) Io.Writer.Error!void {
     const sym = si.get(coff);
     try w.print("{d:0>6}@{d:0>2} {x:08} {s} {s} {s} n{d:0>8}+{x:08}:{s: <26} | {x:08} ", .{
         si,
@@ -7622,7 +7624,7 @@ fn printNodeName(
     w: *std.Io.Writer,
     tid: Zcu.PerThread.Id,
     node: Node,
-) !void {
+) Io.Writer.Error!void {
     switch (node) {
         else => {},
         .image_section => |si| try w.print("({s})", .{
@@ -7702,7 +7704,7 @@ pub fn printNode(
     w: *Io.Writer,
     ni: MappedFile.Node.Index,
     indent: usize,
-) !void {
+) Io.Writer.Error!void {
     const node = coff.getNode(ni);
     try w.splatByteAll(' ', indent);
     try w.writeAll(@tagName(node));

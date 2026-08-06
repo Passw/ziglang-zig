@@ -16,7 +16,7 @@ code_offset_mapping: std.ArrayList(u32),
 relocs: std.ArrayList(Reloc),
 table_relocs: std.ArrayList(TableReloc),
 
-pub const Error = Lower.Error || codegen.EmitError || error{
+pub const Error = Lower.Error || codegen.Error || std.Io.Writer.Error || error{
     EmitFail,
 } || std.posix.MMapError || std.posix.MRemapError || link.File.UpdateDebugInfoError;
 

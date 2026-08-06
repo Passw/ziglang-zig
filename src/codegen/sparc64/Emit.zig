@@ -41,7 +41,7 @@ branch_forward_origins: std.AutoHashMapUnmanaged(Mir.Inst.Index, std.ArrayList(M
 /// instruction
 code_offset_mapping: std.AutoHashMapUnmanaged(Mir.Inst.Index, usize) = .empty,
 
-const InnerError = codegen.EmitError || error{
+const InnerError = link.EmitError || error{
     EmitFail,
 };
 

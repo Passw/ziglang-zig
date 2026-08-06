@@ -181,10 +181,10 @@ lazy: std.EnumArray(link.File.LazySymbol.Kind, struct {
 }),
 pending_uavs: std.ArrayList(Node.UavMapIndex),
 symbol_relocs: std.ArrayList(SymbolReloc),
-/// Set of relocations which must be re-applied if the size of the TLS segment changes.
-tls_size_symbol_relocs: std.array_hash_map.Auto(SymbolReloc.Index, void),
 node_relocs: std.ArrayList(NodeReloc),
 got_relocs: std.ArrayList(GotReloc),
+/// Set of relocations which must be re-applied if the size of the TLS segment changes.
+tls_size_symbol_relocs: std.array_hash_map.Auto(SymbolReloc.Index, void),
 /// Index matches the index into `shdrs`. Like `shdrs`, this map excludes `SHN_UNDEF`.
 section_by_name: std.array_hash_map.Auto(String(.shstrtab), void),
 /// Key is the name of a global symbol which has been moved to a new symtab index. Any relocation
@@ -3708,15 +3708,15 @@ fn create(
         }),
         .pending_uavs = .empty,
         .symbol_relocs = .empty,
-        .tls_size_symbol_relocs = .empty,
         .node_relocs = .empty,
         .got_relocs = .empty,
+        .tls_size_symbol_relocs = .empty,
         .section_by_name = .empty,
         .changed_symtab_index = .empty,
         .textrel_count = 0,
 
         .dwarf = .init(&elf.base, switch (comp.config.debug_format) {
-            .strip => .@"32",
+            .strip => .@"32", // for .eh_frame
             .dwarf => |v| v,
             .code_view => unreachable,
         }),
@@ -3768,9 +3768,9 @@ pub fn deinit(elf: *Elf) void {
     for (&elf.lazy.values) |*lazy| lazy.map.deinit(gpa);
     elf.pending_uavs.deinit(gpa);
     elf.symbol_relocs.deinit(gpa);
-    elf.tls_size_symbol_relocs.deinit(gpa);
     elf.node_relocs.deinit(gpa);
     elf.got_relocs.deinit(gpa);
+    elf.tls_size_symbol_relocs.deinit(gpa);
     elf.section_by_name.deinit(gpa);
     elf.changed_symtab_index.deinit(gpa);
 
@@ -8342,7 +8342,9 @@ fn updateFuncInner(
             &nw.interface,
             debug_output,
         ) catch |err| switch (err) {
-            error.WriteFailed => return nw.err.?,
+            error.WriteFailed => {
+                if (nw.err) |e| return e;
+            },
             else => |e| return e,
         };
         const func_length = nw.interface.end;
@@ -9899,17 +9901,19 @@ fn updateExportInner(
     };
 }
 
-fn dumpStderr(elf: *Elf, tid: Zcu.PerThread.Id) !void {
+fn dumpStderr(elf: *Elf, tid: Zcu.PerThread.Id) Io.File.Writer.Error!void {
     const comp = elf.base.comp;
     const io = comp.io;
     var buffer: [512]u8 = undefined;
     const stderr = try io.lockStderr(&buffer, null);
     defer io.unlockStderr();
     const w = &stderr.file_writer.interface;
-    _ = try elf.dump(w, tid);
+    _ = elf.dump(w, tid) catch |err| switch (err) {
+        error.WriteFailed => return stderr.file_writer.err.?,
+    };
 }
 
-pub fn dump(elf: *Elf, w: *Io.Writer, tid: Zcu.PerThread.Id) !link.File.DumpResult {
+pub fn dump(elf: *Elf, w: *Io.Writer, tid: Zcu.PerThread.Id) Io.Writer.Error!link.File.DumpResult {
     if (elf.options.enable_link_snapshots) {
         try elf.printNode(tid, w, .root, 0);
         return .enabled;

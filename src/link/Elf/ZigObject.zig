@@ -1549,7 +1549,6 @@ pub fn updateFunc(
         if (debug_wip_nav) |*dn| .{ .dwarf = dn } else .none,
     ) catch |err| switch (err) {
         error.WriteFailed => return error.OutOfMemory,
-        error.MappedFileIo => unreachable, // MappedFile is not being used
         else => |e| return e,
     };
     const code = aw.written();

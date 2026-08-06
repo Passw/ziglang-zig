@@ -16,8 +16,6 @@ frame: Frame,
 debug_info: DebugInfo,
 debug_line: DebugLine,
 
-pub const UpdateError = link.Error || error{MappedFileIo};
-
 pub const AddressSize = enum(u8) { @"32" = 4, @"64" = 8, _ };
 
 pub const Unit = struct {
@@ -158,7 +156,7 @@ pub const Loc = union(enum) {
         }
     }
 
-    fn write(loc: Loc, adapter: anytype) (UpdateError || Writer.Error)!void {
+    fn write(loc: Loc, adapter: anytype) link.EmitError!void {
         const writer = adapter.writer();
         switch (loc) {
             .empty => {},
@@ -324,7 +322,7 @@ pub const Cfa = union(enum) {
     const RegOff = struct { reg: u32, off: i64 };
     const RegExpr = struct { reg: u32, expr: Loc };
 
-    fn write(cfa: Cfa, wip_nav: *WipNav) (UpdateError || Writer.Error)!void {
+    fn write(cfa: Cfa, wip_nav: *WipNav) link.EmitError!void {
         const dfw = &wip_nav.fde_writer.interface;
         switch (cfa) {
             .nop => try dfw.writeByte(DW.CFA.nop),
@@ -487,11 +485,11 @@ pub const WipNav = struct {
             debug.* = undefined;
         }
 
-        pub fn genFuncHeaders(debug: *Debug) UpdateError!void {
+        pub fn genFuncHeaders(debug: *Debug) link.Error!void {
             try debug.wip_nav.genFuncHeaders();
         }
 
-        pub fn genDebugFrame(debug: *Debug, loc: u32, cfa: Cfa) UpdateError!void {
+        pub fn genDebugFrame(debug: *Debug, loc: u32, cfa: Cfa) link.Error!void {
             return debug.wip_nav.genDebugFrame(loc, cfa);
         }
 
@@ -502,10 +500,10 @@ pub const WipNav = struct {
             opt_name: ?[]const u8,
             ty: Type,
             loc: Loc,
-        ) UpdateError!void {
+        ) link.Error!void {
             if (true) return;
             return debug.genLocalVarDebugInfoInner(tag, opt_name, ty, loc) catch |err| switch (err) {
-                error.WriteFailed => debug.info_writer.err.?,
+                error.WriteFailed => return debug.wip_nav.reportWriteError(&debug.info_writer),
                 else => |e| e,
             };
         }
@@ -515,7 +513,7 @@ pub const WipNav = struct {
             opt_name: ?[]const u8,
             ty: Type,
             loc: Loc,
-        ) (UpdateError || Writer.Error)!void {
+        ) link.EmitError!void {
             assert(debug.wip_nav.func != null);
             try debug.abbrevCode(switch (tag) {
                 .arg => if (opt_name) |_| .arg else .unnamed_arg,
@@ -533,10 +531,10 @@ pub const WipNav = struct {
             tag: LocalConstTag,
             opt_name: ?[]const u8,
             val: Value,
-        ) UpdateError!void {
+        ) link.Error!void {
             if (true) return;
             return debug.genLocalConstDebugInfoInner(tag, opt_name, val) catch |err| switch (err) {
-                error.WriteFailed => debug.info_writer.err.?,
+                error.WriteFailed => return debug.wip_nav.reportWriteError(&debug.info_writer),
                 else => |e| e,
             };
         }
@@ -545,7 +543,7 @@ pub const WipNav = struct {
             tag: LocalConstTag,
             opt_name: ?[]const u8,
             val: Value,
-        ) (UpdateError || Writer.Error)!void {
+        ) link.EmitError!void {
             assert(debug.wip_nav.func != null);
             const zcu = debug.pt.zcu;
             const ty = val.typeOf(zcu);
@@ -571,23 +569,23 @@ pub const WipNav = struct {
             debug.any_children = true;
         }
 
-        pub fn genVarArgsDebugInfo(debug: *Debug) UpdateError!void {
+        pub fn genVarArgsDebugInfo(debug: *Debug) link.Error!void {
             if (true) return;
             return debug.genVarArgsDebugInfoInner() catch |err| switch (err) {
-                error.WriteFailed => debug.info_writer.err.?,
+                error.WriteFailed => return debug.wip_nav.reportWriteError(&debug.info_writer),
                 else => |e| e,
             };
         }
-        fn genVarArgsDebugInfoInner(debug: *Debug) (UpdateError || Writer.Error)!void {
+        fn genVarArgsDebugInfoInner(debug: *Debug) link.EmitError!void {
             assert(debug.wip_nav.func != null);
             try debug.abbrevCode(.is_var_args);
             debug.any_children = true;
         }
 
-        pub fn advancePcAndLine(debug: *Debug, delta_line: i33, delta_pc: u64) UpdateError!void {
+        pub fn advancePcAndLine(debug: *Debug, delta_line: i33, delta_pc: u64) link.Error!void {
             if (true) return;
             return debug.advancePcAndLineInner(delta_line, delta_pc) catch |err| switch (err) {
-                error.WriteFailed => debug.line_writer.err.?,
+                error.WriteFailed => return debug.wip_nav.reportWriteError(&debug.line_writer),
             };
         }
         fn advancePcAndLineInner(debug: *Debug, delta_line: i33, delta_pc: u64) Writer.Error!void {
@@ -625,10 +623,10 @@ pub const WipNav = struct {
                     (header.line_range * remaining_op_advance) + header.opcode_base));
         }
 
-        pub fn setColumn(debug: *Debug, column: u32) UpdateError!void {
+        pub fn setColumn(debug: *Debug, column: u32) link.Error!void {
             if (true) return;
             return debug.setColumnInner(column) catch |err| switch (err) {
-                error.WriteFailed => debug.line_writer.err.?,
+                error.WriteFailed => return debug.wip_nav.reportWriteError(&debug.line_writer),
             };
         }
         fn setColumnInner(debug: *Debug, column: u32) Writer.Error!void {
@@ -637,44 +635,44 @@ pub const WipNav = struct {
             try dlw.writeUleb128(column + 1);
         }
 
-        pub fn negateStmt(debug: *Debug) UpdateError!void {
+        pub fn negateStmt(debug: *Debug) link.Error!void {
             if (true) return;
             return debug.negateStmtInner() catch |err| switch (err) {
-                error.WriteFailed => debug.line_writer.err.?,
+                error.WriteFailed => return debug.wip_nav.reportWriteError(&debug.line_writer),
             };
         }
         fn negateStmtInner(debug: *Debug) Writer.Error!void {
             try debug.line_writer.interface.writeByte(DW.LNS.negate_stmt);
         }
 
-        pub fn setPrologueEnd(debug: *Debug) UpdateError!void {
+        pub fn setPrologueEnd(debug: *Debug) link.Error!void {
             if (true) return;
             return debug.setPrologueEndInner() catch |err| switch (err) {
-                error.WriteFailed => debug.line_writer.err.?,
+                error.WriteFailed => return debug.wip_nav.reportWriteError(&debug.line_writer),
             };
         }
         fn setPrologueEndInner(debug: *Debug) Writer.Error!void {
             try debug.line_writer.interface.writeByte(DW.LNS.set_prologue_end);
         }
 
-        pub fn setEpilogueBegin(debug: *Debug) UpdateError!void {
+        pub fn setEpilogueBegin(debug: *Debug) link.Error!void {
             if (true) return;
             return debug.setEpilogueBeginInner() catch |err| switch (err) {
-                error.WriteFailed => debug.line_writer.err.?,
+                error.WriteFailed => return debug.wip_nav.reportWriteError(&debug.line_writer),
             };
         }
         fn setEpilogueBeginInner(debug: *Debug) Writer.Error!void {
             try debug.line_writer.interface.writeByte(DW.LNS.set_epilogue_begin);
         }
 
-        pub fn enterBlock(debug: *Debug, code_off: u64) UpdateError!void {
+        pub fn enterBlock(debug: *Debug, code_off: u64) link.Error!void {
             if (true) return;
             return debug.enterBlockInner(code_off) catch |err| switch (err) {
-                error.WriteFailed => debug.info_writer.err.?,
+                error.WriteFailed => return debug.wip_nav.reportWriteError(&debug.info_writer),
                 else => |e| e,
             };
         }
-        fn enterBlockInner(debug: *Debug, code_off: u64) (UpdateError || Writer.Error)!void {
+        fn enterBlockInner(debug: *Debug, code_off: u64) link.EmitError!void {
             const dwarf = debug.wip_nav.dwarf;
             const diw = &debug.info_writer.interface;
             const block = try debug.blocks.addOne(dwarf.linkFile().comp.gpa);
@@ -688,14 +686,14 @@ pub const WipNav = struct {
             debug.any_children = false;
         }
 
-        pub fn leaveBlock(debug: *Debug, code_off: u64) UpdateError!void {
+        pub fn leaveBlock(debug: *Debug, code_off: u64) link.Error!void {
             if (true) return;
             return debug.leaveBlockInner(code_off) catch |err| switch (err) {
-                error.WriteFailed => debug.info_writer.err.?,
+                error.WriteFailed => return debug.wip_nav.reportWriteError(&debug.info_writer),
                 else => |e| e,
             };
         }
-        fn leaveBlockInner(debug: *Debug, code_off: u64) (UpdateError || Writer.Error)!void {
+        fn leaveBlockInner(debug: *Debug, code_off: u64) link.EmitError!void {
             const dwarf = debug.wip_nav.dwarf;
             const block_bytes = comptime uleb128Bytes(@backingInt(AbbrevCode.block));
             const block = debug.blocks.pop().?;
@@ -722,10 +720,10 @@ pub const WipNav = struct {
             code_off: u64,
             line: u32,
             column: u32,
-        ) UpdateError!void {
+        ) link.Error!void {
             if (true) return;
             return debug.enterInlineFuncInner(func, code_off, line, column) catch |err| switch (err) {
-                error.WriteFailed => debug.info_writer.err.?,
+                error.WriteFailed => return debug.wip_nav.reportWriteError(&debug.info_writer),
                 else => |e| e,
             };
         }
@@ -735,7 +733,7 @@ pub const WipNav = struct {
             code_off: u64,
             line: u32,
             column: u32,
-        ) (UpdateError || Writer.Error)!void {
+        ) link.EmitError!void {
             const dwarf = debug.wip_nav.dwarf;
             const zcu = debug.pt.zcu;
             const diw = &debug.info_writer.interface;
@@ -754,10 +752,10 @@ pub const WipNav = struct {
             debug.any_children = false;
         }
 
-        pub fn leaveInlineFunc(debug: *Debug, func: InternPool.Index, code_off: u64) UpdateError!void {
+        pub fn leaveInlineFunc(debug: *Debug, func: InternPool.Index, code_off: u64) link.Error!void {
             if (true) return;
             return debug.leaveInlineFuncInner(func, code_off) catch |err| switch (err) {
-                error.WriteFailed => debug.info_writer.err.?,
+                error.WriteFailed => return debug.wip_nav.reportWriteError(&debug.info_writer),
                 else => |e| e,
             };
         }
@@ -765,7 +763,7 @@ pub const WipNav = struct {
             debug: *Debug,
             func: InternPool.Index,
             code_off: u64,
-        ) (UpdateError || Writer.Error)!void {
+        ) link.EmitError!void {
             const dwarf = debug.wip_nav.dwarf;
             const inlined_func_bytes = comptime uleb128Bytes(@backingInt(AbbrevCode.inlined_func));
             const block = debug.blocks.pop().?;
@@ -787,13 +785,13 @@ pub const WipNav = struct {
             debug.any_children = true;
         }
 
-        pub fn setInlineFunc(debug: *Debug, func: InternPool.Index) UpdateError!void {
+        pub fn setInlineFunc(debug: *Debug, func: InternPool.Index) link.Error!void {
             return debug.setInlineFuncInner(func) catch |err| switch (err) {
-                error.WriteFailed => debug.line_writer.err.?,
+                error.WriteFailed => return debug.wip_nav.reportWriteError(&debug.line_writer),
                 else => |e| e,
             };
         }
-        fn setInlineFuncInner(debug: *Debug, func: InternPool.Index) (UpdateError || Writer.Error)!void {
+        fn setInlineFuncInner(debug: *Debug, func: InternPool.Index) link.EmitError!void {
             const wip_nav = &debug.wip_nav;
             const zcu = debug.pt.zcu;
             const dwarf = wip_nav.dwarf;
@@ -855,7 +853,7 @@ pub const WipNav = struct {
             wip_nav.func = func;
         }
 
-        fn abbrevCode(debug: *Debug, abbrev_code: AbbrevCode) (UpdateError || Writer.Error)!void {
+        fn abbrevCode(debug: *Debug, abbrev_code: AbbrevCode) link.EmitError!void {
             try debug.info_writer.interface.writeUleb128(try debug.wip_nav.dwarf.refAbbrevCode(abbrev_code));
         }
 
@@ -872,7 +870,7 @@ pub const WipNav = struct {
             debug: *Debug,
             target: MappedFile.Node.Index,
             addend: i64,
-        ) (UpdateError || Writer.Error)!void {
+        ) link.EmitError!void {
             const dwarf = debug.wip_nav.dwarf;
             const diw = &debug.info_writer.interface;
             const offset = diw.end;
@@ -892,7 +890,7 @@ pub const WipNav = struct {
             );
         }
 
-        fn strp(debug: *Debug, str: []const u8) (UpdateError || Writer.Error)!void {
+        fn strp(debug: *Debug, str: []const u8) link.EmitError!void {
             if (true) @panic("TODO");
             const dwarf = debug.wip_nav.dwarf;
             try debug.infoSectionOffset(.debug_str, try dwarf.debug_str.addString(dwarf, str), 0);
@@ -902,14 +900,14 @@ pub const WipNav = struct {
             debug: *Debug,
             comptime fmt: []const u8,
             args: anytype,
-        ) (UpdateError || Writer.Error)!void {
+        ) link.EmitError!void {
             const gpa = &debug.wip_nav.dwarf.gpa;
             const str = try std.fmt.allocPrint(gpa, fmt, args);
             defer gpa.free(str);
             return debug.strp(str);
         }
 
-        fn infoExprLoc(debug: *Debug, loc: Loc) (UpdateError || Writer.Error)!void {
+        fn infoExprLoc(debug: *Debug, loc: Loc) link.EmitError!void {
             var buf: [64]u8 = undefined;
             var counter: ExprLocCounter = .init(debug.wip_nav.dwarf, &buf);
             try loc.write(&counter);
@@ -922,13 +920,13 @@ pub const WipNav = struct {
                 fn endian(ctx: @This()) std.lang.Endian {
                     return ctx.debug.wip_nav.dwarf.endian;
                 }
-                fn addrSym(ctx: @This(), si: link.File.SymbolId) (UpdateError || Writer.Error)!void {
+                fn addrSym(ctx: @This(), si: link.File.SymbolId) link.EmitError!void {
                     try ctx.debug.infoAddrSym(si, 0);
                 }
                 fn infoEntry(
                     ctx: @This(),
                     node: MappedFile.Node.Index,
-                ) (UpdateError || Writer.Error)!void {
+                ) link.EmitError!void {
                     try ctx.debug.infoSectionOffset(node, 0);
                 }
             } = .{ .debug = debug };
@@ -940,7 +938,7 @@ pub const WipNav = struct {
             debug: *Debug,
             si: link.File.SymbolId,
             sym_off: u64,
-        ) (UpdateError || Writer.Error)!void {
+        ) link.EmitError!void {
             const diw = &debug.info_writer.interface;
             try debug.infoExternalReloc(.{
                 .source_off = @intCast(diw.end),
@@ -950,20 +948,20 @@ pub const WipNav = struct {
             try diw.splatByteAll(0, @backingInt(debug.wip_nav.dwarf.address_size));
         }
 
-        fn refNav(debug: *Debug, nav_index: InternPool.Nav.Index) (UpdateError || Writer.Error)!void {
+        fn refNav(debug: *Debug, nav_index: InternPool.Nav.Index) link.EmitError!void {
             try debug.infoSectionOffset(try debug.wip_nav.dwarf.getNavNode(nav_index), 0);
         }
 
-        fn refType(debug: *Debug, ty: Type) (UpdateError || Writer.Error)!void {
+        fn refType(debug: *Debug, ty: Type) link.EmitError!void {
             return debug.refValue(ty.toValue());
         }
 
-        fn refValue(debug: *Debug, value: Value) (UpdateError || Writer.Error)!void {
+        fn refValue(debug: *Debug, value: Value) link.EmitError!void {
             if (true) @panic("TODO");
             try debug.infoSectionOffset(.debug_info, try debug.getValueNode(value), 0);
         }
 
-        fn getValueNode(debug: *Debug, value: Value) UpdateError!MappedFile.Node.Index {
+        fn getValueNode(debug: *Debug, value: Value) link.Error!MappedFile.Node.Index {
             if (value.typeOf(debug.zcu).toIntern() != .type_type) {
                 assert(value.typeOf(debug.zcu).comptimeOnly(debug.zcu));
             }
@@ -972,7 +970,7 @@ pub const WipNav = struct {
             return dwarf.values.items[@backingInt(index)];
         }
 
-        fn blockValue(debug: *Debug, val: Value) (UpdateError || Writer.Error)!void {
+        fn blockValue(debug: *Debug, val: Value) link.EmitError!void {
             const ty = val.typeOf(debug.pt.zcu);
             const diw = &debug.info_writer.interface;
             const size = ty.abiSize(debug.pt.zcu);
@@ -1004,13 +1002,13 @@ pub const WipNav = struct {
         wip_nav.* = undefined;
     }
 
-    pub fn genFuncHeaders(wip_nav: *WipNav) UpdateError!void {
+    pub fn genFuncHeaders(wip_nav: *WipNav) link.Error!void {
         wip_nav.genDebugFrameHeader() catch |err| switch (err) {
-            error.WriteFailed => return wip_nav.fde_writer.err.?,
+            error.WriteFailed => return wip_nav.reportWriteError(&wip_nav.fde_writer),
             else => |e| return e,
         };
     }
-    fn genDebugFrameHeader(wip_nav: *WipNav) (UpdateError || Writer.Error)!void {
+    fn genDebugFrameHeader(wip_nav: *WipNav) link.EmitError!void {
         assert(wip_nav.func != null);
         const dwarf = wip_nav.dwarf;
         const dfw = &wip_nav.fde_writer.interface;
@@ -1050,13 +1048,13 @@ pub const WipNav = struct {
         }
     }
 
-    pub fn genDebugFrame(wip_nav: *WipNav, loc: u32, cfa: Cfa) UpdateError!void {
+    pub fn genDebugFrame(wip_nav: *WipNav, loc: u32, cfa: Cfa) link.Error!void {
         return wip_nav.genDebugFrameInner(loc, cfa) catch |err| switch (err) {
-            error.WriteFailed => wip_nav.fde_writer.err.?,
-            else => |e| e,
+            error.WriteFailed => return wip_nav.reportWriteError(&wip_nav.fde_writer),
+            else => |e| return e,
         };
     }
-    fn genDebugFrameInner(wip_nav: *WipNav, loc: u32, cfa: Cfa) (UpdateError || Writer.Error)!void {
+    fn genDebugFrameInner(wip_nav: *WipNav, loc: u32, cfa: Cfa) link.EmitError!void {
         assert(wip_nav.func != null);
         const loc_cfa: Cfa = .{ .advance_loc = loc };
         try loc_cfa.write(wip_nav);
@@ -1123,7 +1121,7 @@ pub const WipNav = struct {
         wip_nav: *WipNav,
         target: MappedFile.Node.Index,
         addend: i64,
-    ) (UpdateError || Writer.Error)!void {
+    ) link.EmitError!void {
         const dwarf = wip_nav.dwarf;
         const dfw = &wip_nav.fde_writer.interface;
         const offset = dfw.end;
@@ -1143,7 +1141,7 @@ pub const WipNav = struct {
         );
     }
 
-    fn frameExprLoc(wip_nav: *WipNav, loc: Loc) (UpdateError || Writer.Error)!void {
+    fn frameExprLoc(wip_nav: *WipNav, loc: Loc) link.EmitError!void {
         var buf: [64]u8 = undefined;
         var counter: ExprLocCounter = .init(wip_nav.dwarf, &buf);
         try loc.write(&counter);
@@ -1156,10 +1154,10 @@ pub const WipNav = struct {
             fn endian(ctx: @This()) std.lang.Endian {
                 return ctx.wip_nav.dwarf.endian;
             }
-            fn addrSym(ctx: @This(), si: link.File.SymbolId) (UpdateError || Writer.Error)!void {
+            fn addrSym(ctx: @This(), si: link.File.SymbolId) link.EmitError!void {
                 try ctx.wip_nav.frameAddrSym(si, 0);
             }
-            fn infoEntry(ctx: @This(), node: MappedFile.Node.Index) (UpdateError || Writer.Error)!void {
+            fn infoEntry(ctx: @This(), node: MappedFile.Node.Index) link.EmitError!void {
                 try ctx.wip_nav.frameSectionOffset(node, 0);
             }
         } = .{ .wip_nav = wip_nav };
@@ -1171,7 +1169,7 @@ pub const WipNav = struct {
         wip_nav: *WipNav,
         si: link.File.SymbolId,
         sym_off: u64,
-    ) (UpdateError || Writer.Error)!void {
+    ) link.EmitError!void {
         const dwarf = wip_nav.dwarf;
         const dfw = &wip_nav.fde_writer.interface;
         const offset = dfw.end;
@@ -1187,6 +1185,16 @@ pub const WipNav = struct {
                 .@"64" => .abs64(elf),
             },
         );
+    }
+
+    fn reportWriteError(wip_nav: *WipNav, mfnw: *const MappedFile.Node.Writer) link.Error {
+        switch (mfnw.err.?) {
+            else => |e| return e,
+            error.MappedFileIo => return wip_nav.dwarf.linkFile().comp.link_diags.fail(
+                "failed to write output file: {t}",
+                .{mfnw.mf.io_err.?},
+            ),
+        }
     }
 };
 
@@ -1283,7 +1291,7 @@ pub fn initUnits(dwarf: *Dwarf, zcu: *Zcu) Allocator.Error!void {
     };
 }
 
-fn getNavNode(dwarf: *Dwarf, nav_index: InternPool.Nav.Index) UpdateError!MappedFile.Node.Index {
+fn getNavNode(dwarf: *Dwarf, nav_index: InternPool.Nav.Index) link.Error!MappedFile.Node.Index {
     if (true) @panic("TODO");
     const zcu = dwarf.linkFile().comp.zcu.?;
     const ip = &zcu.intern_pool;
@@ -1329,7 +1337,7 @@ pub fn genEhFrameHdr(
     eh_frame_hdr_ai: link.File.AtomId,
     eh_frame_hdr: *EhFrameHdr,
     eh_frame_si: link.File.SymbolId,
-) UpdateError!void {
+) link.Error!void {
     eh_frame_hdr.* = .{
         .version = 1,
         .eh_frame_ptr_enc = .{ .type = .sdata4, .rel = .pcrel },
@@ -1423,7 +1431,7 @@ pub fn updateEhFrameFde(dwarf: *Dwarf, fde: []u8, fde_offset: u64) void {
 fn refAbbrevCode(
     dwarf: *Dwarf,
     abbrev_code: AbbrevCode,
-) (UpdateError || Writer.Error)!@typeInfo(AbbrevCode).@"enum".tag_type {
+) link.EmitError!@typeInfo(AbbrevCode).@"enum".tag_type {
     if (true) @panic("TODO");
     const Entry = {};
     const DebugAbbrev = {};

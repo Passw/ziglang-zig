@@ -26,7 +26,6 @@ pub const aarch64 = @import("codegen/aarch64.zig");
 pub const loongarch = @import("codegen/loongarch.zig");
 
 pub const Error = link.Error;
-pub const EmitError = Error || std.Io.Writer.Error || error{MappedFileIo};
 
 fn devFeatureForBackend(backend: std.lang.CompilerBackend) dev.Feature {
     return switch (backend) {
@@ -197,7 +196,7 @@ pub fn emitFunction(
     any_mir: *const AnyMir,
     w: *std.Io.Writer,
     debug_output: link.File.DebugInfoOutput,
-) EmitError!void {
+) link.EmitError!void {
     const zcu = pt.zcu;
     const func = zcu.funcInfo(func_index);
     const target = &zcu.navFileScope(func.owner_nav).mod.?.resolved_target.result;
@@ -229,7 +228,7 @@ pub fn generateLazyFunction(
     atom_id: link.File.AtomId,
     w: *std.Io.Writer,
     debug_output: link.File.DebugInfoOutput,
-) EmitError!void {
+) link.EmitError!void {
     const zcu = pt.zcu;
     const target = if (Type.fromInterned(lazy_sym.ty).typeDeclInstAllowGeneratedTag(zcu)) |inst_index|
         &zcu.fileByIndex(inst_index.resolveFile(&zcu.intern_pool)).mod.?.resolved_target.result
@@ -253,7 +252,7 @@ pub fn generateLazySymbol(
     w: *std.Io.Writer,
     debug_output: link.File.DebugInfoOutput,
     reloc_parent: link.File.RelocInfo.Parent,
-) EmitError!void {
+) link.EmitError!void {
     const tracy = trace(@src());
     defer tracy.end();
     tracy.addTextFmt("{t}, {f}", .{ lazy_sym.kind, Type.fromInterned(lazy_sym.ty).fmt(pt) });
@@ -315,7 +314,7 @@ pub fn generateSymbol(
     val: Value,
     w: *std.Io.Writer,
     reloc_parent: link.File.RelocInfo.Parent,
-) (Error || std.Io.Writer.Error)!void {
+) link.EmitError!void {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -666,7 +665,7 @@ fn lowerPtr(
     w: *std.Io.Writer,
     reloc_parent: link.File.RelocInfo.Parent,
     prev_offset: u64,
-) (Error || std.Io.Writer.Error)!void {
+) link.EmitError!void {
     const zcu = pt.zcu;
     const ptr = zcu.intern_pool.indexToKey(ptr_val).ptr;
     const offset: u64 = prev_offset + ptr.byte_offset;
@@ -724,7 +723,7 @@ fn lowerUavRef(
     w: *std.Io.Writer,
     reloc_parent: link.File.RelocInfo.Parent,
     offset: u64,
-) (Error || std.Io.Writer.Error)!void {
+) link.EmitError!void {
     const zcu = pt.zcu;
     const ip = &zcu.intern_pool;
     const comp = lf.comp;
@@ -782,7 +781,7 @@ fn lowerNavRef(
     w: *std.Io.Writer,
     reloc_parent: link.File.RelocInfo.Parent,
     offset: u64,
-) (Error || std.Io.Writer.Error)!void {
+) link.EmitError!void {
     const zcu = pt.zcu;
     const ip = &zcu.intern_pool;
     const target = &zcu.navFileScope(nav_index).mod.?.resolved_target.result;

@@ -111,7 +111,7 @@ pub fn emit(
     atom_index: link.File.AtomId,
     w: *std.Io.Writer,
     debug_output: link.File.DebugInfoOutput,
-) codegen.EmitError!void {
+) link.EmitError!void {
     _ = atom_index;
     const zcu = pt.zcu;
     const comp = zcu.comp;

@@ -13,7 +13,7 @@ prev_di_pc: usize,
 code_offset_mapping: std.AutoHashMapUnmanaged(Mir.Inst.Index, usize) = .empty,
 relocs: std.ArrayList(Reloc) = .empty,
 
-pub const Error = Lower.Error || codegen.EmitError || error{
+pub const Error = Lower.Error || link.EmitError || error{
     EmitFail,
 };
 
