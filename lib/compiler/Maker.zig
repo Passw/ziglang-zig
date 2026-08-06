@@ -2689,9 +2689,10 @@ fn makeStep(
     }
 
     // No matter the result, we want to display error/warning messages.
-    if (make_step.result_error_bundle.errorMessageCount() > 0 or
-        make_step.result_error_msgs.items.len > 0 or
-        make_step.result_stderr.len > 0)
+    if (maker.protocol_server == null and
+        (make_step.result_error_bundle.errorMessageCount() > 0 or
+            make_step.result_error_msgs.items.len > 0 or
+            make_step.result_stderr.len > 0))
     {
         const stderr = try io.lockStderr(&stdio_buffer_allocation, graph.stderr_mode);
         defer io.unlockStderr();
