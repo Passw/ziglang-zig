@@ -151,6 +151,19 @@ pub const Arg = union(enum) {
     output_directory: *Output,
     /// The arguments passed after "--" on the "zig build" CLI.
     passthru,
+
+    enable_darling: ToggleFlags,
+    enable_qemu: ToggleFlags,
+    enable_rosetta: ToggleFlags,
+    enable_wasmtime: ToggleFlags,
+    enable_wine: ToggleFlags,
+};
+
+pub const ToggleFlags = struct {
+    /// The string to pass when enabled, or null to omit the arg.
+    enabled: ?[]const u8 = null,
+    /// The string to pass when disabled, or null to omit the arg.
+    disabled: ?[]const u8 = null,
 };
 
 pub const DecoratedArtifact = struct {
@@ -576,6 +589,46 @@ pub fn addPassthruArgs(run: *Run) void {
     const graph = run.step.owner.graph;
     const arena = graph.arena;
     run.argv.append(arena, .passthru) catch @panic("OOM");
+}
+
+/// Appends a custom string to the command line depending on the `-fdarling`
+/// value passed to `zig build`.
+pub fn addThirdPartyEnabledArgDarling(run: *Run, toggle_flags: ToggleFlags) void {
+    const graph = run.step.owner.graph;
+    const arena = graph.arena;
+    run.argv.append(arena, .{ .enable_darling = toggle_flags }) catch @panic("OOM");
+}
+
+/// Appends a custom string to the command line depending on the `-fqemu`
+/// value passed to `zig build`.
+pub fn addThirdPartyEnabledArgQemu(run: *Run, toggle_flags: ToggleFlags) void {
+    const graph = run.step.owner.graph;
+    const arena = graph.arena;
+    run.argv.append(arena, .{ .enable_qemu = toggle_flags }) catch @panic("OOM");
+}
+
+/// Appends a custom string to the command line depending on the `-frosetta`
+/// value passed to `zig build`.
+pub fn addThirdPartyEnabledArgRosetta(run: *Run, toggle_flags: ToggleFlags) void {
+    const graph = run.step.owner.graph;
+    const arena = graph.arena;
+    run.argv.append(arena, .{ .enable_rosetta = toggle_flags }) catch @panic("OOM");
+}
+
+/// Appends a custom string to the command line depending on the `-fwasmtime`
+/// value passed to `zig build`.
+pub fn addThirdPartyEnabledArgWasmtime(run: *Run, toggle_flags: ToggleFlags) void {
+    const graph = run.step.owner.graph;
+    const arena = graph.arena;
+    run.argv.append(arena, .{ .enable_wasmtime = toggle_flags }) catch @panic("OOM");
+}
+
+/// Appends a custom string to the command line depending on the `-fwine`
+/// value passed to `zig build`.
+pub fn addThirdPartyEnabledArgWine(run: *Run, toggle_flags: ToggleFlags) void {
+    const graph = run.step.owner.graph;
+    const arena = graph.arena;
+    run.argv.append(arena, .{ .enable_wine = toggle_flags }) catch @panic("OOM");
 }
 
 pub fn setStdIn(run: *Run, stdin: StdIn) void {
