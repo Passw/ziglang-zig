@@ -681,9 +681,8 @@ pub fn main(init: process.Init.Minimal) !void {
     } else null;
 
     var stdin_buffer: [256]u8 = undefined;
-    var stdout_buffer: [256]u8 = undefined;
     var stdin_reader = Io.File.stdin().reader(io, &stdin_buffer);
-    var stdout_writer = Io.File.stdout().writer(io, &stdout_buffer);
+    const stdout_writer = initStdoutWriter(io);
 
     var protocol_server_allocation: AvoidableServer = undefined;
     const protocol_server: ?*AvoidableServer = if (listen) s: {
@@ -693,7 +692,7 @@ pub fn main(init: process.Init.Minimal) !void {
         if (step_names.items.len > 0) fatal("build steps must be provided over the protocol instead of using CLI arguments", .{});
         protocol_server_allocation = .{
             .in = &stdin_reader.interface,
-            .out = &stdout_writer.interface,
+            .out = stdout_writer,
         };
         try serveBspHandshake(&protocol_server_allocation);
         break :s &protocol_server_allocation;
