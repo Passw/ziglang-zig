@@ -695,7 +695,7 @@ pub fn main(init: process.Init.Minimal) !void {
             .in = &stdin_reader.interface,
             .out = &stdout_writer.interface,
         };
-        try serveBSPHandshake(&protocol_server_allocation);
+        try serveBspHandshake(&protocol_server_allocation);
         break :s &protocol_server_allocation;
     } else null;
 
@@ -3256,7 +3256,7 @@ fn cleanTmpFiles(maker: *Maker, steps: []const Configuration.Step.Index) void {
     }
 }
 
-fn serveBSPHandshake(s: *const std.zig.Server) !void {
+fn serveBspHandshake(s: *const std.zig.Server) !void {
     const handshake_header: Server.Message.Handshake = .{
         .version = Server.build_system_version,
         .flags = .{
