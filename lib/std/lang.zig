@@ -1313,6 +1313,9 @@ pub const CompilerBackend = enum(u64) {
     /// The reference implementation self-hosted compiler of Zig, using the
     /// powerpc backend.
     stage2_powerpc = 12,
+    /// The reference implementation self-hosted compiler of Zig, using the
+    /// loongarch backend.
+    stage2_loongarch = 13,
 
     _,
 };
@@ -1340,6 +1343,7 @@ pub const panic: type = p: {
         break :p root.panic;
     }
     break :p switch (builtin.zig_backend) {
+        .stage2_loongarch,
         .stage2_powerpc,
         .stage2_riscv64,
         => std.debug.simple_panic,
