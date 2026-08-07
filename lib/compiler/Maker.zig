@@ -163,7 +163,6 @@ pub fn main(init: process.Init.Minimal) !void {
 
     var arena_instance: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     defer arena_instance.deinit();
-    defer if (debugMakerLeaks()) log.debug("used {Bi} of arena", .{arena_instance.queryCapacity()});
     const arena = arena_instance.allocator();
 
     const args = try init.args.toSlice(arena);
@@ -444,8 +443,6 @@ pub fn main(init: process.Init.Minimal) !void {
             } else if (mem.cutPrefix(u8, arg, "--debug-rt=")) |rest| {
                 graph.debug_compiler_runtime_libs = stringToEnum(std.lang.Optimize, rest) orelse
                     fatal("unrecognized optimization mode: {s}", .{rest});
-            } else if (is_debug_mode and mem.eql(u8, arg, "--debug-maker-leaks")) {
-                debug_maker_leaks = true;
             } else if (mem.eql(u8, arg, "--libc-runtimes") or mem.eql(u8, arg, "--glibc-runtimes")) {
                 // --glibc-runtimes was the old name of the flag; kept for compatibility for now.
                 graph.libc_runtimes_dir = nextArgOrFatal(args, &arg_i);
@@ -819,10 +816,7 @@ pub fn main(init: process.Init.Minimal) !void {
                     .message => |payload| {
                         const header: Client.Message.Header = try payload;
                         switch (header.tag) {
-                            .exit => {
-                                cleanExit(io, &scanned_config);
-                                process.exit(0);
-                            },
+                            .exit => return cleanExit(io, &scanned_config),
                             .bsp_build_steps => {
                                 // Cancel existing file watching
                                 select.cancelDiscard();
@@ -2550,8 +2544,7 @@ fn makeSteps(
         break :code 2; // failure; do not print build command
     };
     if (code == 0) {
-        removePoisonedConfiguration(io, maker.scanned_config);
-        if (debugMakerLeaks()) return;
+        return cleanExit(io, maker.scanned_config);
     }
     cleanup_task.await(io); // There is a defer above but an exit below.
     _ = io.lockStderr(&.{}, graph.stderr_mode) catch {};
@@ -3637,11 +3630,6 @@ fn removePoisonedConfiguration(io: Io, scanned_config: *const ScannedConfig) voi
         scanned_config.path.root_dir.handle.deleteFile(io, scanned_config.path.sub_path) catch |err|
             log.warn("failed deleting poisoned configuration file {f}: {t}", .{ scanned_config.path, err });
     }
-}
-
-inline fn debugMakerLeaks() bool {
-    if (!is_debug_mode) return false;
-    return debug_maker_leaks;
 }
 
 const BuildRoot = struct {
