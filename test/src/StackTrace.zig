@@ -1,3 +1,12 @@
+const StackTrace = @This();
+
+const builtin = @import("builtin");
+
+const std = @import("std");
+const Step = std.Build.Step;
+const OptimizeMode = std.lang.OptimizeMode;
+const mem = std.mem;
+
 b: *std.Build,
 step: *Step,
 test_filters: []const []const u8,
@@ -45,7 +54,7 @@ fn addCaseTarget(
     triple: ?[]const u8,
 ) void {
     const both_backends = b: {
-        if (comptime builtin.cpu.arch.endian() == .big) break :b false; // https://github.com/ziglang/zig/issues/25961
+        if (builtin.cpu.arch.endian() == .big) break :b false; // https://codeberg.org/ziglang/zig/issues/31522
         break :b switch (target.result.cpu.arch) {
             .x86_64 => switch (target.result.ofmt) {
                 .elf => !target.result.os.tag.isBSD() and target.result.os.tag != .illumos,
@@ -235,7 +244,6 @@ fn addCaseInstance(
     run.expectStdOutEqual("");
 
     const check_run = b.addRunArtifact(self.convert_exe);
-    check_run.skip_foreign_checks = true;
     check_run.setName(annotated_case_name);
     check_run.addFileArg(run.captureStdErr(.{}));
     check_run.expectExitCode(0);
@@ -243,10 +251,3 @@ fn addCaseInstance(
 
     self.step.dependOn(&check_run.step);
 }
-
-const StackTrace = @This();
-const std = @import("std");
-const builtin = @import("builtin");
-const Step = std.Build.Step;
-const OptimizeMode = std.builtin.OptimizeMode;
-const mem = std.mem;
