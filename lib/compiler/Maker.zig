@@ -2581,9 +2581,10 @@ fn makeStep(
                 .failure,
                 .dependency_failure,
                 .skipped_oom,
+                .skipped,
                 => break .dependency_failure,
 
-                .success, .skipped => {},
+                .success => {},
             }
         } else if (Step.make(step_index, maker, step_prog_node)) state: {
             break :state .success;
