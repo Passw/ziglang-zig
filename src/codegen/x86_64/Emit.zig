@@ -36,7 +36,7 @@ pub fn emitMir(emit: *Emit) Error!void {
             if (lowered_inst.prefix == .directive) {
                 const start_offset: u32 = @intCast(emit.w.end);
                 switch (emit.debug_output) {
-                    inline .dwarf, .eh_frame, .dwarf2 => |dwarf| switch (lowered_inst.encoding.mnemonic) {
+                    inline .dwarf, .dwarf2, .eh_frame => |dwarf| switch (lowered_inst.encoding.mnemonic) {
                         .@".cfi_def_cfa" => try dwarf.genDebugFrame(start_offset, .{ .def_cfa = .{
                             .reg = lowered_inst.ops[0].reg.dwarfNum(),
                             .off = lowered_inst.ops[1].imm.signed,
@@ -475,15 +475,17 @@ pub fn emitMir(emit: *Emit) Error!void {
                     .column = mir_inst.data.line_column.column,
                     .is_stmt = false,
                 }),
-                .pseudo_dbg_epilogue_begin_none => switch (emit.debug_output) {
-                    inline .dwarf, .dwarf2 => |dwarf| {
-                        try dwarf.setEpilogueBegin();
-                        log.debug("mirDbgEpilogueBegin (line={d}, col={d})", .{
-                            emit.prev_di_loc.line, emit.prev_di_loc.column,
-                        });
-                        try emit.dbgAdvancePcAndLine(emit.prev_di_loc);
-                    },
-                    .eh_frame, .none => {},
+                .pseudo_dbg_epilogue_begin_none => {
+                    switch (emit.debug_output) {
+                        inline .dwarf, .dwarf2 => |dwarf| {
+                            try dwarf.setEpilogueBegin();
+                            log.debug("mirDbgEpilogueBegin (line={d}, col={d})", .{
+                                emit.prev_di_loc.line, emit.prev_di_loc.column,
+                            });
+                        },
+                        .eh_frame, .none => {},
+                    }
+                    try emit.dbgAdvancePcAndLine(emit.prev_di_loc);
                 },
                 .pseudo_dbg_enter_block_none => switch (emit.debug_output) {
                     inline .dwarf, .dwarf2 => |dwarf| {
@@ -976,11 +978,11 @@ const Loc = struct {
 };
 
 fn dbgAdvancePcAndLine(emit: *Emit, loc: Loc) Error!void {
-    const delta_line = @as(i33, loc.line) - @as(i33, emit.prev_di_loc.line);
-    const delta_pc: usize = emit.w.end - emit.prev_di_pc;
-    log.debug("  (advance pc={d} and line={d})", .{ delta_pc, delta_line });
     switch (emit.debug_output) {
         inline .dwarf, .dwarf2 => |dwarf| {
+            const delta_line = @as(i33, loc.line) - @as(i33, emit.prev_di_loc.line);
+            const delta_pc: usize = emit.w.end - emit.prev_di_pc;
+            log.debug("  (advance pc={d} and line={d})", .{ delta_pc, delta_line });
             if (loc.is_stmt != emit.prev_di_loc.is_stmt) try dwarf.negateStmt();
             if (loc.column != emit.prev_di_loc.column) try dwarf.setColumn(loc.column);
             try dwarf.advancePcAndLine(delta_line, delta_pc);

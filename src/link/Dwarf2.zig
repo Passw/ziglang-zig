@@ -1,4 +1,4 @@
-tag: link.File.Tag,
+lf: *link.File,
 format: DW.Format,
 endian: std.lang.Endian,
 address_size: AddressSize,
@@ -12,15 +12,23 @@ values: std.ArrayList(struct {
 globals: std.array_hash_map.Auto(InternPool.Nav.Index, Global),
 funcs: std.array_hash_map.Auto(InternPool.Nav.Index, Func),
 
+debug_abbrev: DebugAbbrev,
 frame: Frame,
 debug_info: DebugInfo,
 debug_line: DebugLine,
+debug_line_str: String,
+debug_str: String,
+debug_str_offsets: StringOffsets,
 
 pub const AddressSize = enum(u8) { @"32" = 4, @"64" = 8, _ };
 
 pub const Unit = struct {
     frame_ni: MappedFile.Node.Index.Optional,
     cie_ni: MappedFile.Node.Index.Optional,
+    debug_info_ni: MappedFile.Node.Index.Optional,
+    debug_info_header_ni: MappedFile.Node.Index.Optional,
+    debug_line_ni: MappedFile.Node.Index.Optional,
+    debug_line_header_ni: MappedFile.Node.Index.Optional,
 
     pub const Index = enum(u32) {
         _,
@@ -71,7 +79,6 @@ pub const Func = struct {
 
 pub const Frame = struct {
     header: Header,
-    section_index: SectionIndex,
 
     pub const Header = struct {
         code_alignment_factor: u32,
@@ -83,13 +90,16 @@ pub const Frame = struct {
     pub const Format = std.debug.Dwarf.Unwind.Section;
 };
 
-pub const DebugInfo = struct {
-    section_index: SectionIndex,
+pub const DebugAbbrev = struct {
+    ni: MappedFile.Node.Index.Optional,
+    offset: usize,
+    set: std.enums.EnumSet(AbbrevCode),
 };
+
+pub const DebugInfo = struct {};
 
 pub const DebugLine = struct {
     header: Header,
-    section_index: SectionIndex,
 
     pub const Header = struct {
         minimum_instruction_length: u8,
@@ -101,7 +111,49 @@ pub const DebugLine = struct {
     };
 };
 
-pub const SectionIndex = enum(u32) { none = std.math.maxInt(u32), _ };
+pub const String = struct {
+    ni: MappedFile.Node.Index.Optional,
+    offset: usize,
+    map: std.AutoHashMapUnmanaged(usize, void),
+
+    fn get(
+        s: *String,
+        gpa: std.mem.Allocator,
+        mf: *MappedFile,
+        string: []const u8,
+    ) MappedFile.Error!usize {
+        const ni = s.ni.unwrap().?;
+        const gop = try s.map.getOrPutAdapted(gpa, string, Adapter{ .slice = ni.sliceConst(mf) });
+        if (!gop.found_existing) {
+            gop.key_ptr.* = s.offset;
+            try ni.ensureMinimumSize(mf, gpa, s.offset + string.len + 1);
+            const slice_mut = ni.slice(mf);
+            @memcpy(slice_mut[s.offset..][0..string.len], string);
+            s.offset += string.len;
+            slice_mut[s.offset] = 0;
+            s.offset += 1;
+        }
+        return gop.key_ptr.*;
+    }
+
+    const Adapter = struct {
+        slice: []const u8,
+        pub fn hash(_: Adapter, key: []const u8) u32 {
+            return @truncate(std.hash.Wyhash.hash(0, key));
+        }
+        pub fn eql(adapter: Adapter, key: []const u8, rhs_offset: usize) bool {
+            return std.mem.startsWith(u8, adapter.slice[rhs_offset..], key) and
+                adapter.slice[rhs_offset + key.len] == 0;
+        }
+    };
+};
+
+pub const StringOffsets = struct {
+    ni: MappedFile.Node.Index.Optional,
+    offset: usize,
+};
+
+pub const SharedSection = enum { debug_abbrev, debug_line_str, debug_str, debug_str_offsets };
 
 pub const Loc = union(enum) {
     empty,
@@ -463,7 +515,7 @@ pub const WipNav = struct {
     },
     frame_format: Frame.Format,
     fde_writer: MappedFile.Node.Writer,
-    frame_func_length_offset: usize,
+    frame_func_length: struct { offset: usize, size: AddressSize },
 
     pub const Debug = struct {
         wip_nav: WipNav,
@@ -477,20 +529,51 @@ pub const WipNav = struct {
         info_writer: MappedFile.Node.Writer,
         line_writer: MappedFile.Node.Writer,
 
-        pub fn deinit(debug: *Debug, gpa: Allocator) void {
+        pub fn deinit(debug: *Debug) void {
+            const gpa = debug.pt.zcu.gpa;
             debug.line_writer.deinit();
             debug.info_writer.deinit();
             debug.blocks.deinit(gpa);
-            debug.wip_nav.deinit(gpa);
+            debug.wip_nav.deinit();
             debug.* = undefined;
         }
 
-        pub fn genFuncHeaders(debug: *Debug) link.Error!void {
-            try debug.wip_nav.genFuncHeaders();
+        pub fn startDebugInfo(debug: *Debug) link.Error!void {
+            debug.startDebugInfoInner() catch |err| switch (err) {
+                error.WriteFailed => return debug.wip_nav.reportWriteError(&debug.info_writer),
+                else => |e| return e,
+            };
+        }
+        fn startDebugInfoInner(debug: *Debug) link.EmitError!void {
+            const dwarf = debug.wip_nav.dwarf;
+            const ip = &debug.pt.zcu.intern_pool;
+            const nav = ip.getNav(debug.wip_nav.func.?.nav(dwarf));
+            const diw = &debug.info_writer.interface;
+            try diw.writeUleb128(try dwarf.refAbbrevCode(.decl_func));
+            try debug.strp(nav.name.toSlice(ip));
+            try debug.strp(nav.fqn.toSlice(ip));
         }
 
         pub fn genDebugFrame(debug: *Debug, loc: u32, cfa: Cfa) link.Error!void {
             return debug.wip_nav.genDebugFrame(loc, cfa);
+        }
+
+        pub fn finishFunc(debug: *Debug) link.Error!void {
+            assert(debug.wip_nav.func != null);
+            debug.finishDebugInfo() catch |err| switch (err) {
+                error.WriteFailed => return debug.wip_nav.reportWriteError(&debug.info_writer),
+                else => |e| return e,
+            };
+            const dlw = &debug.line_writer.interface;
+            dlw.rebase(dlw.end, comptime 1 + uleb128Bytes(1) + 1) catch |err| switch (err) {
+                error.WriteFailed => return debug.wip_nav.reportWriteError(&debug.line_writer),
+            };
+        }
+
+        fn finishDebugInfo(debug: *Debug) link.EmitError!void {
+            const diw = &debug.info_writer.interface;
+            try diw.writeUleb128(@backingInt(AbbrevCode.null));
+            try debug.wip_nav.dwarf.genDebugInfoPadding(diw, diw.unusedCapacityLen());
         }
 
         pub const LocalVarTag = enum { arg, local_var };
@@ -675,7 +758,7 @@ pub const WipNav = struct {
         fn enterBlockInner(debug: *Debug, code_off: u64) link.EmitError!void {
             const dwarf = debug.wip_nav.dwarf;
             const diw = &debug.info_writer.interface;
-            const block = try debug.blocks.addOne(dwarf.linkFile().comp.gpa);
+            const block = try debug.blocks.addOne(dwarf.lf.comp.gpa);
 
             block.abbrev_code = @intCast(diw.end);
             try debug.abbrevCode(.block);
@@ -767,17 +850,18 @@ pub const WipNav = struct {
             const dwarf = debug.wip_nav.dwarf;
             const inlined_func_bytes = comptime uleb128Bytes(@backingInt(AbbrevCode.inlined_func));
             const block = debug.blocks.pop().?;
+            const diw = &debug.info_writer.interface;
             if (debug.any_children)
-                try debug.info_writer.interface.writeUleb128(@backingInt(AbbrevCode.null))
+                try diw.writeUleb128(@backingInt(AbbrevCode.null))
             else
                 std.leb.writeUnsignedFixed(
                     inlined_func_bytes,
-                    debug.info_writer.interface.buffered()[block.abbrev_code..][0..inlined_func_bytes],
+                    diw.buffered()[block.abbrev_code..][0..inlined_func_bytes],
                     @intCast(try dwarf.refAbbrevCode(.empty_inlined_func)),
                 );
             std.mem.writeInt(
                 u32,
-                debug.info_writer.interface.buffered()[block.high_pc..][0..4],
+                diw.buffered()[block.high_pc..][0..4],
                 @intCast(code_off - block.low_pc_off),
                 dwarf.endian,
             );
@@ -806,7 +890,7 @@ pub const WipNav = struct {
 
             const dlw = &debug.line_writer.interface;
             if (zcu.comp.config.incremental) {
-                const new_func_gop = try dwarf.funcs.getOrPut(dwarf.gpa, new_func_info.owner_nav);
+                const new_func_gop = try dwarf.funcs.getOrPut(zcu.gpa, new_func_info.owner_nav);
                 errdefer _ = if (!new_func_gop.found_existing) dwarf.funcs.pop();
                 if (!new_func_gop.found_existing) new_func_gop.value_ptr.* = .{
                     .frame_node = .none,
@@ -822,8 +906,8 @@ pub const WipNav = struct {
                 try dlw.writeByte(DW.LNS.extended_op);
                 try dlw.writeUleb128(1 + section_offset_size);
                 try dlw.writeByte(DW.LNE.ZIG_set_decl);
-                try dwarf.debug_line.section.getUnit(wip_nav.unit).getEntry(wip_nav.entry).cross_section_relocs.append(dwarf.gpa, .{
-                    .source_off = @intCast(dlw.end),
+                try dwarf.debug_line.section.getUnit(wip_nav.unit).getEntry(wip_nav.entry).cross_section_relocs.append(zcu.gpa, .{
+                    .source_off = @bitCast(@as(u64, dlw.end)),
                     .target_sec = .debug_info,
                     .target_unit = new_unit,
                     .target_entry = new_func_gop.value_ptr.toOptional(),
@@ -836,8 +920,8 @@ pub const WipNav = struct {
             const old_file = zcu.navFileScopeIndex(old_func_info.owner_nav);
             if (old_file != new_file) {
                 const mod_info = dwarf.getModInfo(wip_nav.unit);
-                try mod_info.dirs.put(dwarf.gpa, new_unit, {});
-                const file_gop = try mod_info.files.getOrPut(dwarf.gpa, new_file);
+                try mod_info.dirs.put(zcu.gpa, new_unit, {});
+                const file_gop = try mod_info.files.getOrPut(zcu.gpa, new_file);
 
                 try dlw.writeByte(DW.LNS.set_file);
                 try dlw.writeUleb128(file_gop.index);
@@ -854,57 +938,38 @@ pub const WipNav = struct {
         }
 
         fn abbrevCode(debug: *Debug, abbrev_code: AbbrevCode) link.EmitError!void {
-            try debug.info_writer.interface.writeUleb128(try debug.wip_nav.dwarf.refAbbrevCode(abbrev_code));
+            try debug.info_writer.interface.writeUleb128(
+                try debug.wip_nav.dwarf.refAbbrevCode(abbrev_code),
+            );
         }
 
         fn infoExternalReloc(debug: *Debug, reloc: struct {
             source_off: u32 = 0,
             target_si: link.File.SymbolId,
             target_off: u64 = 0,
-        }) Allocator.Error!void {
+        }) std.mem.Allocator.Error!void {
             if (true) @panic("TODO");
             try debug.wip_nav.externalReloc(&debug.wip_nav.dwarf.debug_frame.section, reloc);
         }
 
         fn infoSectionOffset(
             debug: *Debug,
-            target: MappedFile.Node.Index,
+            target_ni: MappedFile.Node.Index,
             addend: i64,
         ) link.EmitError!void {
-            const dwarf = debug.wip_nav.dwarf;
-            const diw = &debug.info_writer.interface;
-            const offset = diw.end;
-            switch (dwarf.format) {
-                .@"32" => try diw.writeInt(u32, 0, dwarf.endian),
-                .@"64" => try diw.writeInt(u64, 0, dwarf.endian),
-            }
-            try dwarf.linkFile().cast(.elf2).?.addNodeReloc(
-                debug.info_writer.ni,
-                offset,
-                target,
-                addend,
-                switch (dwarf.format) {
-                    .@"32" => .abs32,
-                    .@"64" => .abs64,
-                },
-            );
+            try debug.wip_nav.dwarf.sectionOffset(&debug.info_writer, target_ni, addend);
         }
 
         fn strp(debug: *Debug, str: []const u8) link.EmitError!void {
-            if (true) @panic("TODO");
             const dwarf = debug.wip_nav.dwarf;
-            try debug.infoSectionOffset(.debug_str, try dwarf.debug_str.addString(dwarf, str), 0);
+            try dwarf.strp(&dwarf.debug_str, &debug.info_writer, str);
         }
 
-        fn strpFmt(
-            debug: *Debug,
-            comptime fmt: []const u8,
-            args: anytype,
-        ) link.EmitError!void {
-            const gpa = &debug.wip_nav.dwarf.gpa;
+        fn strpFmt(debug: *Debug, comptime fmt: []const u8, args: anytype) link.EmitError!void {
+            const gpa = debug.pt.zcu.gpa;
             const str = try std.fmt.allocPrint(gpa, fmt, args);
             defer gpa.free(str);
-            return debug.strp(str);
+            try debug.strp(str);
         }
 
         fn infoExprLoc(debug: *Debug, loc: Loc) link.EmitError!void {
@@ -923,10 +988,7 @@ pub const WipNav = struct {
                 fn addrSym(ctx: @This(), si: link.File.SymbolId) link.EmitError!void {
                     try ctx.debug.infoAddrSym(si, 0);
                 }
-                fn infoEntry(
-                    ctx: @This(),
-                    node: MappedFile.Node.Index,
-                ) link.EmitError!void {
+                fn infoEntry(ctx: @This(), node: MappedFile.Node.Index) link.EmitError!void {
                     try ctx.debug.infoSectionOffset(node, 0);
                 }
             } = .{ .debug = debug };
@@ -941,7 +1003,7 @@ pub const WipNav = struct {
         ) link.EmitError!void {
             const diw = &debug.info_writer.interface;
             try debug.infoExternalReloc(.{
-                .source_off = @intCast(diw.end),
+                .source_off = @bitCast(@as(u64, diw.end)),
                 .target_si = si,
                 .target_off = sym_off,
             });
@@ -957,7 +1019,6 @@ pub const WipNav = struct {
         }
 
         fn refValue(debug: *Debug, value: Value) link.EmitError!void {
-            if (true) @panic("TODO");
             try debug.infoSectionOffset(.debug_info, try debug.getValueNode(value), 0);
         }
 
@@ -978,7 +1039,7 @@ pub const WipNav = struct {
             if (size == 0) return;
             const old_end = diw.end;
             try codegen.generateSymbol(
-                debug.wip_nav.dwarf.linkFile(),
+                debug.wip_nav.dwarf.lf,
                 debug.pt,
                 val,
                 diw,
@@ -996,37 +1057,29 @@ pub const WipNav = struct {
         }
     };
 
-    pub fn deinit(wip_nav: *WipNav, gpa: Allocator) void {
-        _ = gpa;
+    pub fn deinit(wip_nav: *WipNav) void {
         wip_nav.fde_writer.deinit();
         wip_nav.* = undefined;
     }
 
-    pub fn genFuncHeaders(wip_nav: *WipNav) link.Error!void {
-        wip_nav.genDebugFrameHeader() catch |err| switch (err) {
+    pub fn genDebugFrameHeader(wip_nav: *WipNav) link.Error!void {
+        wip_nav.genDebugFrameHeaderInner() catch |err| switch (err) {
             error.WriteFailed => return wip_nav.reportWriteError(&wip_nav.fde_writer),
             else => |e| return e,
         };
     }
-    fn genDebugFrameHeader(wip_nav: *WipNav) link.EmitError!void {
+    fn genDebugFrameHeaderInner(wip_nav: *WipNav) link.EmitError!void {
         assert(wip_nav.func != null);
         const dwarf = wip_nav.dwarf;
         const dfw = &wip_nav.fde_writer.interface;
-        switch (dwarf.format) {
-            .@"32" => try dfw.writeInt(u32, undefined, dwarf.endian),
-            .@"64" => {
-                try dfw.writeInt(u32, std.math.maxInt(u32), dwarf.endian);
-                try dfw.writeInt(u64, undefined, dwarf.endian);
-            },
-        }
-        const unit = wip_nav.unit.get(dwarf);
+        try dwarf.genUnitLength(dfw);
         switch (wip_nav.frame_format) {
             .eh_frame => {
                 try dfw.writeInt(u32, undefined, dwarf.endian);
                 {
                     const offset = dfw.end;
                     try dfw.writeInt(u32, 0, dwarf.endian);
-                    const elf = dwarf.linkFile().cast(.elf2).?;
+                    const elf = dwarf.lf.cast(.elf2).?;
                     try elf.addReloc(
                         @bitCast(wip_nav.fde_writer.ni),
                         offset,
@@ -1035,14 +1088,14 @@ pub const WipNav = struct {
                         .rel32(elf),
                     );
                 }
-                wip_nav.frame_func_length_offset = dfw.end;
+                wip_nav.frame_func_length = .{ .offset = dfw.end, .size = .@"32" };
                 try dfw.writeInt(u32, undefined, dwarf.endian);
                 try dfw.writeUleb128(0);
             },
             .debug_frame => {
-                try wip_nav.frameSectionOffset(unit.cie_ni.unwrap().?, 0);
+                try wip_nav.frameSectionOffset(wip_nav.unit.get(dwarf).cie_ni.unwrap().?, 0);
                 try wip_nav.frameAddrSym(wip_nav.func_si, 0);
-                wip_nav.frame_func_length_offset = dfw.end;
+                wip_nav.frame_func_length = .{ .offset = dfw.end, .size = dwarf.address_size };
                 try dfw.splatByteAll(undefined, @backingInt(dwarf.address_size));
             },
         }
@@ -1063,30 +1116,23 @@ pub const WipNav = struct {
 
     pub fn finishDebugFrameFde(wip_nav: *WipNav, func_length: u64) void {
         const dwarf = wip_nav.dwarf;
-        const fde = wip_nav.fde_writer.interface.buffer;
-        switch (wip_nav.frame_format) {
-            .eh_frame => std.mem.writeInt(
+        const dfw = &wip_nav.fde_writer.interface;
+        switch (wip_nav.frame_func_length.size) {
+            _ => unreachable,
+            .@"32" => std.mem.writeInt(
                 u32,
-                fde[wip_nav.frame_func_length_offset..][0..4],
+                dfw.buffered()[wip_nav.frame_func_length.offset..][0..4],
                 @intCast(func_length),
                 dwarf.endian,
             ),
-            .debug_frame => switch (dwarf.address_size) {
-                _ => unreachable,
-                .@"32" => std.mem.writeInt(
-                    u32,
-                    fde[wip_nav.frame_func_length_offset..][0..4],
-                    @intCast(func_length),
-                    dwarf.endian,
-                ),
-                .@"64" => std.mem.writeInt(
-                    u64,
-                    fde[wip_nav.frame_func_length_offset..][0..8],
-                    func_length,
-                    dwarf.endian,
-                ),
-            },
+            .@"64" => std.mem.writeInt(
+                u64,
+                dfw.buffered()[wip_nav.frame_func_length.offset..][0..8],
+                func_length,
+                dwarf.endian,
+            ),
         }
+        @memset(dfw.unusedCapacitySlice(), DW.CFA.nop);
     }
 
     const ExprLocCounter = struct {
@@ -1119,26 +1165,10 @@ pub const WipNav = struct {
 
     fn frameSectionOffset(
         wip_nav: *WipNav,
-        target: MappedFile.Node.Index,
-        addend: i64,
+        target_ni: MappedFile.Node.Index,
+        addend: usize,
     ) link.EmitError!void {
-        const dwarf = wip_nav.dwarf;
-        const dfw = &wip_nav.fde_writer.interface;
-        const offset = dfw.end;
-        switch (dwarf.format) {
-            .@"32" => try dfw.writeInt(u32, 0, dwarf.endian),
-            .@"64" => try dfw.writeInt(u64, 0, dwarf.endian),
-        }
-        try dwarf.linkFile().cast(.elf2).?.addNodeReloc(
-            wip_nav.fde_writer.ni,
-            offset,
-            target,
-            addend,
-            switch (dwarf.format) {
-                .@"32" => .abs32,
-                .@"64" => .abs64,
-            },
-        );
+        try wip_nav.dwarf.sectionOffset(&wip_nav.fde_writer, target_ni, addend);
     }
 
     fn frameExprLoc(wip_nav: *WipNav, loc: Loc) link.EmitError!void {
@@ -1174,7 +1204,7 @@ pub const WipNav = struct {
         const dfw = &wip_nav.fde_writer.interface;
         const offset = dfw.end;
         try dfw.splatByteAll(0, @backingInt(dwarf.address_size));
-        const elf = dwarf.linkFile().cast(.elf2).?;
+        const elf = dwarf.lf.cast(.elf2).?;
         try elf.addReloc(
             @bitCast(wip_nav.fde_writer.ni),
             offset,
@@ -1190,7 +1220,7 @@ pub const WipNav = struct {
     fn reportWriteError(wip_nav: *WipNav, mfnw: *const MappedFile.Node.Writer) link.Error {
         switch (mfnw.err.?) {
             else => |e| return e,
-            error.MappedFileIo => return wip_nav.dwarf.linkFile().comp.link_diags.fail(
+            error.MappedFileIo => return wip_nav.dwarf.lf.comp.link_diags.fail(
                 "failed to write output file: {t}",
                 .{mfnw.mf.io_err.?},
             ),
@@ -1199,10 +1229,9 @@ pub const WipNav = struct {
 };
 
 pub fn init(lf: *link.File, format: DW.Format) Dwarf {
-    const comp = lf.comp;
-    const target = &comp.root_mod.resolved_target.result;
+    const target = &lf.comp.root_mod.resolved_target.result;
     return .{
-        .tag = lf.tag,
+        .lf = lf,
         .format = format,
         .address_size = switch (target.ptrBitWidth()) {
             0...32 => .@"32",
@@ -1216,29 +1245,10 @@ pub fn init(lf: *link.File, format: DW.Format) Dwarf {
         .globals = .empty,
         .funcs = .empty,
 
-        .debug_info = .{
-            .section_index = .none,
-        },
-        .debug_line = .{
-            .header = switch (target.cpu.arch) {
-                .x86_64, .aarch64 => .{
-                    .minimum_instruction_length = 1,
-                    .maximum_operations_per_instruction = 1,
-                    .default_is_stmt = true,
-                    .line_base = -5,
-                    .line_range = 14,
-                    .opcode_base = DW.LNS.set_isa + 1,
-                },
-                else => .{
-                    .minimum_instruction_length = 1,
-                    .maximum_operations_per_instruction = 1,
-                    .default_is_stmt = true,
-                    .line_base = 0,
-                    .line_range = 1,
-                    .opcode_base = DW.LNS.set_isa + 1,
-                },
-            },
-            .section_index = .none,
+        .debug_abbrev = .{
+            .ni = .none,
+            .offset = 0,
+            .set = .empty,
         },
         .frame = .{
             .header = if (target.cpu.arch == .x86_64 and target.ofmt == .elf) header: {
@@ -1259,34 +1269,67 @@ pub fn init(lf: *link.File, format: DW.Format) Dwarf {
                 .return_address_register = undefined,
                 .initial_instructions = &.{},
             },
-            .section_index = .none,
+        },
+        .debug_info = .{},
+        .debug_line = .{
+            .header = switch (target.cpu.arch) {
+                .x86_64, .aarch64 => .{
+                    .minimum_instruction_length = 1,
+                    .maximum_operations_per_instruction = 1,
+                    .default_is_stmt = true,
+                    .line_base = -5,
+                    .line_range = 14,
+                    .opcode_base = DW.LNS.set_isa + 1,
+                },
+                else => .{
+                    .minimum_instruction_length = 1,
+                    .maximum_operations_per_instruction = 1,
+                    .default_is_stmt = true,
+                    .line_base = 0,
+                    .line_range = 1,
+                    .opcode_base = DW.LNS.set_isa + 1,
+                },
+            },
+        },
+        .debug_line_str = .{
+            .ni = .none,
+            .offset = 0,
+            .map = .empty,
+        },
+        .debug_str = .{
+            .ni = .none,
+            .offset = 0,
+            .map = .empty,
+        },
+        .debug_str_offsets = .{
+            .ni = .none,
+            .offset = 0,
         },
     };
 }
 
-pub fn deinit(dwarf: *Dwarf, gpa: Allocator) void {
+pub fn deinit(dwarf: *Dwarf) void {
+    const gpa = dwarf.lf.comp.gpa;
     dwarf.const_pool.deinit(gpa);
     dwarf.units.deinit(gpa);
     dwarf.values.deinit(gpa);
     dwarf.globals.deinit(gpa);
     dwarf.funcs.deinit(gpa);
+    dwarf.debug_str.map.deinit(gpa);
     dwarf.* = undefined;
 }
 
-fn linkFile(dwarf: *Dwarf) *link.File {
-    return switch (dwarf.tag) {
-        else => unreachable,
-        .elf2 => |tag| &@as(*tag.Type(), @alignCast(@fieldParentPtr("dwarf", dwarf))).base,
-    };
-}
-
-pub fn initUnits(dwarf: *Dwarf, zcu: *Zcu) Allocator.Error!void {
+pub fn initUnits(dwarf: *Dwarf, zcu: *Zcu) std.mem.Allocator.Error!void {
     try dwarf.units.ensureTotalCapacity(zcu.gpa, zcu.module_roots.count());
     for (zcu.module_roots.keys(), zcu.module_roots.values()) |mod, root| switch (root) {
         .none => {},
         else => dwarf.units.putAssumeCapacityNoClobber(mod, .{
             .frame_ni = .none,
             .cie_ni = .none,
+            .debug_info_ni = .none,
+            .debug_info_header_ni = .none,
+            .debug_line_ni = .none,
+            .debug_line_header_ni = .none,
         }),
     };
 }
@@ -1308,8 +1351,8 @@ pub fn getUnit(dwarf: *Dwarf, mod: *Module) Unit.Index {
     return @fromBackingInt(@intCast(dwarf.units.getIndex(mod).?));
 }
 
-pub fn getFunc(dwarf: *Dwarf, owner_nav: InternPool.Nav.Index) Allocator.Error!Func.Index {
-    const func_gop = try dwarf.funcs.getOrPut(dwarf.linkFile().comp.gpa, owner_nav);
+pub fn getFunc(dwarf: *Dwarf, owner_nav: InternPool.Nav.Index) std.mem.Allocator.Error!Func.Index {
+    const func_gop = try dwarf.funcs.getOrPut(dwarf.lf.comp.gpa, owner_nav);
     if (!func_gop.found_existing) func_gop.value_ptr.* = .{
         .fde_ni = .none,
         .debug_info_ni = .none,
@@ -1318,11 +1361,31 @@ pub fn getFunc(dwarf: *Dwarf, owner_nav: InternPool.Nav.Index) Allocator.Error!F
     return @fromBackingInt(@intCast(func_gop.index));
 }
 
+pub fn unitLengthSize(dwarf: *Dwarf) usize {
+    return switch (dwarf.format) {
+        .@"32" => 4,
+        .@"64" => 12,
+    };
+}
+pub fn genUnitLength(dwarf: *Dwarf, w: *Writer) Writer.Error!void {
+    switch (dwarf.format) {
+        .@"32" => try w.writeInt(u32, undefined, dwarf.endian),
+        .@"64" => {
+            try w.writeInt(u32, std.math.maxInt(u32), dwarf.endian);
+            try w.writeInt(u64, undefined, dwarf.endian);
+        },
+    }
+}
 pub fn updateUnitLength(dwarf: *Dwarf, header: []u8, unit_length: u64) void {
     switch (dwarf.format) {
         .@"32" => std.mem.writeInt(u32, header[0..4], @intCast(unit_length - 4), dwarf.endian),
         .@"64" => std.mem.writeInt(u64, header[4..12], unit_length - 12, dwarf.endian),
     }
+}
+
+pub fn genUnitPadding(dwarf: *Dwarf, w: *Writer) Writer.Error!void {
+    try dwarf.genUnitLength(w);
+    try w.writeInt(u16, 0, dwarf.endian);
 }
 
 pub const EhFrameHdr = extern struct {
@@ -1345,7 +1408,7 @@ pub fn genEhFrameHdr(
         .table_enc = .omit,
         .eh_frame_ptr = undefined,
     };
-    const elf = dwarf.linkFile().cast(.elf2).?;
+    const elf = dwarf.lf.cast(.elf2).?;
     try elf.addReloc(
         eh_frame_hdr_ai,
         @offsetOf(EhFrameHdr, "eh_frame_ptr"),
@@ -1357,26 +1420,20 @@ pub fn genEhFrameHdr(
 
 pub fn genDebugFrameCie(
     dwarf: *Dwarf,
-    w: *Writer,
+    dfw: *Writer,
     /// `null` means to generate an architecture-agnostic padding cie
     arch: ?std.Target.Cpu.Arch,
     format: Frame.Format,
 ) Writer.Error!void {
-    switch (dwarf.format) {
-        .@"32" => try w.writeInt(u32, undefined, dwarf.endian),
-        .@"64" => {
-            try w.writeInt(u32, std.math.maxInt(u32), dwarf.endian);
-            try w.writeInt(u64, undefined, dwarf.endian);
-        },
-    }
+    try dwarf.genUnitLength(dfw);
     switch (format) {
-        .eh_frame => try w.writeInt(u32, 0, dwarf.endian),
+        .eh_frame => try dfw.writeInt(u32, 0, dwarf.endian),
         .debug_frame => switch (dwarf.format) {
-            .@"32" => try w.writeInt(u32, std.math.maxInt(u32), dwarf.endian),
-            .@"64" => try w.writeInt(u64, std.math.maxInt(u64), dwarf.endian),
+            .@"32" => try dfw.writeInt(u32, std.math.maxInt(u32), dwarf.endian),
+            .@"64" => try dfw.writeInt(u64, std.math.maxInt(u64), dwarf.endian),
         },
     }
-    try w.writeByte(if (arch) |_| switch (format) {
+    try dfw.writeByte(if (arch) |_| switch (format) {
         .eh_frame => 1,
         .debug_frame => 4,
     } else 0);
@@ -1386,40 +1443,38 @@ pub fn genDebugFrameCie(
             dev.check(.x86_64_backend);
             const Register = @import("../codegen/x86_64/bits.zig").Register;
             switch (format) {
-                .eh_frame => try w.writeAll("zR\x00"),
+                .eh_frame => try dfw.writeAll("zR\x00"),
                 .debug_frame => {
-                    try w.writeAll("\x00");
-                    try w.writeByte(@backingInt(dwarf.address_size));
-                    try w.writeByte(0);
+                    try dfw.writeAll("\x00");
+                    try dfw.writeByte(@backingInt(dwarf.address_size));
+                    try dfw.writeByte(0);
                 },
             }
-            try w.writeUleb128(dwarf.frame.header.code_alignment_factor);
-            try w.writeSleb128(dwarf.frame.header.data_alignment_factor);
+            try dfw.writeUleb128(dwarf.frame.header.code_alignment_factor);
+            try dfw.writeSleb128(dwarf.frame.header.data_alignment_factor);
             switch (format) {
-                .eh_frame => try w.writeByte(@intCast(dwarf.frame.header.return_address_register)),
-                .debug_frame => try w.writeUleb128(dwarf.frame.header.return_address_register),
+                .eh_frame => try dfw.writeByte(@intCast(dwarf.frame.header.return_address_register)),
+                .debug_frame => try dfw.writeUleb128(dwarf.frame.header.return_address_register),
             }
             switch (format) {
                 .eh_frame => {
-                    try w.writeUleb128(1);
-                    try w.writeByte(@bitCast(@as(DW.EH.PE, .{ .type = .sdata4, .rel = .pcrel })));
+                    try dfw.writeUleb128(1);
+                    try dfw.writeByte(@bitCast(@as(DW.EH.PE, .{ .type = .sdata4, .rel = .pcrel })));
                 },
                 .debug_frame => {},
             }
-            try w.writeByte(DW.CFA.def_cfa_sf);
-            try w.writeUleb128(Register.rsp.dwarfNum());
-            try w.writeSleb128(-1);
-            try w.writeByte(@as(u8, DW.CFA.offset) + Register.rip.dwarfNum());
-            try w.writeUleb128(1);
+            try dfw.writeByte(DW.CFA.def_cfa_sf);
+            try dfw.writeUleb128(Register.rsp.dwarfNum());
+            try dfw.writeSleb128(-1);
+            try dfw.writeByte(@as(u8, DW.CFA.offset) + Register.rip.dwarfNum());
+            try dfw.writeUleb128(1);
         },
     }
+    @memset(dfw.unusedCapacitySlice(), DW.CFA.nop);
 }
 
 pub fn updateEhFrameFde(dwarf: *Dwarf, fde: []u8, fde_offset: u64) void {
-    const cie_pointer_offset: usize = switch (dwarf.format) {
-        .@"32" => 4,
-        .@"64" => 12,
-    };
+    const cie_pointer_offset = dwarf.unitLengthSize();
     std.mem.writeInt(
         u32,
         fde[cie_pointer_offset..][0..4],
@@ -1428,27 +1483,182 @@ pub fn updateEhFrameFde(dwarf: *Dwarf, fde: []u8, fde_offset: u64) void {
     );
 }
 
+pub fn genDebugInfoHeader(
+    dwarf: *Dwarf,
+    nw: *MappedFile.Node.Writer,
+    unit: Unit.Index,
+    zcu: *Zcu,
+) link.EmitError!void {
+    const comp = zcu.comp;
+    const mod = unit.mod(dwarf);
+    const diw = &nw.interface;
+    try dwarf.genUnitLength(diw);
+    try diw.writeInt(u16, 5, dwarf.endian);
+    try diw.writeByte(DW.UT.compile);
+    try diw.writeByte(@backingInt(dwarf.address_size));
+    try dwarf.sectionOffset(nw, dwarf.debug_abbrev.ni.unwrap().?, 0);
+    const compile_unit_offset = diw.end;
+    try diw.writeUleb128(try dwarf.refAbbrevCode(.compile_unit));
+    try dwarf.strp(&dwarf.debug_str, nw, "zig " ++ @import("build_options").version);
+    try diw.writeByte(DW.LANG.Zig);
+    const root_dir_path = try mod.root.toAbsolute(&comp.dirs, comp.gpa);
+    defer comp.gpa.free(root_dir_path);
+    try dwarf.strp(&dwarf.debug_line_str, nw, root_dir_path);
+    try dwarf.strp(&dwarf.debug_line_str, nw, mod.root_src_path);
+    try dwarf.sectionOffset(
+        nw,
+        dwarf.getUnit(comp.root_mod).get(dwarf).debug_info_header_ni.unwrap().?,
+        compile_unit_offset,
+    );
+    try dwarf.sectionOffset(nw, unit.get(dwarf).debug_line_header_ni.unwrap().?, 0);
+    const module_offset = diw.end;
+    try diw.writeUleb128(try dwarf.refAbbrevCode(.module));
+    try dwarf.strp(&dwarf.debug_str, nw, mod.fully_qualified_name);
+    for ([_][]const u8{ "builtin", "root", "std" }, [_]*Module{
+        zcu.builtin_modules.get(mod.getBuiltinOptions(comp.config).hash()).?,
+        zcu.root_mod,
+        zcu.std_mod,
+    }) |name, dep| try dwarf.genModuleDependency(nw, name, dep, module_offset);
+    for (mod.deps.keys(), mod.deps.values()) |name, dep|
+        try dwarf.genModuleDependency(nw, name, dep, module_offset);
+    for ([2]AbbrevCode{ .pad_1, .pad_n }) |pad| _ = try dwarf.refAbbrevCode(pad);
+    try dwarf.genDebugInfoPadding(diw, diw.unusedCapacityLen());
+}
+
+fn genModuleDependency(
+    dwarf: *Dwarf,
+    nw: *MappedFile.Node.Writer,
+    name: []const u8,
+    dep: *Module,
+    module_offset: usize,
+) link.EmitError!void {
+    const diw = &nw.interface;
+    try diw.writeUleb128(try dwarf.refAbbrevCode(.module_dependency));
+    try diw.writeAll(name);
+    try diw.writeByte(0);
+    try dwarf.sectionOffset(
+        nw,
+        dwarf.getUnit(dep).get(dwarf).debug_info_header_ni.unwrap().?,
+        module_offset,
+    );
+}
+
+pub fn genDebugInfoPadding(dwarf: *Dwarf, diw: *Writer, size: u64) Writer.Error!void {
+    switch (size) {
+        0 => {},
+        1 => try diw.writeUleb128(dwarf.refAbbrevCodeIfExists(.pad_1).?),
+        else => {
+            const abbrev_code_offset = diw.end;
+            try diw.writeUleb128(dwarf.refAbbrevCodeIfExists(.pad_n).?);
+            const abbrev_code_size = diw.end - abbrev_code_offset;
+            var block_len_size: u5 = 1;
+            while (true) switch (std.math.order(size - abbrev_code_size - block_len_size, @as(u64, 1) << 7 * block_len_size)) {
+                .lt => break try diw.writeUleb128(size - abbrev_code_size - block_len_size),
+                .eq => {
+                    // no length will ever work, so undercount and futz with the leb encoding to make up the missing byte
+                    block_len_size += 1;
+                    std.leb.writeUnsignedExtended(try diw.writableSlice(block_len_size), size - abbrev_code_size - block_len_size);
+                    break;
+                },
+                .gt => block_len_size += 1,
+            };
+        },
+    }
+}
+
+pub fn genDebugLineHeader(dwarf: *Dwarf, dlw: *Writer) Writer.Error!void {
+    try dwarf.genUnitLength(dlw);
+    @memset(dlw.unusedCapacitySlice(), 0xaa);
+}
+
+pub fn genDebugLinePadding(dlw: *Writer, size: u64) Writer.Error!void {
+    switch (size) {
+        0 => {},
+        1 => try dlw.writeByte(DW.LNS.const_add_pc),
+        else => {
+            const extended_op_offset = dlw.end;
+            try dlw.writeByte(DW.LNS.extended_op);
+            const extended_op_size = dlw.end - extended_op_offset;
+            var op_len_size: u5 = 1;
+            while (true) switch (std.math.order(size - extended_op_size - op_len_size, @as(u64, 1) << 7 * op_len_size)) {
+                .lt => break try dlw.writeUleb128(size - extended_op_size - op_len_size),
+                .eq => {
+                    // no length will ever work, so undercount and futz with the leb encoding to make up the missing byte
+                    op_len_size += 1;
+                    std.leb.writeUnsignedExtended(try dlw.writableSlice(op_len_size), size - extended_op_size - op_len_size);
+                    break;
+                },
+                .gt => op_len_size += 1,
+            };
+        },
+    }
+}
+
+fn refAbbrevCodeIfExists(
+    dwarf: *Dwarf,
+    abbrev_code: AbbrevCode,
+) ?@typeInfo(AbbrevCode).@"enum".tag_type {
+    assert(abbrev_code != .null);
+    return if (dwarf.debug_abbrev.set.contains(abbrev_code)) @backingInt(abbrev_code) else null;
+}
+
 fn refAbbrevCode(
     dwarf: *Dwarf,
     abbrev_code: AbbrevCode,
 ) link.EmitError!@typeInfo(AbbrevCode).@"enum".tag_type {
-    if (true) @panic("TODO");
-    const Entry = {};
-    const DebugAbbrev = {};
-    assert(abbrev_code != .null);
-    const entry: Entry.Index = @fromBackingInt(@intCast(@backingInt(abbrev_code)));
-    if (dwarf.debug_abbrev.section.getUnit(DebugAbbrev.unit).getEntry(entry).len > 0) return @backingInt(abbrev_code);
-    var debug_abbrev_aw: Writer.Allocating = .init(dwarf.gpa);
-    defer debug_abbrev_aw.deinit();
-    const daw = &debug_abbrev_aw.writer;
+    if (dwarf.refAbbrevCodeIfExists(abbrev_code)) |backing_int| {
+        @branchHint(.likely);
+        return backing_int;
+    }
+    const elf = dwarf.lf.cast(.elf2).?;
+    var nw: MappedFile.Node.Writer = undefined;
+    dwarf.debug_abbrev.ni.unwrap().?.writer(&elf.mf, elf.base.comp.gpa, &nw);
+    defer nw.deinit();
     const abbrev = AbbrevCode.abbrevs.get(abbrev_code);
+    const daw = &nw.interface;
+    daw.end = dwarf.debug_abbrev.offset;
     try daw.writeUleb128(@backingInt(abbrev_code));
     try daw.writeUleb128(@backingInt(abbrev.tag));
     try daw.writeByte(if (abbrev.children) DW.CHILDREN.yes else DW.CHILDREN.no);
     for (abbrev.attrs) |*attr| inline for (attr) |info| try daw.writeUleb128(@backingInt(info));
     for (0..2) |_| try daw.writeUleb128(0);
-    try dwarf.debug_abbrev.section.replaceEntry(DebugAbbrev.unit, entry, dwarf, debug_abbrev_aw.written());
-    return @backingInt(abbrev_code);
+    dwarf.debug_abbrev.offset = daw.end;
+    dwarf.debug_abbrev.set.insert(abbrev_code);
+    return dwarf.refAbbrevCodeIfExists(abbrev_code).?;
+}
+
+fn sectionOffset(
+    dwarf: *Dwarf,
+    nw: *MappedFile.Node.Writer,
+    target_ni: MappedFile.Node.Index,
+    addend: usize,
+) link.EmitError!void {
+    const offset = nw.interface.end;
+    switch (dwarf.format) {
+        .@"32" => try nw.interface.writeInt(u32, 0, dwarf.endian),
+        .@"64" => try nw.interface.writeInt(u64, 0, dwarf.endian),
+    }
+    try dwarf.lf.cast(.elf2).?.addNodeReloc(
+        nw.ni,
+        offset,
+        target_ni,
+        @bitCast(@as(u64, addend)),
+        switch (dwarf.format) {
+            .@"32" => .abs32,
+            .@"64" => .abs64,
+        },
+    );
+}
+
+fn strp(dwarf: *Dwarf, s: *String, nw: *MappedFile.Node.Writer, str: []const u8) link.EmitError!void {
+    const comp = dwarf.lf.comp;
+    const mf = &dwarf.lf.cast(.elf2).?.mf;
+    try dwarf.sectionOffset(nw, s.ni.unwrap().?, s.get(comp.gpa, mf, str) catch |err| switch (err) {
+        error.MappedFileIo => return comp.link_diags.fail("failed to write output file: {t}", .{
+            mf.io_err.?,
+        }),
+        else => |e| return e,
+    });
 }
 
 fn DeclValEnum(comptime T: type) type {
@@ -1473,7 +1683,7 @@ fn DeclValEnum(comptime T: type) type {
     return @Enum(TagInt, .exhaustive, field_names[0..fields_len], &field_vals);
 }
 
-const AbbrevCode = enum {
+pub const AbbrevCode = enum {
     null,
     // padding codes must be one byte uleb128 values to function
     pad_1,
@@ -1524,6 +1734,7 @@ const AbbrevCode = enum {
     // than the non-empty variant, and so should appear first
     compile_unit,
     module,
+    module_dependency,
     empty_file,
     file,
     access,
@@ -1765,14 +1976,14 @@ const AbbrevCode = enum {
         .decl_func = .{
             .tag = .subprogram,
             .children = true,
-            .attrs = decl_abbrev_common_attrs ++ .{
+            .attrs = decl_abbrev_common_attrs[4..] ++ .{
                 .{ .linkage_name, .strp },
-                .{ .type, .ref_addr },
-                .{ .low_pc, .addr },
-                .{ .high_pc, .data4 },
-                .{ .alignment, .udata },
-                .{ .external, .flag },
-                .{ .noreturn, .flag },
+                //.{ .type, .ref_addr },
+                //.{ .low_pc, .addr },
+                //.{ .high_pc, .data4 },
+                //.{ .alignment, .udata },
+                //.{ .external, .flag },
+                //.{ .noreturn, .flag },
             },
         },
         .decl_nullary_func_generic = .{
@@ -1989,14 +2200,15 @@ const AbbrevCode = enum {
             .tag = .compile_unit,
             .children = true,
             .attrs = &.{
+                .{ .producer, .strp },
                 .{ .language, .data1 },
-                .{ .producer, .line_strp },
                 .{ .comp_dir, .line_strp },
                 .{ .name, .line_strp },
                 .{ .base_types, .ref_addr },
                 .{ .stmt_list, .sec_offset },
-                .{ .rnglists_base, .sec_offset },
-                .{ .ranges, .rnglistx },
+                //.{ .rnglists_base, .sec_offset },
+                //.{ .ranges, .rnglistx },
+                .{ .use_UTF8, .flag_present },
             },
         },
         .module = .{
@@ -2004,7 +2216,14 @@ const AbbrevCode = enum {
             .children = true,
             .attrs = &.{
                 .{ .name, .strp },
-                .{ .ranges, .rnglistx },
+                //.{ .ranges, .rnglistx },
+            },
+        },
+        .module_dependency = .{
+            .tag = .imported_module,
+            .attrs = &.{
+                .{ .name, .string },
+                .{ .import, .ref_addr },
             },
         },
         .empty_file = .{
@@ -2662,23 +2881,23 @@ const AbbrevCode = enum {
     });
 };
 
-fn uleb128Bytes(value: anytype) u32 {
+pub fn uleb128Bytes(value: anytype) u32 {
     var buf: [64]u8 = undefined;
     var dw: Writer.Discarding = .init(&buf);
     dw.writer.writeUleb128(value) catch unreachable;
     return @intCast(dw.fullCount());
 }
 
-fn sleb128Bytes(value: anytype) u32 {
+pub fn sleb128Bytes(value: anytype) u32 {
     var buf: [64]u8 = undefined;
     var dw: Writer.Discarding = .init(&buf);
     dw.writer.writeSleb128(value) catch unreachable;
     return @intCast(dw.fullCount());
 }
 
-const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const codegen = @import("../codegen.zig");
+const Compilation = @import("../Compilation.zig");
 const dev = @import("../dev.zig");
 const DW = std.dwarf;
 const Dwarf = @This();
