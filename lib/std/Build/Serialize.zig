@@ -741,7 +741,7 @@ fn addRootPackage(s: *Serialize, b: *std.Build) Allocator.Error!void {
     const deps = try arena.alloc(Configuration.Package.Dep, b.available_deps.len);
     for (deps, b.available_deps) |*dest, src| dest.* = try s.makePackageDep("", src[0], src[1]);
 
-    wc.packages.items[0].deps = try wc.addExtra(Configuration.Package.Dep.List, .{
+    wc.packages.items[0].deps = try wc.addDeduped(Configuration.Package.Dep.List, .{
         .deps = .{ .slice = deps },
     });
 }
@@ -772,7 +772,7 @@ fn makePackageDep(s: *Serialize, parent_dep_prefix: []const u8, name: []const u8
     const deps = try arena.alloc(Configuration.Package.Dep, entry.deps.len);
     for (deps, entry.deps) |*dest, src| dest.* = try s.makePackageDep(dep_prefix, src[0], src[1]);
 
-    wc.packages.items[@backingInt(index)].deps = try wc.addExtra(Configuration.Package.Dep.List, .{
+    wc.packages.items[@backingInt(index)].deps = try wc.addDeduped(Configuration.Package.Dep.List, .{
         .deps = .{ .slice = deps },
     });
 
