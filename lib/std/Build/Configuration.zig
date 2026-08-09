@@ -1515,13 +1515,7 @@ pub const LazyPath = union(@This().Tag) {
     };
 
     /// An index into `extra`.
-    pub const Index = enum(u32) {
-        _,
-
-        pub fn get(this: @This(), c: *const Configuration) LazyPath {
-            return extraData(c, LazyPath, @backingInt(this));
-        }
-    };
+    pub const Index = IndexType(@This());
 
     /// An index into `extra`, or `null`.
     pub const OptionalIndex = enum(u32) {
@@ -1746,13 +1740,7 @@ pub const Module = struct {
         }
     };
 
-    pub const Index = enum(u32) {
-        _,
-
-        pub fn get(this: @This(), c: *const Configuration) Module {
-            return extraData(c, Module, @backingInt(this));
-        }
-    };
+    pub const Index = IndexType(@This());
 
     pub const Flags = packed struct(u32) {
         optimize: Optimize,
@@ -2051,13 +2039,7 @@ pub const SystemLib = struct {
     name: String,
     flags: Flags,
 
-    pub const Index = enum(u32) {
-        _,
-
-        pub fn get(this: @This(), c: *const Configuration) SystemLib {
-            return extraData(c, SystemLib, @backingInt(this));
-        }
-    };
+    pub const Index = IndexType(@This());
 
     pub const UsePkgConfig = enum(u2) {
         /// Don't use pkg-config, just pass -lfoo where foo is name.
@@ -2090,13 +2072,7 @@ pub const CSourceFiles = struct {
     args: Storage.FlagList(.flags, .args_len, String),
     sub_paths: Storage.LengthPrefixedList(String),
 
-    pub const Index = enum(u32) {
-        _,
-
-        pub fn get(this: @This(), c: *const Configuration) CSourceFiles {
-            return extraData(c, CSourceFiles, @backingInt(this));
-        }
-    };
+    pub const Index = IndexType(@This());
 
     pub const Flags = packed struct(u32) {
         /// C compiler CLI flags.
@@ -2110,13 +2086,7 @@ pub const CSourceFile = struct {
     file: LazyPath.Index,
     args: Storage.FlagList(.flags, .args_len, String),
 
-    pub const Index = enum(u32) {
-        _,
-
-        pub fn get(this: @This(), c: *const Configuration) CSourceFile {
-            return extraData(c, CSourceFile, @backingInt(this));
-        }
-    };
+    pub const Index = IndexType(@This());
 
     pub const Flags = packed struct(u32) {
         /// C compiler CLI flags.
@@ -2131,13 +2101,7 @@ pub const RcSourceFile = struct {
     args: Storage.FlagList(.flags, .args_len, String),
     include_paths: Storage.FlagLengthPrefixedList(.flags, .include_paths, LazyPath.Index),
 
-    pub const Index = enum(u32) {
-        _,
-
-        pub fn get(this: @This(), c: *const Configuration) RcSourceFile {
-            return extraData(c, RcSourceFile, @backingInt(this));
-        }
-    };
+    pub const Index = IndexType(@This());
 
     pub const Flags = packed struct(u32) {
         /// C compiler CLI flags.
@@ -2176,13 +2140,7 @@ pub const ResolvedTarget = struct {
     /// defaults will be resolved.
     result: TargetQuery.Index,
 
-    pub const Index = enum(u32) {
-        _,
-
-        pub fn get(this: @This(), c: *const Configuration) ResolvedTarget {
-            return extraData(c, ResolvedTarget, @backingInt(this));
-        }
-    };
+    pub const Index = IndexType(@This());
 
     pub const OptionalIndex = enum(u32) {
         none = max_u32,
