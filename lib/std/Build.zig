@@ -45,17 +45,6 @@ debug_log_scopes: []const []const u8 = &.{},
 /// Set to 0 to disable stack collection.
 debug_stack_frames_count: u8 = 8,
 
-/// Experimental. Use system Darling installation to run cross compiled macOS build artifacts.
-enable_darling: bool = false,
-/// Use system QEMU installation to run cross compiled foreign architecture build artifacts.
-enable_qemu: bool = false,
-/// Darwin. Use Rosetta to run x86_64 macOS build artifacts on arm64 macOS.
-enable_rosetta: bool = false,
-/// Use system Wasmtime installation to run cross compiled wasm/wasi build artifacts.
-enable_wasmtime: bool = false,
-/// Use system Wine installation to run cross compiled Windows build artifacts.
-enable_wine: bool = false,
-
 dep_prefix: []const u8 = "",
 
 modules: std.array_hash_map.String(*Module),
@@ -388,11 +377,6 @@ fn createChild(
         .default_step = undefined,
         .top_level_steps = .{},
         .debug_log_scopes = parent.debug_log_scopes,
-        .enable_darling = parent.enable_darling,
-        .enable_qemu = parent.enable_qemu,
-        .enable_rosetta = parent.enable_rosetta,
-        .enable_wasmtime = parent.enable_wasmtime,
-        .enable_wine = parent.enable_wine,
         .dep_prefix = parent.fmt("{s}{s}.", .{ parent.dep_prefix, dep_name }),
         .modules = .empty,
         .named_writefiles = .empty,
@@ -830,7 +814,7 @@ pub fn addTest(b: *Build, options: TestOptions) *Step.Compile {
         .kind = if (options.emit_object) .test_obj else .@"test",
         .root_module = options.root_module,
         .max_rss = options.max_rss,
-        .filters = b.dupeStrings(options.filters),
+        .filters = b.graph.dupeStrings(options.filters),
         .test_runner = options.test_runner,
         .use_llvm = options.use_llvm,
         .use_lld = options.use_lld,
@@ -1125,7 +1109,7 @@ pub fn option(b: *Build, comptime T: type, name_raw: []const u8, description_raw
     const type_id = comptime typeToEnum(T);
     const enum_options = if (type_id == .@"enum" or type_id == .enum_list) blk: {
         const EnumType = if (type_id == .enum_list) @typeInfo(T).pointer.child else T;
-        const field_names = comptime std.meta.fieldNames(EnumType);
+        const field_names = @typeInfo(EnumType).@"enum".field_names;
         var options = std.array_list.Managed([]const u8).initCapacity(b.allocator, field_names.len) catch @panic("OOM");
 
         inline for (field_names) |field_name| {
@@ -1210,13 +1194,16 @@ pub fn option(b: *Build, comptime T: type, name_raw: []const u8, description_raw
                 return null;
             },
             .scalar => |s| {
-                if (std.meta.stringToEnum(T, s)) |enum_lit| {
-                    return enum_lit;
-                } else {
-                    log.err("expected -D{s} to be of type {s}", .{ name, @typeName(T) });
-                    b.markInvalidUserInput();
-                    return null;
+                if (T == std.lang.Optimize) {
+                    if (std.lang.Optimize.fromString(s)) |tag| {
+                        return tag;
+                    }
+                } else if (std.meta.stringToEnum(T, s)) |tag| {
+                    return tag;
                 }
+                log.err("expected -D{s} to be of type {q}", .{ name, @typeName(T) });
+                b.markInvalidUserInput();
+                return null;
             },
         },
         .string => switch (option_ptr.value) {
@@ -1262,23 +1249,36 @@ pub fn option(b: *Build, comptime T: type, name_raw: []const u8, description_raw
             },
             .scalar => |s| {
                 const Child = @typeInfo(T).pointer.child;
-                const value = std.meta.stringToEnum(Child, s) orelse {
-                    log.err("expected -D{s} to be of type {s}", .{ name, @typeName(Child) });
-                    b.markInvalidUserInput();
-                    return null;
-                };
-                return arena.dupe(Child, &[_]Child{value}) catch @panic("OOM");
+                if (Child == std.lang.Optimize) {
+                    if (std.lang.Optimize.fromString(s)) |tag| {
+                        return arena.dupe(Child, &.{tag}) catch @panic("OOM");
+                    }
+                } else {
+                    if (std.meta.stringToEnum(Child, s)) |tag| {
+                        return arena.dupe(Child, &.{tag}) catch @panic("OOM");
+                    }
+                }
+                log.err("expected -D{s} to be of type {q}", .{ name, @typeName(Child) });
+                b.markInvalidUserInput();
+                return null;
             },
             .list => |lst| {
                 const Child = @typeInfo(T).pointer.child;
                 const new_list = graph.alloc(Child, lst.items.len);
                 for (new_list, lst.items) |*new_item, str| {
-                    new_item.* = std.meta.stringToEnum(Child, str) orelse {
-                        log.err("expected -D{s} to be of type {s}", .{ name, @typeName(Child) });
-                        b.markInvalidUserInput();
-                        arena.free(new_list);
-                        return null;
-                    };
+                    if (Child == std.lang.Optimize) {
+                        if (std.lang.Optimize.fromString(str)) |tag| {
+                            new_item.* = tag;
+                            continue;
+                        }
+                    }
+                    if (std.meta.stringToEnum(Child, str)) |tag| {
+                        new_item.* = tag;
+                        continue;
+                    }
+                    log.err("expected -D{s} to be of type {q}", .{ name, @typeName(Child) });
+                    b.markInvalidUserInput();
+                    return null;
                 }
                 return new_list;
             },
@@ -1359,14 +1359,14 @@ pub fn standardOptimizeOption(b: *Build, options: StandardOptimizeOptionOptions)
     }
 
     return switch (graph.release_mode) {
-        .off => .Debug,
+        .off => .debug,
         .any => {
             std.debug.print("the project does not declare a preferred optimization mode. choose: --release=fast, --release=safe, or --release=small\n", .{});
             process.exit(1);
         },
-        .fast => .ReleaseFast,
-        .safe => .ReleaseSafe,
-        .small => .ReleaseSmall,
+        .fast => .fast,
+        .safe => .safe,
+        .small => .small,
     };
 }
 
@@ -1420,7 +1420,7 @@ pub fn parseTargetQuery(options: std.Target.Query.ParseOptions) error{ParseFaile
                 \\available operating systems:
                 \\
             , .{diags.os_name.?});
-            inline for (comptime std.meta.fieldNames(Target.Os.Tag)) |field_name| {
+            inline for (@typeInfo(Target.Os.Tag).@"enum".field_names) |field_name| {
                 std.debug.print(" {s}\n", .{field_name});
             }
             return error.ParseFailed;
@@ -2144,7 +2144,7 @@ pub fn dependencyLazy(b: *Build, name: []const u8, args: anytype) error{LazyDepe
     return dependencyResolved(b, name, entry, userInputOptionsFromArgs(b.graph.arena, args));
 }
 
-const PackageEntry = struct {
+pub const PackageEntry = struct {
     hash: []const u8,
     available: bool,
     build_root: []const u8,
@@ -2152,7 +2152,8 @@ const PackageEntry = struct {
     run_build: ?*const fn (*Build) void,
 };
 
-const package_map: std.StaticStringMap(PackageEntry) = blk: {
+/// Build system implementation detail.
+pub const package_map: std.StaticStringMap(PackageEntry) = blk: {
     const deps = @import("root").dependencies;
     const decl_names = @typeInfo(deps.packages).@"struct".decl_names;
     var kvs: [decl_names.len]struct { []const u8, PackageEntry } = undefined;
@@ -2632,7 +2633,10 @@ pub const LazyPath = union(enum) {
 
     fn dupeInner(lazy_path: LazyPath, arena: Allocator) LazyPath {
         return switch (lazy_path) {
-            .src_path => |sp| .{ .src_path = .{ .owner = sp.owner, .sub_path = sp.owner.dupePath(sp.sub_path) } },
+            .src_path => |sp| .{ .src_path = .{
+                .owner = sp.owner,
+                .sub_path = sp.owner.graph.dupePath(sp.sub_path),
+            } },
             .cwd_relative => |p| .{ .cwd_relative = Graph.dupePathInner(arena, p) },
             .relative => |r| .{ .relative = r },
             .generated => |gen| .{ .generated = .{

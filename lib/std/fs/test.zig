@@ -758,6 +758,43 @@ test "readFileAlloc" {
     );
 }
 
+test "file operations with follow_symlinks=false" {
+    const io = testing.io;
+
+    var tmp_dir = tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    const contents = "this is a test.\nthis is a test.\nthis is a test.\nthis is a test.\n";
+    try tmp_dir.dir.writeFile(io, .{
+        .sub_path = "test_file",
+        .data = contents,
+    });
+
+    // Without lock
+    {
+        var file = try tmp_dir.dir.openFile(io, "test_file", .{ .follow_symlinks = false });
+        defer file.close(io);
+
+        var file_reader = file.reader(io, &.{});
+        const actual_contents = try file_reader.interface.allocRemaining(testing.allocator, .unlimited);
+        defer testing.allocator.free(actual_contents);
+
+        try std.testing.expectEqualSlices(u8, contents, actual_contents);
+    }
+
+    // With lock
+    {
+        var file = try tmp_dir.dir.openFile(io, "test_file", .{ .follow_symlinks = false, .lock = .exclusive });
+        defer file.close(io);
+
+        var file_reader = file.reader(io, &.{});
+        const actual_contents = try file_reader.interface.allocRemaining(testing.allocator, .unlimited);
+        defer testing.allocator.free(actual_contents);
+
+        try std.testing.expectEqualSlices(u8, contents, actual_contents);
+    }
+}
+
 test "Dir.statFile" {
     try testWithAllSupportedPathTypes(struct {
         fn impl(ctx: *TestContext) !void {
@@ -902,6 +939,8 @@ test "createDirPathOpen parent dirs do not exist" {
 }
 
 test "deleteDir" {
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest; // https://codeberg.org/ziglang/zig/issues/35686
+
     try testWithAllSupportedPathTypes(struct {
         fn impl(ctx: *TestContext) !void {
             const io = ctx.io;
@@ -2168,7 +2207,7 @@ test "'.' and '..' in absolute functions" {
 }
 
 test "chmod" {
-    if (native_os == .windows or native_os == .wasi) return;
+    if (native_os == .windows or native_os == .wasi) return error.SkipZigTest;
 
     const io = testing.io;
 
@@ -2191,8 +2230,7 @@ test "chmod" {
 }
 
 test "change ownership" {
-    if (native_os == .windows or native_os == .wasi)
-        return error.SkipZigTest;
+    if (native_os == .windows or native_os == .wasi) return error.SkipZigTest;
 
     const io = testing.io;
 

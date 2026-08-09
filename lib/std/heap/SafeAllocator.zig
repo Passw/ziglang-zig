@@ -39,7 +39,7 @@ const SafeAllocator = @This();
 const scoped_log = std.log.scoped(.SafeAllocator);
 
 pub const Options = struct {
-    const is_debug = @import("builtin").mode == .Debug;
+    const is_debug = @import("builtin").mode == .debug;
     const page_size_log2 = @max(math.log2_int(usize, std.heap.page_size_max), 8);
 
     stack_trace_frames: usize = if (is_debug and std.debug.sys_can_stack_trace) 7 else 0,
@@ -1519,7 +1519,7 @@ const FuzzSingleThreadedAllocator = struct {
         @disableInstrumentation();
 
         const allocs_slice = f.allocs.slice();
-        const i = mem.indexOfScalar([*]u8, allocs_slice.items(.ptr), memory.ptr) orelse panic(
+        const i = mem.findScalar([*]u8, allocs_slice.items(.ptr), memory.ptr) orelse panic(
             "invalid SafeAllocator free of {f}",
             .{FormatMemory{ .memory = memory, .alignment = alignment }},
         );

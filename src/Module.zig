@@ -26,7 +26,7 @@ fully_qualified_name: []const u8,
 deps: Deps = .{},
 
 resolved_target: ResolvedTarget,
-optimize_mode: std.lang.OptimizeMode,
+optimize_mode: std.lang.Optimize,
 code_model: std.lang.CodeModel,
 single_threaded: bool,
 error_tracing: bool,
@@ -42,8 +42,6 @@ sanitize_thread: bool,
 fuzz: bool,
 unwind_tables: std.lang.UnwindTables,
 cc_argv: []const []const u8,
-/// (SPIR-V) whether to generate a structured control flow graph or not
-structured_cfg: bool,
 no_builtin: bool,
 
 pub const Deps = std.array_hash_map.String(*Module);
@@ -67,7 +65,7 @@ pub const CreateOptions = struct {
     pub const Inherited = struct {
         /// If this is null then `parent` must be non-null.
         resolved_target: ?ResolvedTarget = null,
-        optimize_mode: ?std.lang.OptimizeMode = null,
+        optimize_mode: ?std.lang.Optimize = null,
         code_model: ?std.lang.CodeModel = null,
         single_threaded: ?bool = null,
         error_tracing: ?bool = null,
@@ -85,7 +83,6 @@ pub const CreateOptions = struct {
         sanitize_c: ?std.zig.SanitizeC = null,
         sanitize_thread: ?bool = null,
         fuzz: ?bool = null,
-        structured_cfg: ?bool = null,
         no_builtin: ?bool = null,
     };
 };
@@ -144,7 +141,7 @@ pub fn create(arena: Allocator, options: CreateOptions) !*Module {
         if (options.inherited.valgrind) |x| break :b x;
         if (options.parent) |p| break :b p.valgrind;
         if (strip) break :b false;
-        break :b optimize_mode == .Debug;
+        break :b optimize_mode == .debug;
     };
 
     const single_threaded = b: {
@@ -212,7 +209,7 @@ pub fn create(arena: Allocator, options: CreateOptions) !*Module {
     const omit_frame_pointer = b: {
         if (options.inherited.omit_frame_pointer) |x| break :b x;
         if (options.parent) |p| break :b p.omit_frame_pointer;
-        if (optimize_mode == .ReleaseSmall) {
+        if (optimize_mode == .small) {
             // On x86, in most cases, keeping the frame pointer usually results in smaller binary size.
             // This has to do with how instructions for memory access via the stack base pointer register (when keeping the frame pointer)
             // are smaller than instructions for memory access via the stack pointer register (when omitting the frame pointer).
@@ -251,21 +248,21 @@ pub fn create(arena: Allocator, options: CreateOptions) !*Module {
     };
 
     const is_safe_mode = switch (optimize_mode) {
-        .Debug, .ReleaseSafe => true,
-        .ReleaseFast, .ReleaseSmall => false,
+        .debug, .safe => true,
+        .fast, .small => false,
     };
 
     const sanitize_c: std.zig.SanitizeC = b: {
         if (options.inherited.sanitize_c) |x| break :b x;
         if (options.parent) |p| break :b p.sanitize_c;
         break :b switch (optimize_mode) {
-            .Debug => .full,
+            .debug => .full,
             // It's recommended to use the minimal runtime in production
             // environments due to the security implications of the full runtime.
             // The minimal runtime doesn't provide much benefit over simply
             // trapping, however, so we do that instead.
-            .ReleaseSafe => .trap,
-            .ReleaseFast, .ReleaseSmall => .off,
+            .safe => .trap,
+            .fast, .small => .off,
         };
     };
 
@@ -318,17 +315,6 @@ pub fn create(arena: Allocator, options: CreateOptions) !*Module {
         if (!is_safe_mode) break :sp 0;
 
         break :sp target_util.default_stack_protector_buffer_size;
-    };
-
-    const structured_cfg = b: {
-        if (options.inherited.structured_cfg) |x| break :b x;
-        if (options.parent) |p| break :b p.structured_cfg;
-        // We always want a structured control flow in shaders. This option is
-        // only relevant for OpenCL kernels.
-        break :b switch (target.os.tag) {
-            .opencl => false,
-            else => true,
-        };
     };
 
     const no_builtin = b: {
@@ -411,7 +397,6 @@ pub fn create(arena: Allocator, options: CreateOptions) !*Module {
         .fuzz = fuzz,
         .unwind_tables = unwind_tables,
         .cc_argv = options.cc_argv,
-        .structured_cfg = structured_cfg,
         .no_builtin = no_builtin,
     };
     return mod;
@@ -450,7 +435,6 @@ pub fn createLimited(gpa: Allocator, options: LimitedOptions) Allocator.Error!*M
         .fuzz = undefined,
         .unwind_tables = undefined,
         .cc_argv = undefined,
-        .structured_cfg = undefined,
         .no_builtin = undefined,
     };
     return mod;
@@ -489,7 +473,6 @@ pub fn createBuiltin(arena: Allocator, opts: Builtin, dirs: std.zig.Directories)
         .stack_protector = 0,
         .red_zone = false,
         .sanitize_c = .off,
-        .structured_cfg = false,
         .no_builtin = false,
     };
     return new;

@@ -4,7 +4,7 @@ const builtin = @import("builtin");
 const native_os = builtin.os.tag;
 const is_windows = native_os == .windows;
 const is_darwin = native_os.isDarwin();
-const is_debug = builtin.mode == .Debug;
+const is_debug = builtin.mode == .debug;
 
 const std = @import("../std.zig");
 const Io = std.Io;
@@ -440,12 +440,12 @@ pub const UseFchmodat2 = if (have_fchmodat2 and !have_fchmodat_flags) enum {
 pub const apc_align = @max(default_fn_align, 2);
 
 const default_fn_align = switch (builtin.mode) {
-    .Debug, .ReleaseSafe, .ReleaseFast => switch (builtin.cpu.arch) {
+    .debug, .safe, .fast => switch (builtin.cpu.arch) {
         else => |arch| @compileError("Unsupported architecture: " ++ @tagName(arch)),
         .arm, .thumb => 4,
         .aarch64, .x86, .x86_64 => 16,
     },
-    .ReleaseSmall => 1,
+    .small => 1,
 };
 
 const Runnable = struct {
@@ -829,6 +829,7 @@ const Thread = struct {
     /// Always released when `Status.cancelation` is set to `.parked`.
     futex_waiter: if (use_parking_futex) ?*parking_futex.Waiter else ?noreturn,
     unpark_flag: UnparkFlag,
+    park_tid: if (ParkTid == std.Thread.Id) void else ParkTid,
 
     csprng: Csprng,
 
@@ -1220,7 +1221,7 @@ const Thread = struct {
                         parking_futex.removeCanceledWaiter(futex_waiter);
                     }
                     if (need_unpark_flag) setUnparkFlag(&thread.unpark_flag);
-                    unpark(&.{thread.id}, null);
+                    unpark(&.{if (ParkTid == std.Thread.Id) thread.id else thread.park_tid}, null);
                     return false;
                 },
 
@@ -1749,6 +1750,7 @@ fn worker(t: *Threaded) void {
         .cancel_protection = .unblocked,
         .futex_waiter = undefined,
         .unpark_flag = unpark_flag_init,
+        .park_tid = if (ParkTid == std.Thread.Id) {} else getParkTid(),
         .csprng = .uninitialized,
     };
     Thread.current = &thread;
@@ -3858,7 +3860,26 @@ fn fileLength(userdata: ?*anyopaque, file: File) File.LengthError!u64 {
             }
         }
     } else if (is_windows) {
-        // TODO call NtQueryInformationFile and ask for only the size instead of "all"
+        var io_status_block: windows.IO_STATUS_BLOCK = undefined;
+        var info: windows.FILE.STANDARD_INFORMATION = undefined;
+        const syscall: Syscall = try .start();
+        while (true) switch (windows.ntdll.NtQueryInformationFile(
+            file.handle,
+            &io_status_block,
+            &info,
+            @sizeOf(windows.FILE.STANDARD_INFORMATION),
+            .Standard,
+        )) {
+            .SUCCESS => break syscall.finish(),
+            .INVALID_PARAMETER => |err| return syscall.ntstatusBug(err),
+            .ACCESS_DENIED => return syscall.fail(error.AccessDenied),
+            .CANCELLED => {
+                try syscall.checkCancel();
+                continue;
+            },
+            else => |s| return syscall.unexpectedNtstatus(s),
+        };
+        return @as(u64, @bitCast(info.EndOfFile));
     }
 
     const stat = try fileStat(t, file);
@@ -4382,7 +4403,7 @@ fn dirCreateFilePosix(
             }
         };
 
-        fl_flags |= @as(usize, 1 << @bitOffsetOf(posix.O, "NONBLOCK"));
+        fl_flags &= ~@as(usize, 1 << @bitOffsetOf(posix.O, "NONBLOCK"));
 
         const syscall: Syscall = try .start();
         while (true) {
@@ -4978,7 +4999,7 @@ fn dirOpenFilePosix(
             }
         };
 
-        fl_flags |= @as(usize, 1 << @bitOffsetOf(posix.O, "NONBLOCK"));
+        fl_flags &= ~@as(usize, 1 << @bitOffsetOf(posix.O, "NONBLOCK"));
 
         const syscall: Syscall = try .start();
         while (true) {
@@ -5053,7 +5074,7 @@ pub fn dirOpenFileWtf16(
             .VALID_FLAGS,
             .OPEN,
             .{
-                .IO = if (flags.follow_symlinks) .SYNCHRONOUS_NONALERT else .ASYNCHRONOUS,
+                .IO = .SYNCHRONOUS_NONALERT,
                 .NON_DIRECTORY_FILE = !allow_directory,
                 .OPEN_REPARSE_POINT = !flags.follow_symlinks,
             },
@@ -6817,7 +6838,7 @@ fn dirRealPathFilePosix(userdata: ?*anyopaque, dir: Dir, sub_path: []const u8, o
             if (std.c.realpath(sub_path_posix, out_buffer.ptr)) |redundant_pointer| {
                 syscall.finish();
                 assert(redundant_pointer == out_buffer.ptr);
-                return std.mem.indexOfScalar(u8, out_buffer, 0) orelse out_buffer.len;
+                return std.mem.findScalar(u8, out_buffer, 0) orelse out_buffer.len;
             }
             const err: posix.E = @fromBackingInt(@intCast(std.c._errno().*));
             if (err == .INTR) {
@@ -6961,7 +6982,7 @@ fn realPathPosix(fd: posix.fd_t, out_buffer: []u8) File.RealPathError!usize {
                     },
                 }
             }
-            const n = std.mem.indexOfScalar(u8, &sufficient_buffer, 0) orelse sufficient_buffer.len;
+            const n = std.mem.findScalar(u8, &sufficient_buffer, 0) orelse sufficient_buffer.len;
             if (n > out_buffer.len) return error.NameTooLong;
             @memcpy(out_buffer[0..n], sufficient_buffer[0..n]);
             return n;
@@ -7119,9 +7140,10 @@ fn dirDeleteFileWasi(userdata: ?*anyopaque, dir: Dir, sub_path: []const u8) Dir.
     if (builtin.link_libc) return dirDeleteFilePosix(userdata, dir, sub_path);
     const t: *Threaded = @ptrCast(@alignCast(userdata));
     _ = t;
+    const wasi = std.os.wasi;
     const syscall: Syscall = try .start();
     while (true) {
-        const res = std.os.wasi.path_unlink_file(dir.handle, sub_path.ptr, sub_path.len);
+        const res = wasi.path_unlink_file(dir.handle, sub_path.ptr, sub_path.len);
         switch (res) {
             .SUCCESS => {
                 syscall.finish();
@@ -7131,11 +7153,35 @@ fn dirDeleteFileWasi(userdata: ?*anyopaque, dir: Dir, sub_path: []const u8) Dir.
                 try syscall.checkCancel();
                 continue;
             },
+            .ACCES, .PERM => |e| {
+                const original_error: Dir.DeleteFileError = switch (e) {
+                    .ACCES => error.AccessDenied,
+                    .PERM => error.PermissionDenied,
+                    else => unreachable,
+                };
+                var stat: wasi.filestat_t = undefined;
+                while (true) {
+                    try syscall.checkCancel();
+                    switch (wasi.path_filestat_get(dir.handle, .{}, sub_path.ptr, sub_path.len, &stat)) {
+                        .SUCCESS => {
+                            syscall.finish();
+                            break;
+                        },
+                        .INTR => continue,
+                        else => {
+                            syscall.finish();
+                            return original_error;
+                        },
+                    }
+                }
+                if (stat.filetype == .DIRECTORY)
+                    return error.IsDir
+                else
+                    return original_error;
+            },
             else => |e| {
                 syscall.finish();
                 switch (e) {
-                    .ACCES => return error.AccessDenied,
-                    .PERM => return error.PermissionDenied,
                     .BUSY => return error.FileBusy,
                     .FAULT => |err| return errnoBug(err),
                     .IO => return error.FileSystem,
@@ -8111,7 +8157,7 @@ fn dirReadLinkWindows(dir: Dir, sub_path: []const u8, buffer: []u8) Dir.ReadLink
         .{
             .DIRECTORY_FILE = false,
             .NON_DIRECTORY_FILE = false,
-            .IO = .ASYNCHRONOUS,
+            .IO = .SYNCHRONOUS_NONALERT,
             .OPEN_REPARSE_POINT = true,
         },
         null,
@@ -8177,7 +8223,7 @@ fn dirReadLinkWindows(dir: Dir, sub_path: []const u8, buffer: []u8) Dir.ReadLink
 
     var reparse_buf: [windows.MAXIMUM_REPARSE_DATA_BUFFER_SIZE]u8 align(@alignOf(windows.REPARSE_DATA_BUFFER)) = undefined;
     switch ((try deviceIoControl(&.{
-        .file = .{ .handle = result_handle, .flags = .{ .nonblocking = true } },
+        .file = .{ .handle = result_handle, .flags = .{ .nonblocking = false } },
         .code = .GET_REPARSE_POINT,
         .out = &reparse_buf,
     })).u.Status) {
@@ -8955,7 +9001,7 @@ fn isCygwinPty(file: File) Io.Cancelable!bool {
     // The name we get from NtQueryInformationFile will be prefixed with a '\', e.g. \msys-1888ae32e00d56aa-pty0-to-master
     return (std.mem.startsWith(u16, name_wide, &[_]u16{ '\\', 'm', 's', 'y', 's', '-' }) or
         std.mem.startsWith(u16, name_wide, &[_]u16{ '\\', 'c', 'y', 'g', 'w', 'i', 'n', '-' })) and
-        std.mem.indexOf(u16, name_wide, &[_]u16{ '-', 'p', 't', 'y' }) != null;
+        std.mem.find(u16, name_wide, &[_]u16{ '-', 'p', 't', 'y' }) != null;
 }
 
 fn fileSetLength(userdata: ?*anyopaque, file: File, length: u64) File.SetLengthError!void {
@@ -11184,7 +11230,10 @@ fn fileWriteFileStreaming(
         var off: std.os.linux.off_t = undefined;
         const off_ptr: ?*std.os.linux.off_t, const count: usize = switch (file_reader.mode) {
             .positional => o: {
-                const size = file_reader.getSize() catch return 0;
+                const size = file_reader.getSize() catch |err| switch (err) {
+                    error.Canceled => |e| return e,
+                    else => break :sf,
+                };
                 off = std.math.cast(std.os.linux.off_t, file_reader.pos) orelse return error.ReadFailed;
                 break :o .{ &off, @min(@backingInt(limit), size - file_reader.pos, max_count) };
             },
@@ -11533,7 +11582,10 @@ fn fileWriteFilePositional(
         if (file_reader.pos != 0) break :fcf;
         if (offset != 0) break :fcf;
         if (limit != .unlimited) break :fcf;
-        const size = file_reader.getSize() catch break :fcf;
+        const size = file_reader.getSize() catch |err| switch (err) {
+            error.Canceled => |e| return e,
+            else => break :fcf,
+        };
         if (header.len != 0 or reader_buffered.len != 0) {
             const n = try fileWritePositional(t, file, header, &.{limit.slice(reader_buffered)}, 1, offset);
             file_reader.interface.toss(n -| header.len);
@@ -11725,7 +11777,6 @@ fn nowWasi(clock: Io.Clock) Io.Timestamp {
 
 fn sleep(userdata: ?*anyopaque, timeout: Io.Timeout) Io.Cancelable!void {
     const t: *Threaded = @ptrCast(@alignCast(userdata));
-    if (timeout == .none) return;
     if (use_parking_sleep) return parking_sleep.sleep(timeout);
     if (native_os == .wasi) return sleepWasi(t, timeout);
     if (@TypeOf(posix.system.clock_nanosleep) != void) return sleepPosix(timeout);
@@ -12042,6 +12093,7 @@ fn posixBind(
             else => |e| {
                 syscall.finish();
                 switch (e) {
+                    .ACCES => return error.AccessDenied,
                     .ADDRINUSE => return error.AddressInUse,
                     .BADF => |err| return errnoBug(err), // File descriptor used after closed.
                     .INVAL => |err| return errnoBug(err), // invalid parameters
@@ -12124,6 +12176,7 @@ fn posixConnectUnix(
                     .NOTDIR => return error.NotDir,
                     .ROFS => return error.ReadOnlyFileSystem,
                     .PERM => return error.PermissionDenied,
+                    .CONNREFUSED => return error.ConnectionRefused,
 
                     .BADF => |err| return errnoBug(err), // File descriptor used after closed.
                     .CONNABORTED => |err| return errnoBug(err),
@@ -13362,13 +13415,13 @@ fn addBuf(v: []posix.iovec_const, i: *iovlen_t, bytes: []const u8) void {
     i.* += 1;
 }
 
-fn netClose(userdata: ?*anyopaque, handles: []const net.Socket.Handle) void {
+fn netClose(userdata: ?*anyopaque, sockets: []const net.Socket) void {
     if (!have_networking) unreachable;
     const t: *Threaded = @ptrCast(@alignCast(userdata));
     _ = t;
-    for (handles) |handle| switch (native_os) {
-        .windows => windows.CloseHandle(handle),
-        else => closeFd(handle),
+    for (sockets) |socket| switch (native_os) {
+        .windows => windows.CloseHandle(socket.handle),
+        else => closeFd(socket.handle),
     };
 }
 
@@ -13870,9 +13923,14 @@ fn netLookupFallible(
         var port_buffer: [8]u8 = undefined;
         const port_c = std.fmt.bufPrintSentinel(&port_buffer, "{d}", .{options.port}, 0) catch unreachable;
 
+        const family: i32 = if (options.family) |f| switch (f) {
+            .ip4 => posix.AF.INET,
+            .ip6 => posix.AF.INET6,
+        } else posix.AF.UNSPEC;
+
         const hints: posix.addrinfo = .{
             .flags = .{ .CANONNAME = options.canonical_name_buffer != null, .NUMERICSERV = true },
-            .family = posix.AF.UNSPEC,
+            .family = family,
             .socktype = posix.SOCK.STREAM,
             .protocol = posix.IPPROTO.TCP,
             .canonname = null,
@@ -15302,8 +15360,7 @@ fn childKillWindows(t: *Threaded, child: *process.Child, exit_code: windows.UINT
     _ = windows.ntdll.RtlReportSilentProcessExit(handle, @fromBackingInt(@intCast(exit_code)));
     switch (windows.ntdll.NtTerminateProcess(handle, @fromBackingInt(@intCast(exit_code)))) {
         .SUCCESS, .PROCESS_IS_TERMINATING => {
-            const infinite_timeout: windows.LARGE_INTEGER = std.math.minInt(windows.LARGE_INTEGER);
-            _ = windows.ntdll.NtWaitForSingleObject(handle, .FALSE, &infinite_timeout);
+            _ = windows.ntdll.NtWaitForSingleObject(handle, .FALSE, null);
             childCleanupWindows(child);
         },
         .ACCESS_DENIED => {
@@ -15326,8 +15383,7 @@ fn childWaitWindows(child: *process.Child) process.Child.WaitError!process.Child
     const handle = child.id.?;
 
     const alertable_syscall: AlertableSyscall = try .start();
-    const infinite_timeout: windows.LARGE_INTEGER = std.math.minInt(windows.LARGE_INTEGER);
-    while (true) switch (windows.ntdll.NtWaitForSingleObject(handle, .TRUE, &infinite_timeout)) {
+    while (true) switch (windows.ntdll.NtWaitForSingleObject(handle, .TRUE, null)) {
         windows.NTSTATUS.WAIT_0 => break alertable_syscall.finish(),
         .USER_APC, .ALERTED, .TIMEOUT => {
             try alertable_syscall.checkCancel();
@@ -16272,7 +16328,7 @@ fn windowsCreateProcessPathExt(
 
             const is_bat_or_cmd = bat_or_cmd: {
                 const app_name = app_buf.items[0..app_name_len];
-                const ext_start = std.mem.lastIndexOfScalar(u16, app_name, '.') orelse break :bat_or_cmd false;
+                const ext_start = std.mem.findScalarLast(u16, app_name, '.') orelse break :bat_or_cmd false;
                 const ext = app_name[ext_start..];
                 const ext_enum = windowsCreateProcessSupportsExtension(ext) orelse break :bat_or_cmd false;
                 switch (ext_enum) {
@@ -16308,7 +16364,7 @@ fn windowsCreateProcessPathExt(
                     // it's treated as an unrecoverable error. Otherwise, it'll be
                     // skipped as normal.
                     const app_name = app_buf.items[0..app_name_len];
-                    const ext_start = std.mem.lastIndexOfScalar(u16, app_name, '.') orelse break :unappended err;
+                    const ext_start = std.mem.findScalarLast(u16, app_name, '.') orelse break :unappended err;
                     const ext = app_name[ext_start..];
                     if (windows.eqlIgnoreCaseWtf16(ext, std.unicode.utf8ToUtf16LeStringLiteral(".EXE"))) {
                         return error.UnrecoverableInvalidExe;
@@ -17387,6 +17443,7 @@ const use_parking_futex = switch (native_os) {
     .windows => true, // RtlWaitOnAddress is a userland implementation anyway
     .netbsd => true, // NetBSD has `futex(2)`, but it's historically been quite buggy. TODO: evaluate whether it's okay to use now.
     .illumos => true, // Illumos has no futex mechanism
+    .haiku => true, // Haiku has no futex mechanism
     else => false,
 };
 const use_parking_sleep = switch (native_os) {
@@ -17432,7 +17489,7 @@ const parking_futex = struct {
     const Waiter = struct {
         node: std.DoublyLinkedList.Node,
         address: usize,
-        tid: std.Thread.Id,
+        tid: ParkTid,
         /// `thread_status.cancelation` is `.parked` while the thread is waiting. The single thread
         /// which atomically updates it (to `.none` or `.canceling`) is responsible for:
         ///
@@ -17473,7 +17530,7 @@ const parking_futex = struct {
 
         // Put the threadlocal access outside of the critical section.
         const opt_thread = Thread.current;
-        const self_tid = if (opt_thread) |thread| thread.id else std.Thread.getCurrentId();
+        const self_tid = getParkTid();
 
         var waiter: Waiter = .{
             .node = undefined, // populated by list append
@@ -17721,7 +17778,12 @@ const parking_sleep = struct {
                 },
             }
         }
+
         // Uncancelable sleep; we expect not to be manually unparked.
+
+        // On systems where parking the thread requires a one-time setup operation (e.g. creating a
+        // semaphore), we need to ensure that setup is done before we call `park`.
+        _ = getParkTid();
         var dummy_flag: UnparkFlag = unpark_flag_init;
         if (park(timeout, null, if (need_unpark_flag) &dummy_flag)) {
             unreachable; // unexpected unpark
@@ -17760,7 +17822,7 @@ const ParkingMutex = struct {
         /// Never modified once the `Waiter` is in the linked list.
         next: ?*Waiter,
         /// Never modified once the `Waiter` is in the linked list.
-        tid: std.Thread.Id,
+        tid: ParkTid,
     };
     fn lock(m: *ParkingMutex) void {
         state: switch (State.unlocked) { // assume 'unlocked' to optimize for uncontended case
@@ -17776,7 +17838,7 @@ const ParkingMutex = struct {
 
             .locked_once, _ => |last_state| {
                 const old_waiter = last_state.waiter();
-                const self_tid = if (Thread.current) |t| t.id else std.Thread.getCurrentId();
+                const self_tid = getParkTid();
                 var waiter: Waiter = .{
                     .next = old_waiter,
                     .unpark_flag = unpark_flag_init,
@@ -17904,8 +17966,35 @@ fn setUnparkFlag(f: *UnparkFlag) void {
 /// but it seems that someone at Microsoft forgot how big their TIDs are supposed to be.
 const UnparkTid = switch (native_os) {
     .windows => usize,
+    else => ParkTid,
+};
+
+const ParkTid = switch (native_os) {
+    .haiku => std.c.sem_id,
     else => std.Thread.Id,
 };
+
+threadlocal var park_sem: std.c.sem_id = -1;
+
+fn getParkTid() ParkTid {
+    switch (native_os) {
+        .haiku => {
+            if (park_sem == -1) {
+                park_sem = std.c._kern_create_sem(0, null);
+                if (park_sem < 0) @panic("_kern_create_sem failed");
+                _ = std.c.on_exit_thread(destroyParkSem, null);
+            }
+            return park_sem;
+        },
+        else => {
+            return if (Thread.current) |thread| thread.id else std.Thread.getCurrentId();
+        },
+    }
+}
+
+fn destroyParkSem(_: ?*anyopaque) callconv(.c) void {
+    _ = std.c._kern_delete_sem(park_sem);
+}
 
 fn park(
     timeout: Io.Timeout,
@@ -17972,6 +18061,27 @@ fn park(
             }
         },
         .illumos => @panic("TODO: illumos lwp_park"),
+        .haiku => {
+            const timeout_flags: u32, const timeout_us = switch (timeout) {
+                .none => .{ 0, 0 },
+                .deadline => |deadline| .{
+                    if (deadline.clock == .real) std.c.B_ABSOLUTE_TIMEOUT | std.c.B_TIMEOUT_REAL_TIME_BASE else std.c.B_ABSOLUTE_TIMEOUT,
+                    deadline.raw.toMicroseconds(),
+                },
+                .duration => |duration| .{
+                    if (duration.clock == .real) std.c.B_ABSOLUTE_TIMEOUT | std.c.B_TIMEOUT_REAL_TIME_BASE else std.c.B_ABSOLUTE_TIMEOUT,
+                    nowPosix(duration.clock).addDuration(duration.raw).toMicroseconds(),
+                },
+            };
+            while (true) {
+                switch (std.c._kern_acquire_sem_etc(park_sem, 1, timeout_flags, timeout_us)) {
+                    0 => return,
+                    std.c.E.B_TIMED_OUT => return error.Timeout,
+                    std.c.E.B_INTERRUPTED => {},
+                    else => unreachable,
+                }
+            }
+        },
         else => comptime unreachable,
     }
 }
@@ -18014,6 +18124,14 @@ fn unpark(tids: []const UnparkTid, addr_hint: ?*const anyopaque) void {
             }
         },
         .illumos => @panic("TODO: illumos lwp_unpark"),
+        .haiku => {
+            for (tids) |tid| {
+                switch (std.c._kern_release_sem_etc(tid, 1, 0)) {
+                    0 => {},
+                    else => recoverableOsBugDetected(),
+                }
+            }
+        },
         else => comptime unreachable,
     }
 }
@@ -18171,7 +18289,7 @@ fn fileMemoryMapCreate(
             error.Unseekable, error.Canceled, error.AccessDenied => |e| return e,
             error.OperationUnsupported => {},
             else => {
-                if (builtin.mode == .Debug)
+                if (builtin.mode == .debug)
                     std.log.warn("memory mapping failed with {t}, falling back to file operations", .{err});
             },
         }
@@ -18278,7 +18396,7 @@ fn createFileMap(
             .INVALID_VIEW_SIZE => |status| return windows.statusBug(status),
             else => |status| return windows.unexpectedStatus(status),
         }
-        if (builtin.mode == .Debug) {
+        if (builtin.mode == .debug) {
             const page_size = std.heap.pageSize();
             const alignment: Alignment = .fromByteUnits(page_size);
             assert(contents_len == alignment.forward(len));
@@ -18369,7 +18487,7 @@ fn fileMemoryMapDestroy(userdata: ?*anyopaque, mm: *File.MemoryMap) void {
             switch (posix.errno(posix.system.munmap(memory.ptr, memory.len))) {
                 .SUCCESS => {},
                 else => |e| {
-                    if (builtin.mode == .Debug)
+                    if (builtin.mode == .debug)
                         std.log.err("failed to unmap {d} bytes at {*}: {t}", .{ memory.len, memory.ptr, e });
                 },
             }
@@ -18969,7 +19087,7 @@ fn OpenFile(sub_path_w: []const u16, options: OpenFileOptions) OpenError!windows
             .{
                 .DIRECTORY_FILE = options.filter == .dir_only,
                 .NON_DIRECTORY_FILE = options.filter == .non_directory_only,
-                .IO = if (options.follow_symlinks) .SYNCHRONOUS_NONALERT else .ASYNCHRONOUS,
+                .IO = .SYNCHRONOUS_NONALERT,
                 .OPEN_REPARSE_POINT = !options.follow_symlinks,
             },
             null,

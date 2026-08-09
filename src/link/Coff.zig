@@ -621,7 +621,7 @@ pub const LongNamesTable = struct {
         }
 
         pub fn hash(_: Adapter, key: []const u8) u32 {
-            assert(std.mem.indexOfScalar(u8, key, 0) == null);
+            assert(std.mem.findScalar(u8, key, 0) == null);
             return std.array_hash_map.hashString(key);
         }
     };
@@ -711,7 +711,7 @@ pub const ExportTable = struct {
         }
 
         pub fn hash(_: Adapter, key: []const u8) u32 {
-            assert(std.mem.indexOfScalar(u8, key, 0) == null);
+            assert(std.mem.findScalar(u8, key, 0) == null);
             return std.array_hash_map.hashString(key);
         }
     };
@@ -759,7 +759,7 @@ pub const ImportTable = struct {
         }
 
         pub fn hash(_: Adapter, key: []const u8) u32 {
-            assert(std.mem.indexOfScalar(u8, key, 0) == null);
+            assert(std.mem.findScalar(u8, key, 0) == null);
             return std.array_hash_map.hashString(key);
         }
     };
@@ -822,7 +822,7 @@ pub const String = enum(u32) {
 
     pub fn toSlice(s: String, coff: *Coff) [:0]const u8 {
         const slice = coff.string_bytes.items[@backingInt(s)..];
-        return slice[0..std.mem.indexOfScalar(u8, slice, 0).? :0];
+        return slice[0..std.mem.findScalar(u8, slice, 0).? :0];
     }
 
     pub fn toOptional(s: String) String.Optional {
@@ -3535,7 +3535,7 @@ fn objectSectionParentName(coff: *Coff, name: []const u8) []const u8 {
     // Otherwise, we want to keep the full name so that this sort can occur correctly when
     // the object is finally linked into an image.
     return if (coff.isImage())
-        name[0 .. std.mem.indexOfScalar(u8, name, '$') orelse name.len]
+        name[0 .. std.mem.findScalar(u8, name, '$') orelse name.len]
     else
         name;
 }
@@ -3654,7 +3654,7 @@ fn verifyParentSectionAttributes(
         parent.name(coff).toSlice(coff),
     });
 
-    inline for (comptime std.meta.fieldNames(ObjectSectionAttributes)) |field| {
+    inline for (@typeInfo(ObjectSectionAttributes).@"struct".field_names) |field| {
         if (@field(child_attrs, field) != @field(parent_attrs, field)) {
             err.addNote("flags.{s} was {d} in {s}, but {d} in {s}", .{
                 field,
@@ -5370,7 +5370,9 @@ fn loadDll(coff: *Coff, path: std.Build.Cache.Path, fr: *Io.File.Reader) LoadInp
 }
 
 pub fn prelink(coff: *Coff, prog_node: std.Progress.Node) link.Error!void {
-    _ = prog_node;
+    const sub_prog_node = prog_node.start("COFF Prelink", 0);
+    defer sub_prog_node.end();
+
     const base = coff.base;
     const comp = base.comp;
 
@@ -5598,11 +5600,11 @@ fn updateFuncInner(
                 const ni = try coff.mf.addLastChildNode(gpa, sec_si.node(coff), .{
                     .alignment = switch (nav.resolved.?.@"align") {
                         .none => switch (mod.optimize_mode) {
-                            .Debug,
-                            .ReleaseSafe,
-                            .ReleaseFast,
+                            .debug,
+                            .safe,
+                            .fast,
                             => target_util.defaultFunctionAlignment(target),
-                            .ReleaseSmall => target_util.minFunctionAlignment(target),
+                            .small => target_util.minFunctionAlignment(target),
                         },
                         else => |a| a.maxStrict(target_util.minFunctionAlignment(target)),
                     }.toStdMem(),
@@ -5735,7 +5737,7 @@ fn reportUndefs(coff: *Coff, tid: Zcu.PerThread.Id) !void {
     const gpa = comp.gpa;
     const max_notes = 4;
 
-    var undef_indices: std.ArrayListUnmanaged(u32) = .empty;
+    var undef_indices: std.ArrayList(u32) = .empty;
     for (coff.relocs.items, 0..) |reloc, reloc_i| {
         if (reloc.flags.free) continue;
         const target_sym = reloc.target.get(coff);
@@ -5886,7 +5888,9 @@ pub fn flush(
     prog_node: std.Progress.Node,
 ) link.Error!void {
     _ = arena;
-    _ = prog_node;
+    const sub_prog_node = prog_node.start("COFF Flush", 0);
+    defer sub_prog_node.end();
+
     const comp = coff.base.comp;
 
     // TODO: When https://github.com/ziglang/zig/issues/23617 is in,
@@ -6649,11 +6653,11 @@ fn flushGlobal(coff: *Coff, gmi: Node.GlobalMapIndex) !bool {
 
             const target = &comp.root_mod.resolved_target.result;
             const alignment = switch (comp.root_mod.optimize_mode) {
-                .Debug,
-                .ReleaseSafe,
-                .ReleaseFast,
+                .debug,
+                .safe,
+                .fast,
                 => target_util.defaultFunctionAlignment(target),
-                .ReleaseSmall => target_util.minFunctionAlignment(target),
+                .small => target_util.minFunctionAlignment(target),
             }.toStdMem();
             const parent_si = (try coff.pseudoSectionMapIndex(
                 .@".thunks",
@@ -6983,7 +6987,7 @@ fn flushMoved(coff: *Coff, ni: MappedFile.Node.Index) !void {
                             continue;
 
                         import_hint_name_index = @intCast(import_hint_name_align.forward(
-                            std.mem.indexOfScalarPos(
+                            std.mem.findScalarPos(
                                 u8,
                                 import_hint_name_slice,
                                 import_hint_name_index,

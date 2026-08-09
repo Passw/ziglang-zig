@@ -584,7 +584,7 @@ pub const Inst = struct {
         /// containing the instruction.
         /// Uses the `un_tok` union field.
         ref,
-        /// Implements the dereference operand (`.*`). Checks that operand is a pointer
+        /// Implements the dereference operator (`.*`). Checks that operand is a pointer
         /// that supports being directly dereferenced.
         /// Uses the `un_node` union field.
         deref,
@@ -2522,7 +2522,7 @@ pub const Inst = struct {
         // bigger than expected. Note that in Debug builds, Zig is allowed
         // to insert a secret field for safety checks.
         comptime {
-            if (builtin.mode != .Debug and builtin.mode != .ReleaseSafe) {
+            if (builtin.mode != .debug and builtin.mode != .safe) {
                 assert(@sizeOf(Data) == 8);
             }
         }

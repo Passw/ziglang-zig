@@ -41,8 +41,8 @@ fn logOverride(
 
 var safe_allocator: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
 const gpa = switch (builtin.mode) {
-    .Debug, .ReleaseSafe => safe_allocator.allocator(),
-    .ReleaseFast, .ReleaseSmall => std.heap.smp_allocator,
+    .debug, .safe => safe_allocator.allocator(),
+    .fast, .small => std.heap.smp_allocator,
 };
 
 // Seperate from `exec` to allow initialization before `exec` is.
@@ -1085,7 +1085,7 @@ const Fuzzer = struct {
     fn removeBest(f: *Fuzzer, i: Input.Index, best_i: u32) void {
         const t = &f.tests[f.test_i];
         const ref = &t.corpus.items(.ref)[@backingInt(i)];
-        const list_i = mem.indexOfScalar(u32, ref.best_i_buf[0..ref.best_i_len], best_i).?;
+        const list_i = mem.findScalar(u32, ref.best_i_buf[0..ref.best_i_len], best_i).?;
         ref.best_i_len -= 1;
         ref.best_i_buf[list_i] = ref.best_i_buf[ref.best_i_len];
 
@@ -1209,7 +1209,7 @@ const Fuzzer = struct {
         f.req_bytes = @intCast(f.input_builder.bytes_table.items.len);
         const quality: Input.Best.Quality = .{
             .n_pcs = n_pcs: {
-                @setRuntimeSafety(builtin.mode == .Debug); // Necessary for vectorization
+                @setRuntimeSafety(builtin.mode == .debug); // Necessary for vectorization
                 var n: u32 = 0;
                 for (exec.pc_counters) |c| {
                     n += @intFromBool(c != 0);

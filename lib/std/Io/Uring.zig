@@ -1135,8 +1135,9 @@ fn mainIdleEntry() callconv(.naked) void {
 
 fn mainIdle(
     ev: *Evented,
-    message: *const SwitchMessage,
+    contexts: *const Io.fiber.Switch,
 ) callconv(.withStackAlign(.c, @max(@alignOf(Thread), @alignOf(Io.fiber.Context)))) noreturn {
+    const message: *const SwitchMessage = @fieldParentPtr("contexts", contexts);
     message.handle(ev);
     ev.idle(&ev.threads.allocated[0]);
     ev.yield(@ptrCast(&ev.main_fiber_buffer), .nothing);
@@ -1414,8 +1415,9 @@ const AsyncClosure = struct {
 
     fn call(
         closure: *AsyncClosure,
-        message: *const SwitchMessage,
+        contexts: *const Io.fiber.Switch,
     ) callconv(.withStackAlign(.c, @alignOf(AsyncClosure))) noreturn {
+        const message: *const SwitchMessage = @fieldParentPtr("contexts", contexts);
         const ev = closure.evented;
         const fiber = closure.fiber;
         message.handle(ev);
@@ -1779,8 +1781,9 @@ const Group = struct {
 
         fn call(
             closure: *Group.AsyncClosure,
-            message: *const SwitchMessage,
+            contexts: *const Io.fiber.Switch,
         ) callconv(.withStackAlign(.c, @alignOf(Group.AsyncClosure))) noreturn {
+            const message: *const SwitchMessage = @fieldParentPtr("contexts", contexts);
             const ev = closure.evented;
             const fiber = closure.fiber;
             message.handle(ev);
@@ -3558,7 +3561,7 @@ fn dirHardLink(
         old_sub_path_posix,
         new_dir.handle,
         new_sub_path_posix,
-        if (options.follow_symlinks) 0 else linux.AT.SYMLINK_NOFOLLOW,
+        if (options.follow_symlinks) linux.AT.SYMLINK_FOLLOW else 0,
     );
 }
 
@@ -3990,7 +3993,7 @@ fn fileHardLink(
         "",
         new_dir.handle,
         new_sub_path_posix,
-        linux.AT.EMPTY_PATH | @as(u32, if (options.follow_symlinks) 0 else linux.AT.SYMLINK_NOFOLLOW),
+        linux.AT.EMPTY_PATH | @as(u32, if (options.follow_symlinks) linux.AT.SYMLINK_FOLLOW else 0),
     );
 }
 
@@ -4050,7 +4053,7 @@ fn fileMemoryMapDestroy(userdata: ?*anyopaque, mm: *File.MemoryMap) void {
     if (memory.len == 0) return;
     switch (linux.errno(linux.munmap(memory.ptr, memory.len))) {
         .SUCCESS => {},
-        else => |err| if (builtin.mode == .Debug)
+        else => |err| if (builtin.mode == .debug)
             std.log.err("failed to unmap {d} bytes at {*}: {t}", .{ memory.len, memory.ptr, err }),
     }
     mm.* = undefined;
@@ -5186,9 +5189,9 @@ fn netWriteFileUnavailable(
     return error.Unimplemented;
 }
 
-fn netClose(userdata: ?*anyopaque, handles: []const net.Socket.Handle) void {
+fn netClose(userdata: ?*anyopaque, sockets: []const net.Socket) void {
     const ev: *Evented = @ptrCast(@alignCast(userdata));
-    for (handles) |handle| ev.close(handle);
+    for (sockets) |sock| ev.close(sock.handle);
 }
 
 fn netShutdown(
@@ -5295,6 +5298,7 @@ fn bind(
         switch (cancel_region.errno()) {
             .SUCCESS => return,
             .INTR, .CANCELED => {},
+            .ACCES => return error.AccessDenied,
             .ADDRINUSE => return error.AddressInUse,
             .BADF => |err| return errnoBug(err), // File descriptor used after closed.
             .INVAL => |err| return errnoBug(err), // invalid parameters
@@ -5542,6 +5546,8 @@ fn linkat(
     new_path: [*:0]const u8,
     flags: u32,
 ) File.HardLinkError!void {
+    // allowed flags: https://man7.org/linux/man-pages/man2/linkat.2.html
+    assert(flags & ~(@as(u32, linux.AT.SYMLINK_FOLLOW | linux.AT.EMPTY_PATH)) == 0);
     while (true) {
         const thread = try cancel_region.awaitIoUring();
         thread.enqueue().* = .{

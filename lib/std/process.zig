@@ -100,7 +100,7 @@ pub const UserInfo = struct {
 };
 
 /// POSIX function which gets a uid from username.
-pub fn getUserInfo(name: []const u8) !UserInfo {
+pub fn getUserInfo(io: Io, name: []const u8) !UserInfo {
     return switch (native_os) {
         .linux,
         .driverkit,
@@ -116,7 +116,7 @@ pub fn getUserInfo(name: []const u8) !UserInfo {
         .haiku,
         .illumos,
         .serenity,
-        => posixGetUserInfo(name),
+        => posixGetUserInfo(io, name),
         else => @compileError("Unsupported OS"),
     };
 }
@@ -127,7 +127,7 @@ pub fn posixGetUserInfo(io: Io, name: []const u8) !UserInfo {
     const file = try Io.Dir.openFileAbsolute(io, "/etc/passwd", .{});
     defer file.close(io);
     var buffer: [4096]u8 = undefined;
-    var file_reader = file.reader(&buffer);
+    var file_reader = file.reader(io, &buffer);
     return posixGetUserInfoPasswdStream(name, &file_reader.interface) catch |err| switch (err) {
         error.ReadFailed => return file_reader.err.?,
         error.EndOfStream => return error.UserNotFound,
@@ -644,7 +644,7 @@ pub fn totalSystemMemory() TotalSystemMemoryError!u64 {
 /// leaks can be accurate. In release builds, this calls `exit` with code zero,
 /// and does not return.
 pub fn cleanExit(io: Io) void {
-    if (builtin.mode == .Debug) return;
+    if (builtin.mode == .debug) return;
     _ = io.lockStderr(&.{}, .no_color) catch {};
     exit(0);
 }
@@ -809,7 +809,7 @@ pub fn abort() noreturn {
     // even when linking libc on Windows we use our own abort implementation.
     // See https://github.com/ziglang/zig/issues/2071 for more details.
     if (native_os == .windows) {
-        if (builtin.mode == .Debug and windows.peb().BeingDebugged.toBool()) {
+        if (builtin.mode == .debug and windows.peb().BeingDebugged.toBool()) {
             @breakpoint();
         }
         windows.ntdll.RtlExitUserProcess(3);

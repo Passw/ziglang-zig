@@ -428,6 +428,9 @@ fn findModule(si: *SelfInfo, gpa: Allocator, io: Io, address: usize, lock: enum 
     // Rebuild module list with the exclusive lock.
     {
         errdefer si.rwlock.unlock(io);
+        if (si.unwind_cache) |cache| {
+            @memset(cache, .empty);
+        }
         for (si.modules.items) |*mod| {
             unwind: {
                 const u = &(mod.unwind orelse break :unwind catch break :unwind);
@@ -515,7 +518,7 @@ const DlIterContext = struct {
         for (info.phdr[0..info.phnum]) |phdr| {
             if (phdr.type != .LOAD) continue;
             try context.si.ranges.append(gpa, .{
-                // Overflowing addition handles VSDOs having p_vaddr = 0xffffffffff700000
+                // Overflowing addition handles VSDOs having vaddr = 0xffffffffff700000
                 .start = info.addr +% phdr.vaddr,
                 .len = phdr.memsz,
                 .module_index = module_index,

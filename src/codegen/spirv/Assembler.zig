@@ -24,8 +24,9 @@ inst: struct {
     opcode: Opcode = undefined,
     operands: std.ArrayList(Operand) = .empty,
     string_bytes: std.ArrayList(u8) = .empty,
+    inst_offset: u32 = 0,
 
-    fn result(ass: @This()) ?AsmValue.Ref {
+    fn result(ass: *const @This()) ?AsmValue.Ref {
         for (ass.operands.items[0..@min(ass.operands.items.len, 2)]) |op| {
             switch (op) {
                 .result_id => |index| return index,
@@ -35,7 +36,7 @@ inst: struct {
         return null;
     }
 } = .{},
-value_map: std.array_hash_map.String(AsmValue) = .{},
+value_map: std.array_hash_map.String(AsmValue) = .empty,
 inst_map: std.array_hash_map.String(void) = .empty,
 
 const Operand = union(enum) {
@@ -82,7 +83,7 @@ pub fn assemble(ass: *Assembler, src: []const u8) Error!void {
     if (ass.inst_map.count() == 0) {
         const instructions = spec.InstructionSet.core.instructions();
         try ass.inst_map.ensureUnusedCapacity(gpa, @intCast(instructions.len));
-        for (spec.InstructionSet.core.instructions(), 0..) |inst, i| {
+        for (instructions, 0..) |inst, i| {
             const entry = try ass.inst_map.getOrPut(gpa, inst.name);
             assert(entry.index == i);
         }
@@ -114,12 +115,13 @@ fn addError(ass: *Assembler, offset: u32, comptime fmt: []const u8, args: anytyp
 }
 
 fn fail(ass: *Assembler, offset: u32, comptime fmt: []const u8, args: anytype) Error {
+    @branchHint(.cold);
     try ass.addError(offset, fmt, args);
     return error.AssembleFail;
 }
 
 fn todo(ass: *Assembler, comptime fmt: []const u8, args: anytype) Error {
-    return ass.fail(0, "todo: " ++ fmt, args);
+    return ass.fail(ass.inst.inst_offset, "todo: " ++ fmt, args);
 }
 
 const AsmValue = union(enum) {
@@ -177,19 +179,19 @@ fn processInstruction(ass: *Assembler) !void {
     const cg = ass.cg;
     const result: AsmValue = switch (ass.inst.opcode) {
         .OpEntryPoint => {
-            return ass.fail(ass.currentToken().start, "cannot export entry points in assembly", .{});
+            return ass.fail(ass.inst.inst_offset, "cannot export entry points in assembly", .{});
         },
         .OpExecutionMode, .OpExecutionModeId => {
-            return ass.fail(ass.currentToken().start, "cannot set execution mode in assembly", .{});
+            return ass.fail(ass.inst.inst_offset, "cannot set execution mode in assembly", .{});
         },
         .OpCapability, .OpExtension => {
-            return ass.fail(ass.currentToken().start, "cannot declare capabilities or extensions in assembly; use -mcpu instead", .{});
+            return ass.fail(ass.inst.inst_offset, "cannot declare capabilities or extensions in assembly; use -mcpu instead", .{});
         },
         .OpExtInstImport => blk: {
             const set_name_offset = ass.inst.operands.items[1].string;
             const set_name = std.mem.sliceTo(ass.inst.string_bytes.items[set_name_offset..], 0);
             const set_tag = std.meta.stringToEnum(spec.InstructionSet, set_name) orelse {
-                return ass.fail(set_name_offset, "unknown instruction set: {s}", .{set_name});
+                return ass.fail(ass.inst.inst_offset, "unknown instruction set: {s}", .{set_name});
             };
             break :blk .{ .value = try cg.importInstructionSet(set_tag) };
         },
@@ -209,9 +211,8 @@ fn processInstruction(ass: *Assembler) !void {
     switch (ass.value_map.values()[result_ref]) {
         .just_declared => ass.value_map.values()[result_ref] = result,
         else => {
-            // TODO: Improve source location.
             const name = ass.value_map.keys()[result_ref];
-            return ass.fail(0, "duplicate definition of %{s}", .{name});
+            return ass.fail(ass.inst.inst_offset, "duplicate definition of %{s}", .{name});
         },
     }
 }
@@ -229,12 +230,11 @@ fn processTypeInstruction(ass: *Assembler) !AsmValue {
                 0 => .unsigned,
                 1 => .signed,
                 else => {
-                    // TODO: Improve source location.
-                    return ass.fail(0, "{} is not a valid signedness (expected 0 or 1)", .{operands[2].literal32});
+                    return ass.fail(ass.inst.inst_offset, "{} is not a valid signedness (expected 0 or 1)", .{operands[2].literal32});
                 },
             };
             const width = std.math.cast(u16, operands[1].literal32) orelse {
-                return ass.fail(0, "int type of {} bits is too large", .{operands[1].literal32});
+                return ass.fail(ass.inst.inst_offset, "int type of {} bits is too large", .{operands[1].literal32});
             };
             break :blk try cg.intType(signedness, width);
         },
@@ -243,7 +243,7 @@ fn processTypeInstruction(ass: *Assembler) !AsmValue {
             switch (bits) {
                 16, 32, 64 => {},
                 else => {
-                    return ass.fail(0, "{} is not a valid bit count for floats (expected 16, 32 or 64)", .{bits});
+                    return ass.fail(ass.inst.inst_offset, "{} is not a valid bit count for floats (expected 16, 32 or 64)", .{bits});
                 },
             }
             break :blk try cg.floatType(@intCast(bits));
@@ -366,38 +366,40 @@ fn processGenericInstruction(ass: *Assembler) !?AsmValue {
 
     var maybe_result_id: ?Id = null;
     const first_word = section.instructions.items.len;
-    // At this point we're not quite sure how many operands this instruction is
-    // going to have, so insert 0 and patch up the actual opcode word later.
-    try section.ensureUnusedCapacity(cg.gpa, 1);
+
+    // Pre-calculate exact instruction size to avoid per-operand capacity checks.
+    var total_words: usize = 1; // 1 word for the opcode itself
+    for (operands) |operand| {
+        total_words += switch (operand) {
+            .value, .literal32, .result_id, .ref_id => 1,
+            .literal64 => 2,
+            .string => |offset| blk: {
+                const text = std.mem.sliceTo(ass.inst.string_bytes.items[offset..], 0);
+                break :blk @divCeil(text.len + 1, @sizeOf(Word));
+            },
+        };
+    }
+
+    try section.ensureUnusedCapacity(cg.gpa, total_words);
     section.writeWord(0);
 
     for (operands) |operand| {
         switch (operand) {
-            .value, .literal32 => |word| {
-                try section.ensureUnusedCapacity(cg.gpa, 1);
-                section.writeWord(word);
-            },
-            .literal64 => |dword| {
-                try section.ensureUnusedCapacity(cg.gpa, 2);
-                section.writeDoubleWord(dword);
-            },
+            .value, .literal32 => |word| section.writeWord(word),
+            .literal64 => |dword| section.writeDoubleWord(dword),
             .result_id => {
                 maybe_result_id = if (maybe_spv_decl_index) |spv_decl_index|
                     cg.declPtr(spv_decl_index).result_id
                 else
                     cg.allocId();
-                try section.ensureUnusedCapacity(cg.gpa, 1);
                 section.writeOperand(Id, maybe_result_id.?);
             },
             .ref_id => |index| {
                 const result = try ass.resolveRef(index);
-                try section.ensureUnusedCapacity(cg.gpa, 1);
                 section.writeOperand(spec.Id, result.resultId());
             },
             .string => |offset| {
                 const text = std.mem.sliceTo(ass.inst.string_bytes.items[offset..], 0);
-                const size = @divCeil(text.len + 1, @sizeOf(Word));
-                try section.ensureUnusedCapacity(cg.gpa, size);
                 section.writeOperand(spec.LiteralString, text);
             },
         }
@@ -445,11 +447,11 @@ fn processSpecConstVector(ass: *Assembler) !?AsmValue {
     const gpa = cg.gpa;
     const ty_ref = switch (ass.inst.operands.items[0]) {
         .ref_id => |i| i,
-        else => return ass.fail(0, "missing result type", .{}),
+        else => return ass.fail(ass.inst.inst_offset, "missing result type", .{}),
     };
     const composite_ty_id = switch (try ass.resolveRef(ty_ref)) {
         .ty => |id| id,
-        else => return ass.fail(0, "%ty must be a type", .{}),
+        else => return ass.fail(ass.inst.inst_offset, "%ty must be a type", .{}),
     };
 
     const globals = &cg.sections.globals;
@@ -483,7 +485,7 @@ fn processSpecConstVector(ass: *Assembler) !?AsmValue {
         }
 
         const spec_id_word = std.math.cast(u32, spec_id_base + i) orelse {
-            return ass.fail(0, "SpecId {} does not fit in 32 bits", .{spec_id_base + i});
+            return ass.fail(ass.inst.inst_offset, "SpecId {} does not fit in 32 bits", .{spec_id_base + i});
         };
         try annotations.emitRaw(gpa, .OpDecorate, 3);
         annotations.writeOperand(Id, elem_id);
@@ -505,8 +507,7 @@ fn resolveMaybeForwardRef(ass: *Assembler, ref: AsmValue.Ref) !AsmValue {
     switch (value) {
         .just_declared => {
             const name = ass.value_map.keys()[ref];
-            // TODO: Improve source location.
-            return ass.fail(0, "ass-referential parameter %{s}", .{name});
+            return ass.fail(ass.inst.inst_offset, "self-referential parameter %{s}", .{name});
         },
         else => return value,
     }
@@ -518,8 +519,7 @@ fn resolveRef(ass: *Assembler, ref: AsmValue.Ref) !AsmValue {
         .just_declared => unreachable,
         .unresolved_forward_reference => {
             const name = ass.value_map.keys()[ref];
-            // TODO: Improve source location.
-            return ass.fail(0, "reference to undeclared result-id %{s}", .{name});
+            return ass.fail(ass.inst.inst_offset, "reference to undeclared result-id %{s}", .{name});
         },
         else => return value,
     }
@@ -536,6 +536,7 @@ fn parseInstruction(ass: *Assembler) !void {
     ass.inst.opcode = undefined;
     ass.inst.operands.clearRetainingCapacity();
     ass.inst.string_bytes.clearRetainingCapacity();
+    ass.inst.inst_offset = ass.currentToken().start;
 
     const lhs_result_tok = ass.currentToken();
     const maybe_lhs_result: ?AsmValue.Ref = if (ass.eatToken(.result_id_assign)) blk: {
@@ -589,8 +590,8 @@ fn parseInstruction(ass: *Assembler) !void {
             .required => if (ass.isAtInstructionBoundary()) {
                 return ass.fail(
                     ass.currentToken().start,
-                    "missing required operand", // TODO: Operand name?
-                    .{},
+                    "missing required operand '{s}'",
+                    .{@tagName(operand.kind)},
                 );
             } else {
                 try ass.parseOperand(operand.kind);

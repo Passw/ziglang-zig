@@ -6,8 +6,6 @@ const OptimizeMode = std.builtin.OptimizeMode;
 const Step = std.Build.Step;
 
 // Cases
-const error_traces = @import("error_traces.zig");
-const stack_traces = @import("stack_traces.zig");
 const llvm_ir = @import("llvm_ir.zig");
 const libc = @import("libc.zig");
 const link = @import("link.zig");
@@ -23,7 +21,7 @@ pub const LinkContext = @import("src/Link.zig");
 const ModuleTestTarget = struct {
     linkage: ?std.builtin.LinkMode = null,
     target: std.Target.Query = .{},
-    optimize_mode: std.builtin.OptimizeMode = .Debug,
+    optimize_mode: std.builtin.OptimizeMode = .debug,
     link_libc: ?bool = null,
     single_threaded: ?bool = null,
     use_llvm: ?bool = null,
@@ -57,38 +55,38 @@ const module_test_targets = blk: {
         },
 
         .{
-            .optimize_mode = .ReleaseFast,
+            .optimize_mode = .fast,
         },
         .{
             .link_libc = true,
-            .optimize_mode = .ReleaseFast,
+            .optimize_mode = .fast,
         },
         .{
-            .optimize_mode = .ReleaseFast,
+            .optimize_mode = .fast,
             .single_threaded = true,
         },
 
         .{
-            .optimize_mode = .ReleaseSafe,
+            .optimize_mode = .safe,
         },
         .{
             .link_libc = true,
-            .optimize_mode = .ReleaseSafe,
+            .optimize_mode = .safe,
         },
         .{
-            .optimize_mode = .ReleaseSafe,
+            .optimize_mode = .safe,
             .single_threaded = true,
         },
 
         .{
-            .optimize_mode = .ReleaseSmall,
+            .optimize_mode = .small,
         },
         .{
             .link_libc = true,
-            .optimize_mode = .ReleaseSmall,
+            .optimize_mode = .small,
         },
         .{
-            .optimize_mode = .ReleaseSmall,
+            .optimize_mode = .small,
             .single_threaded = true,
         },
 
@@ -200,7 +198,7 @@ const module_test_targets = blk: {
         //    },
         //    .use_llvm = false,
         //    .use_lld = false,
-        //    .optimize_mode = .ReleaseFast,
+        //    .optimize_mode = .fast,
         //    .strip = true,
         //    .skip_modules = &.{"std"}, // TODO get these passing
         //},
@@ -213,7 +211,7 @@ const module_test_targets = blk: {
         //    },
         //    .use_llvm = false,
         //    .use_lld = false,
-        //    .optimize_mode = .ReleaseFast,
+        //    .optimize_mode = .fast,
         //    .strip = true,
         //    .skip_modules = &.{"std"}, // TODO get these passing
         //},
@@ -279,6 +277,15 @@ const module_test_targets = blk: {
                 .cpu_arch = .arm,
                 .os_tag = .linux,
                 .abi = .musleabi,
+                .ofmt = .c,
+            },
+            .link_libc = true,
+        },
+        .{
+            .target = .{
+                .cpu_arch = .arm,
+                .os_tag = .linux,
+                .abi = .musleabi,
             },
             .linkage = .dynamic,
             .link_libc = true,
@@ -289,6 +296,15 @@ const module_test_targets = blk: {
                 .cpu_arch = .arm,
                 .os_tag = .linux,
                 .abi = .musleabihf,
+            },
+            .link_libc = true,
+        },
+        .{
+            .target = .{
+                .cpu_arch = .arm,
+                .os_tag = .linux,
+                .abi = .musleabihf,
+                .ofmt = .c,
             },
             .link_libc = true,
         },
@@ -341,6 +357,15 @@ const module_test_targets = blk: {
             },
             .link_libc = true,
         },
+        .{
+            .target = .{
+                .cpu_arch = .armeb,
+                .os_tag = .linux,
+                .abi = .musleabi,
+                .ofmt = .c,
+            },
+            .link_libc = true,
+        },
         // Crashes in weird ways when applying relocations.
         // .{
         //     .target = .{
@@ -357,6 +382,15 @@ const module_test_targets = blk: {
                 .cpu_arch = .armeb,
                 .os_tag = .linux,
                 .abi = .musleabihf,
+            },
+            .link_libc = true,
+        },
+        .{
+            .target = .{
+                .cpu_arch = .armeb,
+                .os_tag = .linux,
+                .abi = .musleabihf,
+                .ofmt = .c,
             },
             .link_libc = true,
         },
@@ -418,6 +452,23 @@ const module_test_targets = blk: {
                 .os_tag = .linux,
                 .abi = .none,
             },
+        },
+        .{
+            .target = .{
+                .cpu_arch = .loongarch32,
+                .os_tag = .linux,
+                .abi = .gnu,
+            },
+            .link_libc = true,
+        },
+        .{
+            .target = .{
+                .cpu_arch = .loongarch32,
+                .os_tag = .linux,
+                .abi = .gnusf,
+            },
+            .link_libc = true,
+            .extra_target = true,
         },
 
         .{
@@ -1112,6 +1163,15 @@ const module_test_targets = blk: {
                 .cpu_arch = .x86,
                 .os_tag = .linux,
                 .abi = .musl,
+                .ofmt = .c,
+            },
+            .link_libc = true,
+        },
+        .{
+            .target = .{
+                .cpu_arch = .x86,
+                .os_tag = .linux,
+                .abi = .musl,
             },
             .linkage = .dynamic,
             .link_libc = true,
@@ -1257,7 +1317,7 @@ const module_test_targets = blk: {
         //    },
         //    .use_llvm = false,
         //    .use_lld = false,
-        //    .optimize_mode = .ReleaseFast,
+        //    .optimize_mode = .fast,
         //    .strip = true,
         //},
 
@@ -1523,7 +1583,6 @@ const module_test_targets = blk: {
                 .os_tag = .wasi,
                 .abi = .none,
             },
-            .skip_modules = &.{"compiler-rt"},
             .use_llvm = false,
             .use_lld = false,
         },
@@ -1642,6 +1701,15 @@ const module_test_targets = blk: {
                 .cpu_arch = .x86,
                 .os_tag = .windows,
                 .abi = .gnu,
+            },
+            .link_libc = true,
+        },
+        .{
+            .target = .{
+                .cpu_arch = .x86,
+                .os_tag = .windows,
+                .abi = .gnu,
+                .ofmt = .c,
             },
             .link_libc = true,
         },
@@ -1961,7 +2029,6 @@ const c_abi_targets = blk: {
                 .abi = .musl,
             },
             .use_llvm = false,
-            .c_defines = &.{"ZIG_BACKEND_STAGE2_X86_64"},
         },
         .{
             .target = .{
@@ -1972,7 +2039,6 @@ const c_abi_targets = blk: {
             },
             .use_llvm = false,
             .strip = true,
-            .c_defines = &.{"ZIG_BACKEND_STAGE2_X86_64"},
         },
         .{
             .target = .{
@@ -1983,7 +2049,6 @@ const c_abi_targets = blk: {
             },
             .use_llvm = false,
             .pic = true,
-            .c_defines = &.{"ZIG_BACKEND_STAGE2_X86_64"},
         },
         .{
             .target = .{
@@ -2010,6 +2075,15 @@ const c_abi_targets = blk: {
                 .abi = .musl,
             },
         },
+        .{
+            .target = .{
+                .cpu_arch = .wasm32,
+                .os_tag = .wasi,
+                .abi = .musl,
+            },
+            .use_llvm = false,
+            .use_lld = false,
+        },
 
         // Windows Targets
 
@@ -2028,7 +2102,6 @@ const c_abi_targets = blk: {
                 .abi = .gnu,
             },
             .use_llvm = false,
-            .c_defines = &.{"ZIG_BACKEND_STAGE2_X86_64"},
         },
         .{
             .target = .{
@@ -2038,7 +2111,6 @@ const c_abi_targets = blk: {
                 .abi = .gnu,
             },
             .use_llvm = false,
-            .c_defines = &.{"ZIG_BACKEND_STAGE2_X86_64"},
         },
         .{
             .target = .{
@@ -2048,7 +2120,6 @@ const c_abi_targets = blk: {
                 .abi = .gnu,
             },
             .use_llvm = false,
-            .c_defines = &.{"ZIG_BACKEND_STAGE2_X86_64"},
         },
         .{
             .target = .{
@@ -2063,7 +2134,7 @@ const c_abi_targets = blk: {
 
 const LinkTarget = struct {
     target: std.Target.Query = .{},
-    optimize_mode: std.builtin.OptimizeMode = .Debug,
+    optimize_mode: std.builtin.OptimizeMode = .debug,
     link_libc: bool = false,
     use_llvm: bool = false,
     use_lld: bool = false,
@@ -2308,59 +2379,7 @@ pub fn isNative(actual_target: *const std.Build.ResolvedTarget, host: *const std
     return true;
 }
 
-/// For stack trace tests, we only test native by default, because external executors are pretty
-/// unreliable at stack tracing. However, if there's a 32-bit equivalent target which the host can
-/// trivially run, we may as well at least test that!
-fn nativeAndCompatible32bit(b: *std.Build, skip_non_native: bool) []const std.Build.ResolvedTarget {
-    const host = b.graph.host.result;
-    const only_native = (&b.graph.host)[0..1];
-    if (skip_non_native) return only_native;
-    const arch32 = compatible32bitArch(&b.graph.host.result) orelse return only_native;
-    return b.graph.arena.dupe(std.Build.ResolvedTarget, &.{
-        b.graph.host,
-        b.resolveTargetQuery(.{ .cpu_arch = arch32, .os_tag = host.os.tag }),
-    }) catch @panic("OOM");
-}
-
-fn wineAndCompatible32bit(b: *std.Build, skip_non_native: bool) []const std.Build.ResolvedTarget {
-    var targets: std.ArrayList(std.Build.ResolvedTarget) = .empty;
-
-    const host = b.graph.host.result;
-
-    targets.append(b.graph.arena, b.resolveTargetQuery(.{
-        .cpu_arch = host.cpu.arch,
-        .os_tag = .windows,
-    })) catch @panic("OOM");
-    if (!skip_non_native) {
-        if (compatible32bitArch(&b.graph.host.result)) |arch| {
-            targets.append(b.graph.arena, b.resolveTargetQuery(.{
-                .cpu_arch = arch,
-                .os_tag = .windows,
-            })) catch @panic("OOM");
-        }
-    }
-
-    return targets.toOwnedSlice(b.graph.arena) catch @panic("OOM");
-}
-
-fn darlingTargets(b: *std.Build) []const std.Build.ResolvedTarget {
-    var targets: std.ArrayList(std.Build.ResolvedTarget) = .empty;
-
-    const host = b.graph.host.result;
-
-    targets.append(b.graph.arena, b.resolveTargetQuery(.{
-        .cpu_arch = host.cpu.arch,
-        .os_tag = .macos,
-    })) catch @panic("OOM");
-
-    return targets.toOwnedSlice(b.graph.arena) catch @panic("OOM");
-}
-
-pub fn addStackTraceTests(
-    b: *std.Build,
-    test_filters: []const []const u8,
-    skip_non_native: bool,
-) *Step {
+pub fn addStackTraceTests(b: *std.Build, test_filters: []const []const u8, skip_non_native: bool) *Step {
     const step = b.step("test-stack-traces", "Run the stack trace tests");
 
     const convert_exe = b.addExecutable(.{
@@ -2368,43 +2387,19 @@ pub fn addStackTraceTests(
         .root_module = b.createModule(.{
             .root_source_file = b.path("test/src/convert-stack-trace.zig"),
             .target = b.graph.host,
-            .optimize = .Debug,
+            .optimize = .debug,
         }),
     });
 
-    const host_cases = b.allocator.create(StackTracesContext) catch @panic("OOM");
-    host_cases.* = .{
+    const stack_traces_context = b.allocator.create(StackTracesContext) catch @panic("OOM");
+    stack_traces_context.* = .{
         .b = b,
         .step = step,
         .test_filters = test_filters,
-        .targets = nativeAndCompatible32bit(b, skip_non_native),
+        .skip_non_native = skip_non_native,
         .convert_exe = convert_exe,
     };
-    stack_traces.addCases(host_cases, b.graph.host.result.os.tag);
-
-    if (b.enable_wine) {
-        const wine_cases = b.allocator.create(StackTracesContext) catch @panic("OOM");
-        wine_cases.* = .{
-            .b = b,
-            .step = step,
-            .test_filters = test_filters,
-            .targets = wineAndCompatible32bit(b, skip_non_native),
-            .convert_exe = convert_exe,
-        };
-        stack_traces.addCases(wine_cases, .windows);
-    }
-
-    if (b.enable_darling) {
-        const darling_cases = b.allocator.create(StackTracesContext) catch @panic("OOM");
-        darling_cases.* = .{
-            .b = b,
-            .step = step,
-            .test_filters = test_filters,
-            .targets = darlingTargets(b),
-            .convert_exe = convert_exe,
-        };
-        stack_traces.addCases(darling_cases, .macos);
-    }
+    stack_traces_context.addCases();
 
     return step;
 }
@@ -2422,54 +2417,22 @@ pub fn addErrorTraceTests(
         .root_module = b.createModule(.{
             .root_source_file = b.path("test/src/convert-stack-trace.zig"),
             .target = b.graph.host,
-            .optimize = .Debug,
+            .optimize = .debug,
         }),
     });
 
-    const host_cases = b.allocator.create(ErrorTracesContext) catch @panic("OOM");
-    host_cases.* = .{
+    const error_traces_context = b.allocator.create(ErrorTracesContext) catch @panic("OOM");
+    error_traces_context.* = .{
         .b = b,
         .step = step,
         .test_filters = test_filters,
-        .targets = nativeAndCompatible32bit(b, skip_non_native),
+        .skip_non_native = skip_non_native,
         .optimize_modes = optimize_modes,
         .convert_exe = convert_exe,
     };
-    error_traces.addCases(host_cases, b.graph.host.result.os.tag);
-
-    if (b.enable_wine) {
-        const wine_cases = b.allocator.create(ErrorTracesContext) catch @panic("OOM");
-        wine_cases.* = .{
-            .b = b,
-            .step = step,
-            .test_filters = test_filters,
-            .targets = wineAndCompatible32bit(b, skip_non_native),
-            .optimize_modes = optimize_modes,
-            .convert_exe = convert_exe,
-        };
-        error_traces.addCases(wine_cases, .windows);
-    }
-
-    if (b.enable_darling) {
-        const darling_cases = b.allocator.create(ErrorTracesContext) catch @panic("OOM");
-        darling_cases.* = .{
-            .b = b,
-            .step = step,
-            .test_filters = test_filters,
-            .targets = darlingTargets(b),
-            .optimize_modes = optimize_modes,
-            .convert_exe = convert_exe,
-        };
-        error_traces.addCases(darling_cases, .macos);
-    }
+    error_traces_context.addCases();
 
     return step;
-}
-
-fn compilerHasPackageManager(b: *std.Build) bool {
-    // We can only use dependencies if the compiler was built with support for package management.
-    // (zig2 doesn't support it, but we still need to construct a build graph to build stage3.)
-    return b.available_deps.len != 0;
 }
 
 pub fn addStandaloneTests(
@@ -2480,21 +2443,19 @@ pub fn addStandaloneTests(
     enable_symlinks_windows: bool,
 ) *Step {
     const step = b.step("test-standalone", "Run the standalone tests");
-    if (compilerHasPackageManager(b)) {
-        const test_cases_dep_name = "standalone_test_cases";
-        const test_cases_dep = b.dependency(test_cases_dep_name, .{
-            .enable_ios_sdk = enable_ios_sdk,
-            .enable_macos_sdk = enable_macos_sdk,
-            .enable_symlinks_windows = enable_symlinks_windows,
-            .simple_skip_debug = mem.indexOfScalar(OptimizeMode, optimize_modes, .Debug) == null,
-            .simple_skip_release_safe = mem.indexOfScalar(OptimizeMode, optimize_modes, .ReleaseSafe) == null,
-            .simple_skip_release_fast = mem.indexOfScalar(OptimizeMode, optimize_modes, .ReleaseFast) == null,
-            .simple_skip_release_small = mem.indexOfScalar(OptimizeMode, optimize_modes, .ReleaseSmall) == null,
-        });
-        const test_cases_dep_step = test_cases_dep.builder.default_step;
-        test_cases_dep_step.name = b.dupe(test_cases_dep_name);
-        step.dependOn(test_cases_dep.builder.default_step);
-    }
+    const test_cases_dep_name = "standalone_test_cases";
+    const test_cases_dep = b.dependency(test_cases_dep_name, .{
+        .enable_ios_sdk = enable_ios_sdk,
+        .enable_macos_sdk = enable_macos_sdk,
+        .enable_symlinks_windows = enable_symlinks_windows,
+        .simple_skip_debug = mem.findScalar(OptimizeMode, optimize_modes, .debug) == null,
+        .simple_skip_release_safe = mem.findScalar(OptimizeMode, optimize_modes, .safe) == null,
+        .simple_skip_release_fast = mem.findScalar(OptimizeMode, optimize_modes, .fast) == null,
+        .simple_skip_release_small = mem.findScalar(OptimizeMode, optimize_modes, .small) == null,
+    });
+    const test_cases_dep_step = test_cases_dep.builder.default_step;
+    test_cases_dep_step.name = b.graph.dupeString(test_cases_dep_name);
+    step.dependOn(test_cases_dep.builder.default_step);
     return step;
 }
 
@@ -2782,16 +2743,6 @@ pub fn addModuleTests(b: *std.Build, options: ModuleTestOptions) *Step {
 
         const target = &resolved_target.result;
 
-        if (target.cpu.arch == .s390x and target.ofmt == .c) {
-            // https://codeberg.org/ziglang/zig/issues/35523
-            continue;
-        }
-
-        if (target.cpu.arch == .riscv64 and target.ofmt == .c) {
-            // https://codeberg.org/ziglang/zig/issues/30930
-            continue;
-        }
-
         if (std.mem.eql(u8, options.name, "libc")) {
             // The libc API tests obviously need to link libc. So for test
             // target entries where we wouldn't link libc by default, skip the
@@ -2816,7 +2767,7 @@ pub fn addModuleTests(b: *std.Build, options: ModuleTestOptions) *Step {
 
         if (options.test_target_filters.len > 0) {
             for (options.test_target_filters) |filter| {
-                if (std.mem.indexOf(u8, triple_txt, filter) != null) break;
+                if (std.mem.find(u8, triple_txt, filter) != null) break;
             } else continue;
         }
 
@@ -3057,7 +3008,7 @@ pub fn wouldUseLlvm(use_llvm: ?bool, query: std.Target.Query, optimize_mode: Opt
     if (use_llvm) |x| return x;
     if (query.ofmt == .c) return false;
     switch (optimize_mode) {
-        .Debug => {},
+        .debug => {},
         else => return true,
     }
     const cpu_arch = query.cpu_arch orelse builtin.cpu.arch;
@@ -3114,7 +3065,7 @@ pub fn addCAbiTests(b: *std.Build, options: CAbiTestOptions) *Step {
 
         if (options.test_target_filters.len > 0) {
             for (options.test_target_filters) |filter| {
-                if (std.mem.indexOf(u8, triple_txt, filter) != null) break;
+                if (std.mem.find(u8, triple_txt, filter) != null) break;
             } else continue;
         }
 
@@ -3203,7 +3154,7 @@ pub fn addLinkTests(b: *std.Build, options: LinkTestOptions) *Step {
 
         if (options.test_target_filters.len > 0) {
             for (options.test_target_filters) |filter| {
-                if (std.mem.indexOf(u8, triple_txt, filter) != null) break;
+                if (std.mem.find(u8, triple_txt, filter) != null) break;
             } else continue;
         }
 
@@ -3314,7 +3265,7 @@ pub fn addIncrementalTests(b: *std.Build, test_step: *Step, test_filters: []cons
         .root_module = b.createModule(.{
             .root_source_file = b.path("tools/incr-check.zig"),
             .target = b.graph.host,
-            .optimize = .Debug,
+            .optimize = .debug,
         }),
     });
 
@@ -3328,7 +3279,7 @@ pub fn addIncrementalTests(b: *std.Build, test_step: *Step, test_filters: []cons
         if (std.mem.endsWith(u8, entry.basename, ".swp")) continue;
 
         for (test_filters) |test_filter| {
-            if (std.mem.indexOf(u8, entry.path, test_filter)) |_| break;
+            if (std.mem.find(u8, entry.path, test_filter)) |_| break;
         } else if (test_filters.len > 0) continue;
 
         switch (entry.kind) {
@@ -3354,10 +3305,11 @@ pub fn addIncrementalTests(b: *std.Build, test_step: *Step, test_filters: []cons
 
             run.addArg("--quiet"); // don't fill stderr telling us about skipped tests etc
 
-            if (b.enable_qemu) run.addArg("-fqemu");
-            if (b.enable_wine) run.addArg("-fwine");
-            if (b.enable_wasmtime) run.addArg("-fwasmtime");
-            if (b.enable_darling) run.addArg("-fdarling");
+            run.addThirdPartyEnabledArgDarling(.{ .enabled = "-fdarling" });
+            run.addThirdPartyEnabledArgQemu(.{ .enabled = "-fqemu" });
+            run.addThirdPartyEnabledArgRosetta(.{ .enabled = "-frosetta" });
+            run.addThirdPartyEnabledArgWasmtime(.{ .enabled = "-fwasmtime" });
+            run.addThirdPartyEnabledArgWine(.{ .enabled = "-fwine" });
 
             run.addCheck(.{ .expect_term = .{ .exited = 0 } });
             test_step.dependOn(&run.step);

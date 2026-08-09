@@ -99,8 +99,6 @@ pub const Elf = struct {
     bind_global_refs_locally: bool,
     pub const HashStyle = enum { sysv, gnu, both };
     pub const SortSection = enum { name, alignment };
-    /// Deprecated; use 'std.zig.CompressDebugSections' instead. To be removed after 0.16.0 is tagged.
-    pub const CompressDebugSections = std.zig.CompressDebugSections;
 
     fn init(comp: *Compilation, options: link.File.OpenOptions) !Elf {
         const PtrWidth = enum { p32, p64 };
@@ -208,8 +206,8 @@ pub fn createEmpty(
     const optimize_mode = comp.root_mod.optimize_mode;
 
     const gc_sections: bool = options.gc_sections orelse switch (target.ofmt) {
-        .coff => optimize_mode != .Debug,
-        .elf => optimize_mode != .Debug and output_mode != .Obj,
+        .coff => optimize_mode != .debug,
+        .elf => optimize_mode != .debug and output_mode != .Obj,
         .wasm => output_mode != .Obj,
         else => unreachable,
     };
@@ -271,12 +269,12 @@ pub fn flush(
         .wasm => wasmLink(lld, arena),
     };
     result catch |err| switch (err) {
-        error.OutOfMemory, error.AlreadyReported => |e| return e,
+        error.OutOfMemory, error.AlreadyReported, error.Canceled => |e| return e,
         else => |e| return lld.base.comp.link_diags.fail("failed to link with LLD: {t}", .{e}),
     };
 }
 
-fn linkAsArchive(lld: *Lld, arena: Allocator) !void {
+fn linkAsArchive(lld: *Lld, arena: Allocator) link.Error!void {
     const base = &lld.base;
     const comp = base.comp;
     const directory = base.emit.root_dir; // Just an alias to make it shorter to type.
@@ -308,8 +306,8 @@ fn linkAsArchive(lld: *Lld, arena: Allocator) !void {
 
     try object_files.ensureUnusedCapacity(arena, comp.link_inputs.len);
     for (comp.link_inputs) |input| switch (input) {
-        .res, .dso, .dso_exact => {}, // shared libraries should not be included in static archives
-        .object, .archive => {
+        .dso, .dso_exact, .archive => {}, // static archives should not contain shared libraries or other static archives
+        .res, .object => {
             const path = try input.path().?.toStringZ(arena);
             object_files.appendAssumeCapacity(path);
         },
@@ -340,7 +338,9 @@ fn linkAsArchive(lld: *Lld, arena: Allocator) !void {
     const llvm = @import("../codegen/llvm.zig");
     const target = &comp.root_mod.resolved_target.result;
     llvm.initializeLLVMTarget(target.cpu.arch);
-    const bad = llvm_bindings.WriteArchive(
+    var err_file_index: usize = undefined;
+    var err_msg: [*:0]u8 = undefined;
+    if (llvm_bindings.WriteArchive(
         full_out_path_z,
         object_files.items.ptr,
         object_files.items.len,
@@ -348,8 +348,19 @@ fn linkAsArchive(lld: *Lld, arena: Allocator) !void {
             .windows => .COFF,
             else => if (target.os.tag.isDarwin()) .DARWIN else .GNU,
         },
-    );
-    if (bad) return error.UnableToWriteArchive;
+        &err_file_index,
+        &err_msg,
+    )) {
+        defer std.c.free(err_msg);
+        if (err_file_index < object_files.items.len) {
+            return comp.link_diags.fail("LLD failed to open input file '{s}': {s}", .{
+                object_files.items[err_file_index],
+                err_msg,
+            });
+        } else {
+            return comp.link_diags.fail("LLD failed to write archive: {s}", .{err_msg});
+        }
+    }
 }
 
 fn addCommonArgs(argv: *std.array_list.Managed([]const u8), coff: bool) !void {
@@ -383,7 +394,7 @@ fn coffLink(lld: *Lld, arena: Allocator) !void {
     const target = &comp.root_mod.resolved_target.result;
     const optimize_mode = comp.root_mod.optimize_mode;
     const entry_name: ?[]const u8 = switch (coff.entry) {
-        // This logic isn't quite right for disabled or enabled. No point in fixing it
+        // This logic isn't quite right for default or enabled. No point in fixing it
         // when the goal is to eliminate dependency on LLD anyway.
         // https://github.com/ziglang/zig/issues/17751
         .disabled, .default, .enabled => null,
@@ -456,9 +467,9 @@ fn coffLink(lld: *Lld, arena: Allocator) !void {
 
         if (comp.config.lto != .none) {
             switch (optimize_mode) {
-                .Debug => {},
-                .ReleaseSmall => try argv.append("-OPT:lldlto=2"),
-                .ReleaseFast, .ReleaseSafe => try argv.append("-OPT:lldlto=3"),
+                .debug => {},
+                .small => try argv.append("-OPT:lldlto=2"),
+                .fast, .safe => try argv.append("-OPT:lldlto=3"),
             }
         }
         if (comp.config.output_mode == .Exe) {
@@ -492,6 +503,8 @@ fn coffLink(lld: *Lld, arena: Allocator) !void {
 
         if (entry_name) |name| {
             try argv.append(try arena.print("-ENTRY:{s}", .{name}));
+        } else if (coff.entry == .disabled) {
+            try argv.append("-NOENTRY");
         }
 
         if (coff.repro) {
@@ -865,15 +878,15 @@ fn elfLink(lld: *Lld, arena: Allocator) !void {
 
         if (comp.config.lto != .none) {
             switch (comp.root_mod.optimize_mode) {
-                .Debug => {},
-                .ReleaseSmall => try argv.append("--lto-O2"),
-                .ReleaseFast, .ReleaseSafe => try argv.append("--lto-O3"),
+                .debug => {},
+                .small => try argv.append("--lto-O2"),
+                .fast, .safe => try argv.append("--lto-O3"),
             }
         }
         switch (comp.root_mod.optimize_mode) {
-            .Debug => {},
-            .ReleaseSmall => try argv.append("-O2"),
-            .ReleaseFast, .ReleaseSafe => try argv.append("-O3"),
+            .debug => {},
+            .small => try argv.append("-O2"),
+            .fast, .safe => try argv.append("-O3"),
         }
 
         if (elf.entry_name) |name| {
@@ -1010,8 +1023,8 @@ fn elfLink(lld: *Lld, arena: Allocator) !void {
         }
 
         if (is_exe_or_dyn_lib and target.os.tag == .netbsd) {
-            // Add options to produce shared objects with only 2 PT_LOAD segments.
-            // NetBSD expects 2 PT_LOAD segments in a shared object, otherwise
+            // Add options to produce shared objects with only 2 PT.LOAD segments.
+            // NetBSD expects 2 PT.LOAD segments in a shared object, otherwise
             // ld.elf_so fails loading dynamic libraries with "not found" error.
             // See https://github.com/ziglang/zig/issues/9109 .
             try argv.append("--no-rosegment");
@@ -1416,9 +1429,9 @@ fn wasmLink(lld: *Lld, arena: Allocator) !void {
 
         if (comp.config.lto != .none) {
             switch (comp.root_mod.optimize_mode) {
-                .Debug => {},
-                .ReleaseSmall => try argv.append("-O2"),
-                .ReleaseFast, .ReleaseSafe => try argv.append("-O3"),
+                .debug => {},
+                .small => try argv.append("-O2"),
+                .fast, .safe => try argv.append("-O3"),
             }
         }
 
