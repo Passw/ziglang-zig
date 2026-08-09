@@ -10,8 +10,8 @@ const log = std.log;
 arena: Allocator,
 wc: *Configuration.Wip,
 module_map: std.array_hash_map.Auto(*std.Build.Module, Configuration.Module.Index) = .empty,
-/// Keyed by package hash.
-package_map: std.array_hash_map.String(Configuration.Package.Index) = .empty,
+/// Keyed by package hash. Index + 1 corresponds to `Configuration.packages` index.
+package_map: std.array_hash_map.String(void) = .empty,
 /// Index corresponds to `Configuration.steps` index.
 step_map: std.array_hash_map.Auto(*Step, void) = .empty,
 
@@ -750,9 +750,9 @@ fn makePackageDep(s: *Serialize, parent_dep_prefix: []const u8, name: []const u8
     const arena = s.arena;
     const wc = s.wc;
 
-    if (s.package_map.get(hash)) |index| return .{
+    if (s.package_map.getIndex(hash)) |index| return .{
         .name = try wc.addString(name),
-        .package = index,
+        .package = @fromBackingInt(@intCast(index + 1)),
     };
 
     const entry = std.Build.package_map.get(hash) orelse unreachable;
@@ -760,7 +760,7 @@ fn makePackageDep(s: *Serialize, parent_dep_prefix: []const u8, name: []const u8
     const dep_prefix = try arena.print("{s}{s}.", .{ parent_dep_prefix, name });
 
     const index: Configuration.Package.Index = @fromBackingInt(@intCast(wc.packages.items.len));
-    try s.package_map.put(arena, hash, index);
+    try s.package_map.put(arena, hash, {});
 
     try wc.packages.append(wc.gpa, .{
         .dep_prefix = try wc.addString(dep_prefix),
@@ -784,7 +784,7 @@ fn makePackageDep(s: *Serialize, parent_dep_prefix: []const u8, name: []const u8
 
 fn packageFromHash(s: *Serialize, pkg_hash: []const u8) Configuration.Package.Index {
     if (pkg_hash.len == 0) return .root;
-    return s.package_map.get(pkg_hash) orelse std.debug.panic("unrecognized package hash: {q}", .{pkg_hash});
+    return @fromBackingInt(@intCast(s.package_map.getIndex(pkg_hash).? + 1));
 }
 
 fn addOptionalLazyPathEnum(s: *Serialize, lp: ?std.Build.LazyPath) !Configuration.LazyPath.OptionalIndex {
