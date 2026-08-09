@@ -104,6 +104,30 @@ pub fn print(sc: *const ScannedConfig, w: *Writer) Writer.Error!void {
         try tf.end();
     }
 
+    {
+        var tf = try s.beginTupleField("package_instances", .{});
+        for (c.package_instances) |inst| {
+            var sf = try tf.beginStructField(.{});
+
+            try sf.fieldPrefix("package");
+            if (std.enums.tagName(Configuration.Package.Index, inst.package)) |name| {
+                try sf.container.serializer.ident(name);
+            } else {
+                try sf.container.serializer.int(@backingInt(inst.package));
+            }
+
+            var otf = try sf.beginTupleField("user_input_options", .{});
+            for (inst.user_input_options.slice(c)) |option| {
+                var osf = try otf.beginStructField(.{});
+                try sc.printStruct(&osf, Configuration.PackageInstance.UserInputOption, option.get(c));
+                try osf.end();
+            }
+            try otf.end();
+
+            try sf.end();
+        }
+    }
+
     try s.end();
 }
 
