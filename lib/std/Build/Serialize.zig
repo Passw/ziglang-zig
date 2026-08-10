@@ -28,11 +28,24 @@ pub fn write(b: *std.Build, wc: *Configuration.Wip, writer: *std.Io.Writer) !voi
     // instances.
     try s.traversePackages(b);
 
-    // Seed the package_instance_map, which is later used in calls to
+    // Next, seed the package_instance_map, which is later used in calls to
     // packageInstanceFromBuilder.
-    try s.addPackageInstance(b);
+
+    _ = try wc.package_instances.addManyAsSlice(gpa, 1 + b.graph.dependency_cache.count());
+    try s.package_instance_map.ensureTotalCapacity(arena, 1 + b.graph.dependency_cache.count());
+
+    // As serializing package instances also requires serializing the public
+    // modules of each one, we must first allocate an index for each package
+    // instance. Otherwise, addModule may access a package instance that hasn't
+    // been created yet with packageInstanceFromBuilder.
+
+    s.package_instance_map.putAssumeCapacityNoClobber(b, {});
     var iter = b.graph.dependency_cache.valueIterator();
-    while (iter.next()) |dep| try s.addPackageInstance(dep.*.builder);
+    while (iter.next()) |dep| s.package_instance_map.putAssumeCapacityNoClobber(dep.*.builder, {});
+
+    try s.addPackageInstance(b);
+    var iter2 = b.graph.dependency_cache.valueIterator();
+    while (iter2.next()) |dep| try s.addPackageInstance(dep.*.builder);
 
     try wc.path_deps.ensureTotalCapacityPrecise(gpa, graph.configure_dependencies.items.len);
     for (
@@ -763,12 +776,12 @@ fn makePackageDep(s: *Serialize, parent_dep_prefix: []const u8, name: []const u8
         .package = @fromBackingInt(@intCast(index + 1)),
     };
 
+    const index: Configuration.Package.Index = @fromBackingInt(@intCast(wc.packages.items.len));
+    try s.package_map.put(arena, hash, {});
+
     const entry = std.Build.package_map.get(hash) orelse unreachable;
 
     const dep_prefix = try arena.print("{s}{s}.", .{ parent_dep_prefix, name });
-
-    const index: Configuration.Package.Index = @fromBackingInt(@intCast(wc.packages.items.len));
-    try s.package_map.put(arena, hash, {});
 
     try wc.packages.append(wc.gpa, .{
         .dep_prefix = try wc.addString(dep_prefix),
@@ -799,32 +812,58 @@ fn addPackageInstance(s: *Serialize, b: *std.Build) Allocator.Error!void {
     const arena = s.arena;
     const wc = s.wc;
 
+    const index = s.package_instance_map.getIndex(b).?;
+
     const options = try arena.alloc(
         Configuration.PackageInstance.UserInputOption.Index,
         b.user_input_options.count(),
     );
 
-    var i: usize = 0;
-    var iter = b.user_input_options.valueIterator();
-    while (iter.next()) |option| : (i += 1) {
-        options[i] = try wc.addExtra(Configuration.PackageInstance.UserInputOption, .{
-            .flags = .{
-                .tag = .init(option.value),
-                .used = option.used,
-            },
-            .name = try wc.addString(option.name),
-            .value = .{ .u = try s.makeUserValue(&option.value) },
-        });
+    {
+        var i: usize = 0;
+        var iter = b.user_input_options.valueIterator();
+        while (iter.next()) |option| : (i += 1) {
+            options[i] = try wc.addExtra(Configuration.PackageInstance.UserInputOption, .{
+                .flags = .{
+                    .tag = .init(option.value),
+                    .used = option.used,
+                },
+                .name = try wc.addString(option.name),
+                .value = .{ .u = try s.makeUserValue(&option.value) },
+            });
+        }
     }
 
-    try wc.package_instances.append(wc.gpa, .{
+    const modules_keys = try arena.alloc(
+        []const u8,
+        b.modules.count(),
+    );
+    const modules_values = try arena.alloc(
+        Configuration.Module.Index,
+        b.modules.count(),
+    );
+
+    {
+        var i: usize = 0;
+        var iter = b.modules.iterator();
+        while (iter.next()) |entry| : (i += 1) {
+            modules_keys[i] = entry.key_ptr.*;
+            modules_values[i] = try s.addModule(entry.value_ptr.*);
+        }
+    }
+
+    wc.package_instances.items[index] = .{
         .package = s.packageFromHash(b.pkg_hash),
         .user_input_options = try wc.addDeduped(Configuration.PackageInstance.UserInputOption.List, .{
             .options = .{ .slice = options },
         }),
-    });
-
-    try s.package_instance_map.put(arena, b, {});
+        .modules = .{
+            .keys = try wc.addStringList(modules_keys),
+            .values = try wc.addDeduped(Configuration.Module.List, .{
+                .modules = .{ .slice = modules_values },
+            }),
+        },
+    };
 }
 
 fn makeUserValue(s: *Serialize, user_value: *const std.Build.UserValue) Allocator.Error!Configuration.PackageInstance.UserValue {
@@ -1336,7 +1375,7 @@ fn addModule(s: *Serialize, m: *std.Build.Module) !Configuration.Module.Index {
     const c_macros = try initStringList(s, m.c_macros.items);
     const export_symbol_names = try initStringList(s, m.export_symbol_names);
 
-    const module_index: Configuration.Module.Index = try wc.addExtra(Configuration.Module, .{
+    const module_index: Configuration.Module.Index = try wc.addDeduped(Configuration.Module, .{
         .flags = .{
             .optimize = .init(m.optimize),
             .strip = .init(m.strip),

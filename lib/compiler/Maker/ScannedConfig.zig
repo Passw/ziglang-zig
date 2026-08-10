@@ -124,6 +124,14 @@ pub fn print(sc: *const ScannedConfig, w: *Writer) Writer.Error!void {
             }
             try otf.end();
 
+            var msf = try sf.beginStructField("modules", .{});
+            for (inst.modules.keys.slice(c), inst.modules.values.slice(c)) |key, value| {
+                var msf2 = try msf.beginStructField(key.slice(c), .{});
+                try sc.printStruct(&msf2, Configuration.Module, value.get(c));
+                try msf2.end();
+            }
+            try msf.end();
+
             try sf.end();
         }
     }

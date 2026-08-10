@@ -1679,6 +1679,7 @@ pub const Package = extern struct {
 pub const PackageInstance = extern struct {
     package: Package.Index,
     user_input_options: UserInputOption.List.Index,
+    modules: PublicModules,
 
     pub const UserInputOption = struct {
         flags: Flags,
@@ -1751,6 +1752,11 @@ pub const PackageInstance = extern struct {
 
             pub const Index = IndexType(@This());
         };
+    };
+
+    pub const PublicModules = extern struct {
+        keys: StringList,
+        values: Module.List.Index,
     };
 
     pub const Index = enum(u32) {
@@ -1862,8 +1868,6 @@ pub const Module = struct {
         }
     };
 
-    pub const Index = IndexType(@This());
-
     pub const Flags = packed struct(u32) {
         optimize: Optimize,
         strip: DefaultingBool,
@@ -1932,6 +1936,24 @@ pub const Module = struct {
             needed: bool,
             weak: bool,
             _: u30 = 0,
+        };
+    };
+
+    pub const Index = IndexType(@This());
+
+    pub const List = struct {
+        modules: Storage.LengthPrefixedList(Module.Index),
+
+        pub const Index = enum(u32) {
+            _,
+
+            pub fn get(this: @This(), c: *const Configuration) List {
+                return extraData(c, List, @backingInt(this));
+            }
+
+            pub fn slice(this: @This(), c: *const Configuration) []const Module.Index {
+                return this.get(c).modules.slice;
+            }
         };
     };
 };
