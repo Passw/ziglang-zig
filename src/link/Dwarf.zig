@@ -2585,7 +2585,7 @@ pub fn initWipNav(
     pt: Zcu.PerThread,
     nav_index: InternPool.Nav.Index,
     sym_index: link.File.SymbolId,
-) error{ OutOfMemory, AlreadyReported }!WipNav {
+) link.Error!WipNav {
     return initWipNavInner(dwarf, pt, nav_index, sym_index) catch |err| switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         else => |e| pt.zcu.codegenFail(nav_index, "failed to init dwarf: {s}", .{@errorName(e)}),
@@ -3008,7 +3008,7 @@ fn finishWipNavWriterError(
     try dwarf.const_pool.flushPending(pt, .{ .dwarf = dwarf });
 }
 
-pub fn updateComptimeNav(dwarf: *Dwarf, pt: Zcu.PerThread, nav_index: InternPool.Nav.Index) error{ OutOfMemory, AlreadyReported }!void {
+pub fn updateComptimeNav(dwarf: *Dwarf, pt: Zcu.PerThread, nav_index: InternPool.Nav.Index) link.Error!void {
     return updateComptimeNavInner(dwarf, pt, nav_index) catch |err| switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         else => |e| pt.zcu.codegenFail(nav_index, "failed to update dwarf: {s}", .{@errorName(e)}),

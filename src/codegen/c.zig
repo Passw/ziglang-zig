@@ -6,6 +6,7 @@ const log = std.log.scoped(.c);
 const Allocator = mem.Allocator;
 const Writer = std.Io.Writer;
 
+const codegen = @import("../codegen.zig");
 const dev = @import("../dev.zig");
 const link = @import("../link.zig");
 const Zcu = @import("../Zcu.zig");
@@ -86,7 +87,7 @@ pub const Mir = struct {
     }
 };
 
-pub const Error = Writer.Error || Allocator.Error || error{AlreadyReported};
+pub const Error = codegen.Error || Writer.Error;
 
 pub const CType = @import("c/type.zig").CType;
 
@@ -2251,7 +2252,7 @@ pub fn generate(
     func_index: InternPool.Index,
     air: *const Air,
     liveness: *const ?Air.Liveness,
-) @import("../codegen.zig").Error!Mir {
+) codegen.Error!Mir {
     const zcu = pt.zcu;
     const gpa = zcu.gpa;
 

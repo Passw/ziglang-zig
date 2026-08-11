@@ -348,7 +348,7 @@ pub const Object = struct {
         lto: std.zig.LtoMode,
     };
 
-    pub fn emit(o: *Object, pt: Zcu.PerThread, options: EmitOptions) error{ AlreadyReported, OutOfMemory }!void {
+    pub fn emit(o: *Object, pt: Zcu.PerThread, options: EmitOptions) link.Error!void {
         const zcu = o.zcu;
         const comp = zcu.comp;
         const io = comp.io;
@@ -1141,7 +1141,7 @@ pub const Object = struct {
         }
     }
 
-    fn flushTypePool(o: *Object, pt: Zcu.PerThread) Allocator.Error!void {
+    fn flushTypePool(o: *Object, pt: Zcu.PerThread) link.Error!void {
         try o.type_pool.flushPending(pt, .{ .llvm = o });
     }
 
@@ -1304,7 +1304,7 @@ pub const Object = struct {
         }, &o.builder);
     }
 
-    pub fn updateContainerType(o: *Object, pt: Zcu.PerThread, ty: InternPool.Index, success: bool) Allocator.Error!void {
+    pub fn updateContainerType(o: *Object, pt: Zcu.PerThread, ty: InternPool.Index, success: bool) link.Error!void {
         _ = o.type_map.remove(ty);
         try o.type_pool.updateContainerType(pt, .{ .llvm = o }, ty, success);
         if (o.named_enum_map.get(ty)) |llvm_function| {

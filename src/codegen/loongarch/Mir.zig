@@ -115,7 +115,7 @@ pub fn emit(
             @fromBackingInt(ef.zigObjectPtr().?.getOrCreateMetadataForLazySymbol(ef, pt, lazy_reloc.symbol) catch |err|
                 return zcu.codegenFail(func.owner_nav, "{s} creating lazy symbol", .{@errorName(err)}))
         else if (lf.cast(.elf2)) |elf|
-            elf.lazySymbol(lazy_reloc.symbol) catch |err|
+            elf.lazySymbol(pt, lazy_reloc.symbol) catch |err|
                 return zcu.codegenFail(func.owner_nav, "emit lazy symbol: {t}", .{err})
         else
             return zcu.codegenFail(func.owner_nav, "external symbols unimplemented for {s}", .{@tagName(lf.tag)}),

@@ -46,6 +46,7 @@ pub const Index = enum(u32) {
 
 pub const User = union(enum) {
     dwarf: *@import("Dwarf.zig"),
+    elf2: *@import("Elf2.zig"),
     c: *@import("C.zig"),
     llvm: @import("../codegen/llvm.zig").Object.Ptr,
 
@@ -73,7 +74,7 @@ pub const User = union(enum) {
         pt: Zcu.PerThread,
         index: Index,
         val: InternPool.Index,
-    ) Allocator.Error!void {
+    ) link.Error!void {
         switch (user) {
             inline else => |impl| return impl.updateConst(pt, index, val),
         }
@@ -89,7 +90,7 @@ pub const User = union(enum) {
         pt: Zcu.PerThread,
         index: Index,
         val: InternPool.Index,
-    ) Allocator.Error!void {
+    ) link.Error!void {
         switch (user) {
             inline else => |impl| return impl.updateConstIncomplete(pt, index, val),
         }
@@ -128,7 +129,7 @@ pub fn updateContainerType(
     user: User,
     container_ty: InternPool.Index,
     success: bool,
-) Allocator.Error!void {
+) link.Error!void {
     if (success) {
         const gpa = pt.zcu.comp.gpa;
         try pool.complete_containers.put(gpa, container_ty, {});
@@ -160,13 +161,16 @@ pub fn get(pool: *ConstPool, pt: Zcu.PerThread, user: User, val: InternPool.Inde
     }
     return index;
 }
-pub fn flushPending(pool: *ConstPool, pt: Zcu.PerThread, user: User) Allocator.Error!void {
+pub fn getIfExists(pool: *ConstPool, val: InternPool.Index) ?ConstPool.Index {
+    return @fromBackingInt(@intCast(pool.values.getIndex(val) orelse return null));
+}
+pub fn flushPending(pool: *ConstPool, pt: Zcu.PerThread, user: User) link.Error!void {
     while (pool.pending.pop()) |pending_ty| {
         try pool.update(pt, user, pending_ty);
     }
 }
 
-fn update(pool: *ConstPool, pt: Zcu.PerThread, user: User, index: ConstPool.Index) Allocator.Error!void {
+fn update(pool: *ConstPool, pt: Zcu.PerThread, user: User, index: ConstPool.Index) link.Error!void {
     const zcu = pt.zcu;
     const ip = &zcu.intern_pool;
     const val = index.val(pool);
@@ -286,5 +290,6 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const InternPool = @import("../InternPool.zig");
+const link = @import("../link.zig");
 const Type = @import("../Type.zig");
 const Zcu = @import("../Zcu.zig");

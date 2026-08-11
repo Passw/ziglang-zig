@@ -4707,7 +4707,7 @@ pub fn callconvSupported(zcu: *Zcu, cc: std.lang.CallingConvention) union(enum) 
     return .ok;
 }
 
-pub const CodegenFailError = error{
+pub const CodegenFailError = Io.Cancelable || error{
     /// Indicates the error message has been already stored at `Zcu.failed_codegen`.
     AlreadyReported,
     OutOfMemory,

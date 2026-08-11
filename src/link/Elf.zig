@@ -1677,9 +1677,7 @@ pub fn updateContainerType(
     ty: InternPool.Index,
     success: bool,
 ) link.Error!void {
-    return self.zigObjectPtr().?.updateContainerType(pt, ty, success) catch |err| switch (err) {
-        error.OutOfMemory => |e| return e,
-    };
+    try self.zigObjectPtr().?.updateContainerType(pt, ty, success);
 }
 
 pub fn updateExports(

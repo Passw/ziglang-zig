@@ -838,7 +838,7 @@ pub const File = struct {
         switch (base.tag) {
             .lld => unreachable,
             else => {},
-            inline .elf, .c => |tag| {
+            inline .elf, .elf2, .c, .coff2 => |tag| {
                 dev.check(tag.devFeature());
                 return @as(*tag.Type(), @fieldParentPtr("base", base)).updateContainerType(pt, ty, success);
             },
@@ -1690,19 +1690,14 @@ pub fn doZcuTask(comp: *Compilation, tid: Zcu.PerThread.Id, task: ZcuTask) void 
             const name = Type.fromInterned(container_update.ty).containerTypeName(ip).toSlice(ip);
             const ty_prog_node = comp.link_prog_node.start(name, 0);
             defer ty_prog_node.end();
-            if (zcu.llvm_object) |llvm_object| {
-                llvm_object.updateContainerType(pt, container_update.ty, container_update.success) catch |err| switch (err) {
-                    error.OutOfMemory => diags.setAllocFailure(),
-                };
-            } else {
-                if (comp.bin_file) |lf| {
-                    lf.updateContainerType(pt, container_update.ty, container_update.success) catch |err| switch (err) {
-                        error.OutOfMemory => diags.setAllocFailure(),
-                        error.Canceled => io.recancel(),
-                        error.AlreadyReported => {},
-                    };
-                }
-            }
+            (if (zcu.llvm_object) |llvm_object|
+                llvm_object.updateContainerType(pt, container_update.ty, container_update.success)
+            else if (comp.bin_file) |lf|
+                lf.updateContainerType(pt, container_update.ty, container_update.success)) catch |err| switch (err) {
+                error.OutOfMemory => diags.setAllocFailure(),
+                error.Canceled => io.recancel(),
+                error.AlreadyReported => {},
+            };
             break :nav null;
         },
         .debug_update_line_number => |ti| nav: {

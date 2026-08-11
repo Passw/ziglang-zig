@@ -1666,7 +1666,7 @@ fn create(
         .global_pending_index = 0,
         .navs = .empty,
         .uavs = .empty,
-        .lazy = .initFill(.{
+        .lazy = comptime .initFill(.{
             .map = .empty,
             .pending_index = 0,
         }),
@@ -3158,7 +3158,7 @@ fn flushSymbolTableEntry(coff: *Coff, index: u32, pt: Zcu.PerThread) !void {
                 },
                 inline .lazy_code, .lazy_const_data => |mi, tag| {
                     const lazy_sym = mi.lazySymbol(coff);
-                    const name = try std.fmt.allocPrint(gpa, "__lazy_{s}_{f}", .{
+                    const name = try gpa.print("__lazy_{s}_{f}", .{
                         @tagName(lazy_sym.kind),
                         Type.fromInterned(lazy_sym.ty).fmt(pt),
                     });
@@ -5488,6 +5488,44 @@ fn updateNavInner(coff: *Coff, pt: Zcu.PerThread, nav_index: InternPool.Nav.Inde
     if (nav.resolved.?.@"linksection".unwrap()) |_| {
         try ni.resizeLeaf(&coff.mf, gpa, si.get(coff).extra.size);
     }
+
+    // The NAV's node is done---now generate any UAVs or lazy code/data which the NAV needs.
+    try coff.genPending(pt);
+}
+
+pub fn updateContainerType(
+    coff: *Coff,
+    pt: Zcu.PerThread,
+    ty: InternPool.Index,
+    success: bool,
+) link.Error!void {
+    if (!success) return;
+    var lazy_it = coff.lazy.iterator();
+    while (lazy_it.next()) |lazy| if (lazy.value.map.getIndex(ty)) |lmi| {
+        if (lazy.value.pending_index <= lmi) continue;
+        // This type has changed on this incremental update, so update the lazy code/data.
+        const lmr: Node.LazyMapRef = .{ .kind = lazy.key, .index = @intCast(lmi) };
+        const kind = switch (lmr.kind) {
+            .code => "code",
+            .const_data => "data",
+        };
+        var name: [std.Progress.Node.max_name_len]u8 = undefined;
+        const sub_prog_node = coff.synth_prog_node.start(
+            std.mem.print(&name, "lazy {s} for {f}", .{
+                kind,
+                Type.fromInterned(ty).fmt(pt),
+            }) catch &name,
+            0,
+        );
+        defer sub_prog_node.end();
+        coff.genLazy(pt, lmr) catch |err| switch (err) {
+            else => |e| return e,
+            error.MappedFileIo => return coff.base.comp.link_diags.fail(
+                "linker failed to lower lazy {s}: {t}",
+                .{ kind, coff.mf.io_err.? },
+            ),
+        };
+    };
 }
 
 pub fn lowerUav(
@@ -5603,10 +5641,13 @@ fn updateFuncInner(
     };
     si.get(coff).extra.size = @intCast(nw.interface.end);
     try si.applyLocationRelocs(coff);
+
+    // The NAV's node is done---now generate any UAVs or lazy code/data which the NAV needs.
+    try coff.genPending(pt);
 }
 
 pub fn updateErrorData(coff: *Coff, pt: Zcu.PerThread) !void {
-    coff.flushLazy(pt, .{
+    coff.genLazy(pt, .{
         .kind = .const_data,
         .index = @intCast(coff.lazy.getPtr(.const_data).map.getIndex(.anyerror_type) orelse return),
     }) catch |err| switch (err) {
@@ -5919,22 +5960,6 @@ fn resolve(coff: *Coff, tid: Zcu.PerThread.Id) !bool {
             };
             break :task;
         }
-        while (coff.pending_uavs.pop()) |pending_uav| {
-            const sub_prog_node = coff.idleProgNode(tid, coff.const_prog_node, .{ .uav = pending_uav.key });
-            defer sub_prog_node.end();
-            coff.flushUav(
-                .{ .zcu = comp.zcu.?, .tid = tid },
-                pending_uav.key,
-                pending_uav.value.alignment,
-            ) catch |err| switch (err) {
-                else => |e| return e,
-                error.MappedFileIo => return comp.link_diags.fail(
-                    "linker failed to lower constant: {t}",
-                    .{coff.mf.io_err.?},
-                ),
-            };
-            break :task;
-        }
         if (coff.pending_input) |pending_iami| {
             const name_slice = pending_iami.member(coff).name.toSlice(coff);
             const sub_prog_node = coff.input_prog_node.start(
@@ -5983,33 +6008,6 @@ fn resolve(coff: *Coff, tid: Zcu.PerThread.Id) !bool {
                 };
             break :task;
         }
-        var lazy_it = coff.lazy.iterator();
-        while (lazy_it.next()) |lazy| if (lazy.value.pending_index < lazy.value.map.count()) {
-            const pt: Zcu.PerThread = .{ .zcu = comp.zcu.?, .tid = tid };
-            const lmr: Node.LazyMapRef = .{ .kind = lazy.key, .index = lazy.value.pending_index };
-            lazy.value.pending_index += 1;
-            const kind = switch (lmr.kind) {
-                .code => "code",
-                .const_data => "data",
-            };
-            var name: [std.Progress.Node.max_name_len]u8 = undefined;
-            const sub_prog_node = coff.synth_prog_node.start(
-                std.mem.print(&name, "lazy {s} for {f}", .{
-                    kind,
-                    Type.fromInterned(lmr.lazySymbol(coff).ty).fmt(pt),
-                }) catch &name,
-                0,
-            );
-            defer sub_prog_node.end();
-            coff.flushLazy(pt, lmr) catch |err| switch (err) {
-                else => |e| return e,
-                error.MappedFileIo => return comp.link_diags.fail(
-                    "linker failed to lower lazy {s}: {t}",
-                    .{ kind, coff.mf.io_err.? },
-                ),
-            };
-            break :task;
-        };
         if (coff.symbol_table.pending_symbol_index < coff.symbol_table.symbols.count()) {
             defer coff.symbol_table.pending_symbol_index += 1;
             const si = coff.symbol_table.symbols.keys()[coff.symbol_table.pending_symbol_index];
@@ -6038,12 +6036,10 @@ fn resolve(coff: *Coff, tid: Zcu.PerThread.Id) !bool {
     }
 
     if (coff.section_merge_pending_index < coff.section_merges.count()) return true;
-    if (coff.pending_uavs.count() > 0) return true;
     if (coff.pending_input != null) return true;
     if (coff.exports_complete and coff.globals.count() > coff.global_pending_index) return true;
     assert(!coff.exports_complete or coff.inputs_complete);
     if (coff.exports_complete and coff.pending_special_symbol != .none) return true;
-    for (&coff.lazy.values) |lazy| if (lazy.map.count() > lazy.pending_index) return true;
     if (coff.symbol_table.pending_symbol_index < coff.symbol_table.symbols.count()) return true;
     return false;
 }
@@ -6153,7 +6149,47 @@ fn idleProgNode(
     }, 0);
 }
 
-fn flushUav(
+fn genPending(coff: *Coff, pt: Zcu.PerThread) Error!void {
+    const comp = pt.zcu.comp;
+    while (coff.pending_uavs.pop()) |pending_uav| {
+        const sub_prog_node = coff.idleProgNode(pt.tid, coff.const_prog_node, .{ .uav = pending_uav.key });
+        defer sub_prog_node.end();
+        coff.genUav(pt, pending_uav.key, pending_uav.value.alignment) catch |err| switch (err) {
+            else => |e| return e,
+            error.MappedFileIo => return comp.link_diags.fail(
+                "linker failed to lower constant: {t}",
+                .{coff.mf.io_err.?},
+            ),
+        };
+    }
+    var lazy_it = coff.lazy.iterator();
+    while (lazy_it.next()) |lazy| if (lazy.value.pending_index < lazy.value.map.count()) {
+        const lmr: Node.LazyMapRef = .{ .kind = lazy.key, .index = lazy.value.pending_index };
+        lazy.value.pending_index += 1;
+        const kind = switch (lmr.kind) {
+            .code => "code",
+            .const_data => "data",
+        };
+        var name: [std.Progress.Node.max_name_len]u8 = undefined;
+        const sub_prog_node = coff.synth_prog_node.start(
+            std.mem.print(&name, "lazy {s} for {f}", .{
+                kind,
+                Type.fromInterned(lmr.lazySymbol(coff).ty).fmt(pt),
+            }) catch &name,
+            0,
+        );
+        defer sub_prog_node.end();
+        coff.genLazy(pt, lmr) catch |err| switch (err) {
+            else => |e| return e,
+            error.MappedFileIo => return comp.link_diags.fail(
+                "linker failed to lower lazy {s}: {t}",
+                .{ kind, coff.mf.io_err.? },
+            ),
+        };
+    };
+}
+
+fn genUav(
     coff: *Coff,
     pt: Zcu.PerThread,
     umi: Node.UavMapIndex,
@@ -6311,7 +6347,7 @@ fn flushGlobal(coff: *Coff, gmi: Node.GlobalMapIndex) !bool {
             .{ name, imp_match }
         else name: {
             try coff.ensureUnusedStringCapacity(imp_prefix.len + name_slice.len);
-            const imp_name = try std.fmt.allocPrint(gpa, imp_prefix ++ "{s}", .{name_slice});
+            const imp_name = try gpa.print(imp_prefix ++ "{s}", .{name_slice});
             defer gpa.free(imp_name);
             break :name .{ coff.getOrPutStringAssumeCapacity(imp_name), true };
         };
@@ -6773,7 +6809,7 @@ fn flushSpecialSymbol(coff: *Coff, pending: SpecialSymbol) !SpecialSymbol {
     };
 }
 
-fn flushLazy(coff: *Coff, pt: Zcu.PerThread, lmr: Node.LazyMapRef) !void {
+fn genLazy(coff: *Coff, pt: Zcu.PerThread, lmr: Node.LazyMapRef) !void {
     const zcu = pt.zcu;
     const gpa = zcu.gpa;
 

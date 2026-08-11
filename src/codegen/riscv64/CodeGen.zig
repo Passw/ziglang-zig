@@ -8349,7 +8349,7 @@ fn wantSafety(func: *Func) bool {
     };
 }
 
-fn fail(func: *const Func, comptime format: []const u8, args: anytype) error{ OutOfMemory, AlreadyReported } {
+fn fail(func: *const Func, comptime format: []const u8, args: anytype) codegen.Error {
     @branchHint(.cold);
     const zcu = func.pt.zcu;
     switch (func.owner) {
@@ -8359,7 +8359,7 @@ fn fail(func: *const Func, comptime format: []const u8, args: anytype) error{ Ou
     return error.AlreadyReported;
 }
 
-fn failMsg(func: *const Func, msg: *ErrorMsg) error{ OutOfMemory, AlreadyReported } {
+fn failMsg(func: *const Func, msg: *ErrorMsg) codegen.Error {
     @branchHint(.cold);
     const zcu = func.pt.zcu;
     switch (func.owner) {

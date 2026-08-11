@@ -182172,7 +182172,7 @@ fn resolveCallingConventionValues(
     return result;
 }
 
-fn fail(cg: *CodeGen, comptime format: []const u8, args: anytype) error{ OutOfMemory, AlreadyReported } {
+fn fail(cg: *CodeGen, comptime format: []const u8, args: anytype) codegen.Error {
     @branchHint(.cold);
     const zcu = cg.pt.zcu;
     return switch (cg.owner) {

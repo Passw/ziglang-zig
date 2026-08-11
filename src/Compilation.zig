@@ -2829,6 +2829,7 @@ pub fn update(comp: *Compilation, main_progress_node: std.Progress.Node) UpdateE
             }
 
             const is_hit = man.hit(main_progress_node) catch |err| switch (err) {
+                error.Canceled, error.OutOfMemory => |e| return e,
                 error.CacheCheckFailed => switch (man.diagnostic) {
                     .none => unreachable,
                     .manifest_create, .manifest_read, .manifest_lock => |e| return comp.setMiscFailure(
@@ -2844,7 +2845,6 @@ pub fn update(comp: *Compilation, main_progress_node: std.Progress.Node) UpdateE
                         });
                     },
                 },
-                error.OutOfMemory, error.Canceled => |e| return e,
                 error.InvalidFormat => return comp.setMiscFailure(
                     .check_whole_cache,
                     "failed to check cache: invalid manifest file format",
@@ -3283,8 +3283,8 @@ fn flush(comp: *Compilation, arena: Allocator) (Io.Cancelable || Allocator.Error
                 .fuzz = comp.config.any_fuzz,
                 .lto = comp.config.lto,
             }) catch |err| switch (err) {
+                error.Canceled, error.OutOfMemory => |e| return e,
                 error.AlreadyReported => {},
-                error.OutOfMemory => |e| return e,
             };
 
             if (zcu_obj_path) |path| {
@@ -3293,8 +3293,8 @@ fn flush(comp: *Compilation, arena: Allocator) (Io.Cancelable || Allocator.Error
                 // `link.Queue` has not called `prelink` because it knew we would want to send that
                 // final link input. It is *our* responsibility to call `prelink` now we're done.
                 comp.bin_file.?.prelink() catch |err| switch (err) {
+                    error.Canceled, error.OutOfMemory => |e| return e,
                     error.AlreadyReported => return,
-                    else => |e| return e,
                 };
             }
         }
@@ -3308,8 +3308,8 @@ fn flush(comp: *Compilation, arena: Allocator) (Io.Cancelable || Allocator.Error
         };
         // This is needed before reading the error flags.
         lf.flush(arena, tid, comp.link_prog_node) catch |err| switch (err) {
+            error.Canceled, error.OutOfMemory => |e| return e,
             error.AlreadyReported => return,
-            error.OutOfMemory, error.Canceled => |e| return e,
         };
     }
 }
