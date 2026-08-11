@@ -192,8 +192,7 @@ fn dbgAdvancePCAndLine(emit: *Emit, line: u32, column: u32) Error!void {
     switch (emit.debug_output) {
         inline .dwarf, .dwarf2 => |dw| {
             if (column != emit.prev_di_column) try dw.setColumn(column);
-            if (delta_line == 0) return; // TODO: fix these edge cases.
-            try dw.advancePcAndLine(delta_line, delta_pc);
+            try dw.advanceLineAndPc(delta_line, delta_pc, false);
             emit.prev_di_line = line;
             emit.prev_di_column = column;
             emit.prev_di_pc = emit.w.end;

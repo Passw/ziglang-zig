@@ -462,20 +462,25 @@ pub fn emitMir(emit: *Emit) Error!void {
             switch (mir_inst.ops) {
                 else => unreachable,
                 .pseudo_dbg_prologue_end_none => switch (emit.debug_output) {
-                    inline .dwarf, .dwarf2 => |dwarf| try dwarf.setPrologueEnd(),
+                    inline .dwarf, .dwarf2 => |dwarf| {
+                        try dwarf.setPrologueEnd();
+                        log.debug("mirDbgPrologueEnd (line={d}, col={d})", .{
+                            emit.prev_di_loc.line, emit.prev_di_loc.column,
+                        });
+                    },
                     .eh_frame, .none => {},
                 },
-                .pseudo_dbg_line_stmt_line_column => try emit.dbgAdvancePcAndLine(.{
+                .pseudo_dbg_line_stmt_line_column => try emit.dbgAdvanceLineAndPc(.{
                     .line = mir_inst.data.line_column.line,
                     .column = mir_inst.data.line_column.column,
                     .is_stmt = true,
                 }),
-                .pseudo_dbg_line_line_column => try emit.dbgAdvancePcAndLine(.{
+                .pseudo_dbg_line_line_column => try emit.dbgAdvanceLineAndPc(.{
                     .line = mir_inst.data.line_column.line,
                     .column = mir_inst.data.line_column.column,
                     .is_stmt = false,
                 }),
-                .pseudo_dbg_epilogue_begin_none => {
+                .pseudo_dbg_epilogue_begin_line_column => {
                     switch (emit.debug_output) {
                         inline .dwarf, .dwarf2 => |dwarf| {
                             try dwarf.setEpilogueBegin();
@@ -485,7 +490,10 @@ pub fn emitMir(emit: *Emit) Error!void {
                         },
                         .eh_frame, .none => {},
                     }
-                    try emit.dbgAdvancePcAndLine(emit.prev_di_loc);
+                    try emit.dbgAdvanceLineAndPc(.{
+                        .line = mir_inst.data.line_column.line,
+                        .column = mir_inst.data.line_column.column,
+                    });
                 },
                 .pseudo_dbg_enter_block_none => switch (emit.debug_output) {
                     inline .dwarf, .dwarf2 => |dwarf| {
@@ -523,6 +531,11 @@ pub fn emitMir(emit: *Emit) Error!void {
                     },
                     .eh_frame, .none => {},
                 },
+                .pseudo_dbg_end_none => try emit.dbgAdvanceLineAndPc(.{
+                    .line = emit.prev_di_loc.line,
+                    .column = emit.prev_di_loc.column,
+                    .end = true,
+                }),
                 .pseudo_dbg_arg_none,
                 .pseudo_dbg_arg_i_s,
                 .pseudo_dbg_arg_i_u,
@@ -974,18 +987,19 @@ const TableReloc = struct {
 const Loc = struct {
     line: u32,
     column: u32,
-    is_stmt: bool,
+    is_stmt: ?bool = null,
+    end: bool = false,
 };
 
-fn dbgAdvancePcAndLine(emit: *Emit, loc: Loc) Error!void {
+fn dbgAdvanceLineAndPc(emit: *Emit, loc: Loc) Error!void {
     switch (emit.debug_output) {
         inline .dwarf, .dwarf2 => |dwarf| {
             const delta_line = @as(i33, loc.line) - @as(i33, emit.prev_di_loc.line);
             const delta_pc: usize = emit.w.end - emit.prev_di_pc;
             log.debug("  (advance pc={d} and line={d})", .{ delta_pc, delta_line });
-            if (loc.is_stmt != emit.prev_di_loc.is_stmt) try dwarf.negateStmt();
+            if (loc.is_stmt) |is_stmt| if (is_stmt != emit.prev_di_loc.is_stmt) try dwarf.negateStmt();
             if (loc.column != emit.prev_di_loc.column) try dwarf.setColumn(loc.column);
-            try dwarf.advancePcAndLine(delta_line, delta_pc);
+            try dwarf.advanceLineAndPc(delta_line, delta_pc, loc.end);
             emit.prev_di_loc = loc;
             emit.prev_di_pc = emit.w.end;
         },

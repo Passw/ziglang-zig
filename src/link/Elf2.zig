@@ -7205,7 +7205,7 @@ fn zcuFilesReadyInner(elf: *Elf, zcu: *Zcu) Error!void {
 fn flushFiles(elf: *Elf) Error!void {
     const gpa = elf.base.comp.gpa;
     if (elf.shndx.debug_line != .UNDEF) for (elf.dwarf.units.keys(), elf.dwarf.units.values()) |mod, *unit| {
-        if (!unit.cleanFilesChanged()) continue;
+        if (!unit.cleanDebugLineHeaderChanged()) continue;
         const debug_line_header_ni = unit.debug_line_header_ni.unwrap().?;
         try debug_line_header_ni.moved(gpa, &elf.mf);
         try debug_line_header_ni.nextMoved(gpa, &elf.mf);

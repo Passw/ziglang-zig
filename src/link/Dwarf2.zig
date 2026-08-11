@@ -24,14 +24,15 @@ debug_str_offsets: StrOffsets,
 pub const AddressSize = enum(u8) { @"32" = 4, @"64" = 8, _ };
 
 pub const Unit = struct {
+    dirs: std.array_hash_map.Auto(Unit.Index, void),
     files: std.array_hash_map.Auto(Zcu.File.Index, void),
-    files_changed: bool,
     frame_ni: MappedFile.Node.Index.Optional,
     cie_ni: MappedFile.Node.Index.Optional,
     debug_info_ni: MappedFile.Node.Index.Optional,
     debug_info_header_ni: MappedFile.Node.Index.Optional,
     debug_line_ni: MappedFile.Node.Index.Optional,
     debug_line_header_ni: MappedFile.Node.Index.Optional,
+    debug_line_header_changed: bool,
     debug_rnglists_ni: MappedFile.Node.Index.Optional,
     debug_rnglists_offset: usize,
 
@@ -47,6 +48,15 @@ pub const Unit = struct {
         }
     };
 
+    pub const DirIndex = enum(u32) {
+        root = 0,
+        _,
+
+        fn get(di: DirIndex, unit: *Unit) Unit.Index {
+            return unit.dirs.keys()[@backingInt(di)];
+        }
+    };
+
     pub const FileIndex = enum(u32) {
         root = 0,
         _,
@@ -56,19 +66,29 @@ pub const Unit = struct {
         }
     };
 
+    fn deinit(unit: *Unit, gpa: std.mem.Allocator) void {
+        unit.dirs.deinit(gpa);
+        unit.files.deinit(gpa);
+        unit.* = undefined;
+    }
+
     fn getFile(
         unit: *Unit,
         gpa: std.mem.Allocator,
+        ui: Unit.Index,
         zfi: Zcu.File.Index,
-    ) std.mem.Allocator.Error!FileIndex {
-        const file_gop = try unit.files.getOrPut(gpa, zfi);
-        if (!file_gop.found_existing) unit.files_changed = true;
-        return @fromBackingInt(@intCast(file_gop.index));
+    ) std.mem.Allocator.Error!struct { DirIndex, FileIndex } {
+        try unit.dirs.ensureUnusedCapacity(gpa, 1);
+        try unit.files.ensureUnusedCapacity(gpa, 1);
+        const dir_gop = unit.dirs.getOrPutAssumeCapacity(ui);
+        const file_gop = unit.files.getOrPutAssumeCapacity(zfi);
+        if (!dir_gop.found_existing or !file_gop.found_existing) unit.debug_line_header_changed = true;
+        return .{ @fromBackingInt(@intCast(dir_gop.index)), @fromBackingInt(@intCast(file_gop.index)) };
     }
 
-    pub fn cleanFilesChanged(unit: *Unit) bool {
-        defer unit.files_changed = false;
-        return unit.files_changed;
+    pub fn cleanDebugLineHeaderChanged(unit: *Unit) bool {
+        defer unit.debug_line_header_changed = false;
+        return unit.debug_line_header_changed;
     }
 };
 
@@ -623,7 +643,6 @@ pub const WipNav = struct {
             const zf = zcu.fileByIndex(zfi);
             const inst_info = ip.getNav(nav).srcInst(ip).resolveFull(ip).?;
             const decl = zf.zir.?.getDeclaration(inst_info.inst);
-            const mod = zf.mod.?;
             const dlw = &debug.line_writer.interface;
             try dlw.writeByte(DW.LNS.extended_op);
             if (zcu.comp.config.incremental) {
@@ -637,20 +656,21 @@ pub const WipNav = struct {
                 try dlw.writeByte(DW.LNS.set_column);
                 try dlw.writeUleb128(func.lbrace_column + 1);
 
-                try debug.advancePcAndLine(func.lbrace_line, 0);
+                try debug.advanceLineAndPc(func.lbrace_line, 0, false);
             } else {
                 try dlw.writeUleb128(1 + @backingInt(dwarf.address_size));
                 try dlw.writeByte(DW.LNE.set_address);
                 try dwarf.symbolAddress(&debug.line_writer, debug.wip_nav.func_si, 0);
 
-                const fi = try dwarf.getUnit(mod).get(dwarf).getFile(zcu.gpa, zfi);
+                const unit = dwarf.getUnit(zf.mod.?);
+                _, const fi = try unit.get(dwarf).getFile(zcu.gpa, unit, zfi);
                 try dlw.writeByte(DW.LNS.set_file);
                 try dlw.writeUleb128(@backingInt(fi));
 
                 try dlw.writeByte(DW.LNS.set_column);
                 try dlw.writeUleb128(func.lbrace_column + 1);
 
-                try debug.advancePcAndLine(@intCast(decl.src_line + func.lbrace_line), 0);
+                try debug.advanceLineAndPc(decl.src_line + func.lbrace_line, 0, false);
             }
         }
 
@@ -678,9 +698,6 @@ pub const WipNav = struct {
         }
         fn finishDebugLine(debug: *Debug) link.EmitError!void {
             const dlw = &debug.line_writer.interface;
-            try dlw.writeByte(DW.LNS.extended_op);
-            try dlw.writeUleb128(1);
-            try dlw.writeByte(DW.LNE.end_sequence);
             try genDebugLinePadding(dlw, dlw.unusedCapacityLen());
         }
 
@@ -773,12 +790,22 @@ pub const WipNav = struct {
             debug.any_children = true;
         }
 
-        pub fn advancePcAndLine(debug: *Debug, delta_line: i33, delta_pc: u64) link.Error!void {
-            return debug.advancePcAndLineInner(delta_line, delta_pc) catch |err| switch (err) {
+        pub fn advanceLineAndPc(
+            debug: *Debug,
+            delta_line: i33,
+            delta_pc: u64,
+            end: bool,
+        ) link.Error!void {
+            return debug.advanceLineAndPcInner(delta_line, delta_pc, end) catch |err| switch (err) {
                 error.WriteFailed => return debug.wip_nav.reportWriteError(&debug.line_writer),
             };
         }
-        fn advancePcAndLineInner(debug: *Debug, delta_line: i33, delta_pc: u64) Writer.Error!void {
+        fn advanceLineAndPcInner(
+            debug: *Debug,
+            delta_line: i33,
+            delta_pc: u64,
+            end: bool,
+        ) Writer.Error!void {
             const dlw = &debug.line_writer.interface;
 
             const header = debug.wip_nav.dwarf.debug_line.header;
@@ -797,20 +824,30 @@ pub const WipNav = struct {
             const op_advance = @divExact(delta_pc, header.minimum_instruction_length) *
                 header.maximum_operations_per_instruction + delta_op;
             const max_op_advance: u9 = (std.math.maxInt(u8) - header.opcode_base) / header.line_range;
-            const remaining_op_advance: u8 = @intCast(if (op_advance >= 2 * max_op_advance) remaining: {
-                try dlw.writeByte(DW.LNS.advance_pc);
-                try dlw.writeUleb128(op_advance);
+            const remaining_op_advance: u8 = @intCast(if (end or
+                op_advance >= 2 * max_op_advance)
+            remaining: {
+                if (op_advance == max_op_advance) {
+                    try dlw.writeByte(DW.LNS.const_add_pc);
+                } else if (op_advance != 0) {
+                    try dlw.writeByte(DW.LNS.advance_pc);
+                    try dlw.writeUleb128(op_advance);
+                } else assert(end);
                 break :remaining 0;
             } else if (op_advance >= max_op_advance) remaining: {
                 try dlw.writeByte(DW.LNS.const_add_pc);
                 break :remaining op_advance - max_op_advance;
             } else op_advance);
 
-            if (remaining_delta_line == 0 and remaining_op_advance == 0)
-                try dlw.writeByte(DW.LNS.copy)
-            else
+            if (remaining_delta_line != 0 or remaining_op_advance != 0) {
+                assert(!end);
                 try dlw.writeByte(@intCast((remaining_delta_line - header.line_base) +
                     (header.line_range * remaining_op_advance) + header.opcode_base));
+            } else if (end) {
+                try dlw.writeByte(DW.LNS.extended_op);
+                try dlw.writeUleb128(1);
+                try dlw.writeByte(DW.LNE.end_sequence);
+            } else try dlw.writeByte(DW.LNS.copy);
         }
 
         pub fn setColumn(debug: *Debug, column: u32) link.Error!void {
@@ -1398,7 +1435,7 @@ pub fn init(lf: *link.File, format: DW.Format) Dwarf {
 pub fn deinit(dwarf: *Dwarf) void {
     const gpa = dwarf.lf.comp.gpa;
     dwarf.const_pool.deinit(gpa);
-    for (dwarf.units.values()) |*unit| unit.files.deinit(gpa);
+    for (dwarf.units.values()) |*unit| unit.deinit(gpa);
     dwarf.units.deinit(gpa);
     dwarf.values.deinit(gpa);
     dwarf.globals.deinit(gpa);
@@ -1414,18 +1451,24 @@ pub fn initUnits(dwarf: *Dwarf, zcu: *Zcu) std.mem.Allocator.Error!void {
         const unit_gop = dwarf.units.getOrPutAssumeCapacity(mod);
         assert(!unit_gop.found_existing);
         unit_gop.value_ptr.* = .{
+            .dirs = .empty,
             .files = .empty,
-            .files_changed = true,
             .frame_ni = .none,
             .cie_ni = .none,
             .debug_info_ni = .none,
             .debug_info_header_ni = .none,
             .debug_line_ni = .none,
             .debug_line_header_ni = .none,
+            .debug_line_header_changed = true,
             .debug_rnglists_ni = .none,
             .debug_rnglists_offset = undefined,
         };
-        assert(try unit_gop.value_ptr.getFile(zcu.gpa, root_zfi) == .root);
+        const root_di, const root_fi = try unit_gop.value_ptr.getFile(
+            zcu.gpa,
+            @fromBackingInt(@intCast(unit_gop.index)),
+            root_zfi,
+        );
+        assert(root_di == .root and root_fi == .root);
     };
 }
 

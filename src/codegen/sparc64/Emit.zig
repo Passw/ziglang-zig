@@ -497,7 +497,7 @@ fn dbgAdvancePCAndLine(emit: *Emit, line: u32, column: u32) !void {
     const delta_pc: usize = emit.w.end - emit.prev_di_pc;
     switch (emit.debug_output) {
         inline .dwarf, .dwarf2 => |dbg_out| {
-            try dbg_out.advancePcAndLine(delta_line, delta_pc);
+            try dbg_out.advanceLineAndPc(delta_line, delta_pc, false);
             emit.prev_di_line = line;
             emit.prev_di_column = column;
             emit.prev_di_pc = emit.w.end;

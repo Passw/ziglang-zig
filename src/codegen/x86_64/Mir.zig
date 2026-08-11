@@ -1519,30 +1519,33 @@ pub const Inst = struct {
         /// Uses `bytes` payload.
         pseudo_cfi_escape_bytes,
 
-        /// End of prologue
+        /// End of prologue.
         /// Uses `none` payload.
         pseudo_dbg_prologue_end_none,
-        /// Update debug line with is_stmt register set
+        /// Update debug line with is_stmt register set.
         /// Uses `line_column` payload.
         pseudo_dbg_line_stmt_line_column,
-        /// Update debug line with is_stmt register clear
+        /// Update debug line with is_stmt register clear.
         /// Uses `line_column` payload.
         pseudo_dbg_line_line_column,
-        /// Start of epilogue
-        /// Uses `none` payload.
-        pseudo_dbg_epilogue_begin_none,
-        /// Start of lexical block
+        /// Start of epilogue.
+        /// Uses `line_column` payload.
+        pseudo_dbg_epilogue_begin_line_column,
+        /// Start of lexical block.
         /// Uses `none` payload.
         pseudo_dbg_enter_block_none,
-        /// End of lexical block
+        /// End of lexical block.
         /// Uses `none` payload.
         pseudo_dbg_leave_block_none,
-        /// Start of inline function
+        /// Start of inline function.
         /// Uses `ip_index` payload.
         pseudo_dbg_enter_inline_func,
-        /// End of inline function
+        /// End of inline function.
         /// Uses `ip_index` payload.
         pseudo_dbg_leave_inline_func,
+        /// End of function.
+        /// Uses `none` payload.
+        pseudo_dbg_end_none,
         /// Local argument.
         /// Uses `none` payload.
         pseudo_dbg_arg_none,

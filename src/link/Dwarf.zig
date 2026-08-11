@@ -1626,15 +1626,25 @@ pub const WipNav = struct {
         wip_nav.any_children = true;
     }
 
-    pub fn advancePcAndLine(wip_nav: *WipNav, delta_line: i33, delta_pc: u64) Allocator.Error!void {
-        return wip_nav.advancePcAndLineWriterError(delta_line, delta_pc) catch |err| switch (err) {
-            error.WriteFailed => error.OutOfMemory,
-        };
-    }
-    fn advancePcAndLineWriterError(
+    pub fn advanceLineAndPc(
         wip_nav: *WipNav,
         delta_line: i33,
         delta_pc: u64,
+        end: bool,
+    ) Allocator.Error!void {
+        return wip_nav.advanceLineAndPcWriterError(
+            delta_line,
+            delta_pc,
+            end,
+        ) catch |err| switch (err) {
+            error.WriteFailed => error.OutOfMemory,
+        };
+    }
+    fn advanceLineAndPcWriterError(
+        wip_nav: *WipNav,
+        delta_line: i33,
+        delta_pc: u64,
+        end: bool,
     ) Writer.Error!void {
         const dlw = &wip_nav.debug_line.writer;
 
@@ -1654,20 +1664,30 @@ pub const WipNav = struct {
         const op_advance = @divExact(delta_pc, header.minimum_instruction_length) *
             header.maximum_operations_per_instruction + delta_op;
         const max_op_advance: u9 = (std.math.maxInt(u8) - header.opcode_base) / header.line_range;
-        const remaining_op_advance: u8 = @intCast(if (op_advance >= 2 * max_op_advance) remaining: {
-            try dlw.writeByte(DW.LNS.advance_pc);
-            try dlw.writeUleb128(op_advance);
+        const remaining_op_advance: u8 = @intCast(if (end or
+            op_advance >= 2 * max_op_advance)
+        remaining: {
+            if (op_advance == max_op_advance) {
+                try dlw.writeByte(DW.LNS.const_add_pc);
+            } else if (op_advance != 0) {
+                try dlw.writeByte(DW.LNS.advance_pc);
+                try dlw.writeUleb128(op_advance);
+            } else assert(end);
             break :remaining 0;
         } else if (op_advance >= max_op_advance) remaining: {
             try dlw.writeByte(DW.LNS.const_add_pc);
             break :remaining op_advance - max_op_advance;
         } else op_advance);
 
-        if (remaining_delta_line == 0 and remaining_op_advance == 0)
-            try dlw.writeByte(DW.LNS.copy)
-        else
+        if (remaining_delta_line != 0 or remaining_op_advance != 0) {
+            assert(!end);
             try dlw.writeByte(@intCast((remaining_delta_line - header.line_base) +
                 (header.line_range * remaining_op_advance) + header.opcode_base));
+        } else if (end) {
+            try dlw.writeByte(DW.LNS.extended_op);
+            try dlw.writeUleb128(1);
+            try dlw.writeByte(DW.LNE.end_sequence);
+        } else try dlw.writeByte(DW.LNS.copy);
     }
 
     pub fn setColumn(wip_nav: *WipNav, column: u32) Allocator.Error!void {
@@ -2773,7 +2793,7 @@ fn initWipNavInner(
                 try dlw.writeByte(DW.LNS.set_column);
                 try dlw.writeUleb128(func.lbrace_column + 1);
 
-                try wip_nav.advancePcAndLine(func.lbrace_line, 0);
+                try wip_nav.advanceLineAndPc(func.lbrace_line, 0, false);
             } else {
                 try dlw.writeUleb128(1 + @backingInt(dwarf.address_size));
                 try dlw.writeByte(DW.LNE.set_address);
@@ -2790,7 +2810,7 @@ fn initWipNavInner(
                 try dlw.writeByte(DW.LNS.set_column);
                 try dlw.writeUleb128(func.lbrace_column + 1);
 
-                try wip_nav.advancePcAndLine(@intCast(decl.src_line + func.lbrace_line), 0);
+                try wip_nav.advanceLineAndPc(decl.src_line + func.lbrace_line, 0, false);
             }
         },
         else => {
@@ -2982,13 +3002,7 @@ fn finishWipNavWriterError(
     log.debug("finishWipNav({f})", .{nav.fqn.fmt(ip)});
 
     try dwarf.debug_info.section.replaceEntry(wip_nav.unit, wip_nav.entry, dwarf, wip_nav.debug_info.written());
-    const dlw = &wip_nav.debug_line.writer;
-    if (dlw.end > 0) {
-        try dlw.writeByte(DW.LNS.extended_op);
-        try dlw.writeUleb128(1);
-        try dlw.writeByte(DW.LNE.end_sequence);
-        try dwarf.debug_line.section.replaceEntry(wip_nav.unit, wip_nav.entry, dwarf, wip_nav.debug_line.written());
-    }
+    try dwarf.debug_line.section.replaceEntry(wip_nav.unit, wip_nav.entry, dwarf, wip_nav.debug_line.written());
     try dwarf.debug_loclists.section.replaceEntry(wip_nav.unit, wip_nav.entry, dwarf, wip_nav.debug_loclists.written());
 
     try dwarf.const_pool.flushPending(pt, .{ .dwarf = dwarf });
