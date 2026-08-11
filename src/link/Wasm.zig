@@ -1374,11 +1374,7 @@ pub const GlobalImport = extern struct {
                 .__tls_base => @tagName(Unpacked.__tls_base),
                 .__tls_size => @tagName(Unpacked.__tls_size),
                 .object_global => |i| i.name(wasm).slice(wasm),
-                inline .uav_obj, .uav_exe => |i| std.mem.print(
-                    buf,
-                    "__anon_{d}",
-                    .{@backingInt(i.key(wasm).*)},
-                ) catch unreachable,
+                inline .uav_obj, .uav_exe => |i| std.mem.print(buf, "__anon_{d}", .{i}) catch unreachable,
                 .nav_obj => |i| i.name(wasm),
                 .nav_exe => |i| i.name(wasm),
             };
@@ -1997,11 +1993,7 @@ pub const ObjectDataImport = extern struct {
                 .__heap_base => @tagName(.__heap_base),
                 .__heap_end => @tagName(.__heap_end),
                 .__wasm_first_page_end => @tagName(.__wasm_first_page_end),
-                inline .uav_exe, .uav_obj => |i| std.mem.print(
-                    buf,
-                    "__anon_{d}",
-                    .{@backingInt(i.key(wasm).*)},
-                ) catch unreachable,
+                inline .uav_exe, .uav_obj => |i| std.mem.print(buf, "__anon_{d}", .{i}) catch unreachable,
                 inline .nav_exe, .nav_obj => |i| i.name(wasm),
             };
         }

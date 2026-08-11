@@ -3108,7 +3108,7 @@ fn ensureMemberSymbol(coff: *Coff, mi: Member.Index, name: String) !void {
     coff.member_prog_node.increaseEstimatedTotalItems(1);
 }
 
-fn flushSymbolTableEntry(coff: *Coff, index: u32, pt: Zcu.PerThread) !void {
+fn flushSymbolTableEntry(coff: *Coff, index: u32) !void {
     assert(!coff.isImage());
     const gpa = coff.base.comp.gpa;
 
@@ -3119,7 +3119,6 @@ fn flushSymbolTableEntry(coff: *Coff, index: u32, pt: Zcu.PerThread) !void {
     assert(sym.ni != .none or sym.gmi != .none);
 
     const entry = coff.symbolTableEntryPtr(sti.*) orelse entry: {
-        var buf: [15]u8 = undefined;
         const symbol_name, const num_aux_symbols: u8, const complex_type: std.coff.ComplexType =
             if (sym.gmi != .none) blk: {
                 const name = sym.gmi.name(coff);
@@ -3148,21 +3147,22 @@ fn flushSymbolTableEntry(coff: *Coff, index: u32, pt: Zcu.PerThread) !void {
                     };
                 },
                 .uav => |umi| {
-                    var w = Io.Writer.fixed(&buf);
-                    w.print("__anon_{x}", .{umi.uavValue(coff)}) catch unreachable;
+                    var name_buf: [std.fmt.count("__anon_{d}", .{std.math.maxInt(u32)})]u8 = undefined;
+                    const name = std.mem.print(&name_buf, "__anon_{d}", .{umi}) catch unreachable;
                     break :blk .{
-                        try coff.getOrPutSymbolName(w.buffered(), null),
+                        try coff.getOrPutSymbolName(name, null),
                         0,
                         .NULL,
                     };
                 },
                 inline .lazy_code, .lazy_const_data => |mi, tag| {
                     const lazy_sym = mi.lazySymbol(coff);
-                    const name = try gpa.print("__lazy_{s}_{f}", .{
-                        @tagName(lazy_sym.kind),
-                        Type.fromInterned(lazy_sym.ty).fmt(pt),
-                    });
-                    defer gpa.free(name);
+                    var name_buf: [
+                        std.fmt.count("__lazy_const_data_{d}", .{std.math.maxInt(u32)})
+                    ]u8 = undefined;
+                    const name = std.mem.print(&name_buf, "__lazy_{t}_{d}", .{
+                        lazy_sym.kind, mi,
+                    }) catch unreachable;
 
                     const string = try coff.getOrPutString(name);
                     break :blk .{
@@ -6023,7 +6023,6 @@ fn resolve(coff: *Coff, tid: Zcu.PerThread.Id) !bool {
             defer sub_prog_node.end();
             coff.flushSymbolTableEntry(
                 coff.symbol_table.pending_symbol_index,
-                .{ .zcu = comp.zcu.?, .tid = tid },
             ) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => |e| return comp.link_diags.fail(

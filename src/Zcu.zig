@@ -348,6 +348,9 @@ codegen_task_pool: CodegenTaskPool,
 
 generation: u32 = 0,
 
+/// Only access from the Sema thread.
+anon_name_counter: u32,
+
 pub const DependencyReason = struct {
     src: LazySrcLoc,
     /// Only populated if this is for a `.type_layout` unit.

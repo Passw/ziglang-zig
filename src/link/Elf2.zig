@@ -3309,11 +3309,8 @@ fn lazySymbolInner(elf: *Elf, pt: Zcu.PerThread, lazy: link.File.LazySymbol) Err
         };
         const node = try shndx.get(elf).ni.addFloatingChild(&elf.mf, gpa, .{});
         var name_buf: [std.fmt.count("__lazy_const_data_{d}", .{std.math.maxInt(u32)})]u8 = undefined;
-        const name = std.mem.print(
-            &name_buf,
-            "__lazy_{t}_{d}",
-            .{ lazy.kind, @backingInt(lazy.ty) },
-        ) catch unreachable;
+        const name = std.mem.print(&name_buf, "__lazy_{t}_{d}", .{ lazy.kind, gop.index }) catch
+            unreachable;
         gop.value_ptr.* = .{
             .lsi = elf.addLocalSymbolAssumeCapacity(.{
                 .node = .wrap(node),
@@ -5921,11 +5918,7 @@ fn uavMapIndex(
             .alignment = resolved_align,
         });
         var name_buf: [std.fmt.count("__anon_{d}", .{std.math.maxInt(u32)})]u8 = undefined;
-        const name = std.mem.print(
-            &name_buf,
-            "__anon_{d}",
-            .{@backingInt(uav_val)},
-        ) catch unreachable;
+        const name = std.mem.print(&name_buf, "__anon_{d}", .{umi}) catch unreachable;
         uav_gop.value_ptr.* = .{
             .lsi = elf.addLocalSymbolAssumeCapacity(.{
                 .node = .wrap(node),

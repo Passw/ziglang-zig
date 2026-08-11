@@ -9503,6 +9503,7 @@ pub const GetFuncInstanceKey = struct {
     is_noinline: bool,
     generic_owner: Index,
     inferred_error_set: bool,
+    anon_name_counter: *u32,
 };
 
 pub fn getFuncInstance(
@@ -9580,6 +9581,7 @@ pub fn getFuncInstance(
         generic_owner,
         func_index,
         func_extra_index,
+        arg.anon_name_counter,
     );
     return gop.put();
 }
@@ -9731,6 +9733,7 @@ fn getFuncInstanceIes(
         generic_owner,
         func_index,
         func_extra_index,
+        arg.anon_name_counter,
     );
 
     func_gop.putFinal(func_index);
@@ -9749,14 +9752,16 @@ fn finishFuncInstance(
     generic_owner: Index,
     func_index: Index,
     func_extra_index: u32,
+    anon_name_counter: *u32,
 ) Allocator.Error!void {
     const fn_owner_nav = ip.getNav(ip.funcDeclInfo(generic_owner).owner_nav);
     const fn_namespace = fn_owner_nav.analysis.?.namespace;
 
     // TODO: improve this name
-    const nav_name = try ip.getOrPutStringFmt(gpa, io, tid, "{f}__anon_{d}", .{
-        fn_owner_nav.name.fmt(ip), @backingInt(func_index),
+    const nav_name = try ip.getOrPutStringFmt(gpa, io, tid, "{f}__func_{d}", .{
+        fn_owner_nav.name.fmt(ip), anon_name_counter.*,
     }, .no_embedded_nulls);
+    anon_name_counter.* += 1;
     const nav_fqn = try ip.namespacePtr(fn_namespace).internFullyQualifiedName(ip, gpa, io, tid, nav_name);
     const nav_index = try ip.createNav(gpa, io, tid, nav_name, nav_fqn, .{
         .type = ip.typeOf(func_index),

@@ -7039,6 +7039,7 @@ fn analyzeCall(
                 .inferred_error_set = fn_zir_info.inferred_error_set,
                 .generic_owner = func_val.?.toIntern(),
                 .comptime_args = comptime_args,
+                .anon_name_counter = &zcu.anon_name_counter,
             });
             if (zcu.comp.debugIncremental()) {
                 const nav = ip.indexToKey(func_instance).func.owner_nav;
@@ -35222,9 +35223,10 @@ pub fn setTypeName(
                 io,
                 pt.tid,
                 "{f}__{s}_{d}",
-                .{ block.type_name_ctx.fmt(ip), anon_prefix, @backingInt(wip.index) },
+                .{ block.type_name_ctx.fmt(ip), anon_prefix, zcu.anon_name_counter },
                 .no_embedded_nulls,
             ), .none);
+            zcu.anon_name_counter += 1;
         },
         .parent => wip.setName(ip, block.type_name_ctx, sema.owner.unwrap().nav_val.toOptional()),
         .func => {

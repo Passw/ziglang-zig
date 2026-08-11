@@ -2101,6 +2101,7 @@ pub fn create(gpa: Allocator, arena: Allocator, io: Io, diag: *CreateDiagnostic,
                 .analysis_roots_buffer = undefined,
                 .analysis_roots_len = 0,
                 .codegen_task_pool = try .init(arena),
+                .anon_name_counter = 0,
             };
             try zcu.init(gpa, io, options.thread_limit);
             break :blk zcu;
