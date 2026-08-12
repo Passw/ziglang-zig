@@ -878,15 +878,27 @@ pub const File = struct {
             const inst = file.zir.?.instructions.get(@backingInt(ti.inst));
             assert(inst.tag == .declaration);
         }
-
         switch (base.tag) {
             .lld => unreachable,
-            .spirv => {},
             .plan9 => unreachable,
-            .elf2, .coff2 => {},
+            .spirv => {},
+            .coff2 => {},
             inline else => |tag| {
                 dev.check(tag.devFeature());
                 return @as(*tag.Type(), @fieldParentPtr("base", base)).updateLineNumber(pt, ti_id);
+            },
+        }
+    }
+
+    fn lostTracking(base: *File, pt: Zcu.PerThread, ti_id: InternPool.TrackedInst.Index) Error!void {
+        assert(base.comp.zcu.?.llvm_object == null);
+        switch (base.tag) {
+            .lld => unreachable,
+            .plan9 => unreachable,
+            else => {},
+            inline .elf2 => |tag| {
+                dev.check(tag.devFeature());
+                return @as(*tag.Type(), @fieldParentPtr("base", base)).lostTracking(pt, ti_id);
             },
         }
     }
@@ -1441,6 +1453,7 @@ pub const ZcuTask = union(enum) {
         success: bool,
     },
     debug_update_line_number: InternPool.TrackedInst.Index,
+    lost_tracking: InternPool.TrackedInst.Index,
 };
 
 pub fn doPrelinkTask(comp: *Compilation, task: PrelinkTask) void {
@@ -1708,6 +1721,19 @@ pub fn doZcuTask(comp: *Compilation, tid: Zcu.PerThread.Id, task: ZcuTask) void 
                     lf.updateLineNumber(pt, ti) catch |err| switch (err) {
                         error.OutOfMemory => diags.setAllocFailure(),
                         else => |e| log.err("update line number failed: {s}", .{@errorName(e)}),
+                    };
+                }
+            }
+            break :nav null;
+        },
+        .lost_tracking => |ti| nav: {
+            const nav_prog_node = comp.link_prog_node.start("Lost tracking", 0);
+            defer nav_prog_node.end();
+            if (pt.zcu.llvm_object == null) {
+                if (comp.bin_file) |lf| {
+                    lf.lostTracking(pt, ti) catch |err| switch (err) {
+                        error.OutOfMemory => diags.setAllocFailure(),
+                        else => |e| log.err("lost tracking failed: {s}", .{@errorName(e)}),
                     };
                 }
             }

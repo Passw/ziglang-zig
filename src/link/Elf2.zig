@@ -253,6 +253,8 @@ input_prog_node: std.Progress.Node,
 const Error = link.Error || error{MappedFileIo};
 
 const Node = union(enum) {
+    deleted,
+
     /// Only used when emitting a static library.
     ///
     /// Contains a header node which is an `.archive_header`.
@@ -642,7 +644,7 @@ const Section = struct {
             }
             const ni = shndx.get(elf).ni;
             if (min_align.compare(.gt, ni.alignment(&elf.mf))) {
-                try ni.realign(&elf.mf, elf.base.comp.gpa, min_align);
+                try ni.realign(elf.base.comp.gpa, &elf.mf, min_align);
             }
             switch (elf.getNode(ni.parent(&elf.mf).unwrap().?)) {
                 .elf => {},
@@ -675,7 +677,7 @@ const Section = struct {
                     break :need_size cur_size + need_additional * ent_size;
                 },
             };
-            try node.ensureMinimumSize(&elf.mf, elf.base.comp.gpa, need_size);
+            try node.ensureMinimumSize(elf.base.comp.gpa, &elf.mf, need_size);
         }
 
         /// Asserts that `rela_shndx` is a `SHT_RELA` section and deletes the `ElfN.Rela` entry at
@@ -2094,7 +2096,7 @@ fn ensureUnusedSymbolCapacity(elf: *Elf, len: u32, kind: enum { all_local, maybe
         const need_node_size: u64 = switch (elf.shdrPtr(.symtab)) {
             inline else => |shdr, class| elf.targetLoad(&shdr.size) + len * @sizeOf(class.ElfN().Sym),
         };
-        try Section.Index.symtab.get(elf).ni.ensureMinimumSize(&elf.mf, gpa, need_node_size);
+        try Section.Index.symtab.get(elf).ni.ensureMinimumSize(gpa, &elf.mf, need_node_size);
     }
 
     switch (kind) {
@@ -2117,7 +2119,7 @@ fn ensureUnusedSymbolCapacity(elf: *Elf, len: u32, kind: enum { all_local, maybe
                 const dynsym_cur_len: u32 = @intCast(@divExact(dynsym_cur_size, dynsym_ent_size));
 
                 const dynsym_need_size: u64 = (dynsym_cur_len + len) * dynsym_ent_size;
-                try elf.shndx.dynsym.get(elf).ni.ensureMinimumSize(&elf.mf, gpa, dynsym_need_size);
+                try elf.shndx.dynsym.get(elf).ni.ensureMinimumSize(gpa, &elf.mf, dynsym_need_size);
 
                 try elf.ensureDynsymHashCapacity(dynsym_cur_len + len);
 
@@ -2150,7 +2152,7 @@ fn ensureDynsymHashCapacity(elf: *Elf, max_dynsym_count: u32) Error!void {
                     // We don't need to add any buckets, but we still need to make sure the section is large
                     // enough to fit `max_dynsym_count` chains.
                     const need_size = @sizeOf(info.Header()) + (nbucket + max_dynsym_count) * 4;
-                    try elf.shndx.hash.get(elf).ni.ensureMinimumSize(&elf.mf, gpa, need_size);
+                    try elf.shndx.hash.get(elf).ni.ensureMinimumSize(gpa, &elf.mf, need_size);
                     return;
                 }
                 // We need more buckets, so we'll have to rebuild the hash table.
@@ -2162,7 +2164,7 @@ fn ensureDynsymHashCapacity(elf: *Elf, max_dynsym_count: u32) Error!void {
 
             {
                 const need_size = @sizeOf(info.Header()) + (new_nbucket + max_dynsym_count) * 4;
-                try elf.shndx.hash.get(elf).ni.ensureMinimumSize(&elf.mf, gpa, need_size);
+                try elf.shndx.hash.get(elf).ni.ensureMinimumSize(gpa, &elf.mf, need_size);
             }
 
             elf.mf.nodes_lock.lock();
@@ -2306,19 +2308,19 @@ fn ensureUnusedPltCapacity(elf: *Elf, len: u32) Error!void {
     // Ensure the `.plt` section's node is big enough:
     {
         const need_size: usize = plt.entry_size * (1 + need_plt_count);
-        try elf.shndx.plt.get(elf).ni.ensureMinimumSize(&elf.mf, gpa, need_size);
+        try elf.shndx.plt.get(elf).ni.ensureMinimumSize(gpa, &elf.mf, need_size);
     }
 
     // If there is a `.got.plt` section, ensure its node is big enough
     if (plt.got_plt) |got_plt| {
         const need_size: usize = elf.targetPtrSize() * (got_plt.header_entries + need_plt_count);
-        try elf.shndx.got_plt.get(elf).ni.ensureMinimumSize(&elf.mf, gpa, need_size);
+        try elf.shndx.got_plt.get(elf).ni.ensureMinimumSize(gpa, &elf.mf, need_size);
     }
 
     // If there is a `.plt.sec` section, ensure its node is big enough
     if (plt.plt_sec) |plt_sec| {
         const need_size: usize = plt_sec.entry_size * need_plt_count;
-        try elf.shndx.plt_sec.get(elf).ni.ensureMinimumSize(&elf.mf, gpa, need_size);
+        try elf.shndx.plt_sec.get(elf).ni.ensureMinimumSize(gpa, &elf.mf, need_size);
     }
 }
 /// Given an index into the PLT, returns whether that PLT entry is dead, meaning it may be reused at
@@ -3244,6 +3246,7 @@ fn classifySymbolValue(elf: *Elf, sym: Symbol.Id) enum {
 
 pub fn symbolForAtom(elf: *Elf, atom: link.File.AtomId) link.File.SymbolId {
     const lsi: Symbol.LocalIndex = switch (elf.getNode(Node.fromAtom(atom))) {
+        .deleted,
         .archive,
         .archive_header,
         .archive_input_member,
@@ -3305,7 +3308,13 @@ fn lazySymbolInner(elf: *Elf, pt: Zcu.PerThread, lazy: link.File.LazySymbol) Err
             .code => .{ .text, .FUNC },
             .const_data => .{ .rodata, .OBJECT },
         };
-        const node = try shndx.get(elf).ni.addFloatingChild(&elf.mf, gpa, .{});
+        const node = elf.addNodeAssumeCapacity(
+            try shndx.get(elf).ni.addFloatingChild(gpa, &elf.mf, .{}),
+            switch (lazy.kind) {
+                .code => .{ .lazy_code = @fromBackingInt(@intCast(gop.index)) },
+                .const_data => .{ .lazy_const_data = @fromBackingInt(@intCast(gop.index)) },
+            },
+        );
         var name_buf: [std.fmt.count("__lazy_const_data_{d}", .{std.math.maxInt(u32)})]u8 = undefined;
         const name = std.mem.print(&name_buf, "__lazy_{t}_{d}", .{ lazy.kind, gop.index }) catch
             unreachable;
@@ -3321,10 +3330,6 @@ fn lazySymbolInner(elf: *Elf, pt: Zcu.PerThread, lazy: link.File.LazySymbol) Err
             .first_symbol_reloc = .none,
             .first_got_reloc = .none,
         };
-        elf.nodes.appendAssumeCapacity(switch (lazy.kind) {
-            .code => .{ .lazy_code = @fromBackingInt(@intCast(gop.index)) },
-            .const_data => .{ .lazy_const_data = @fromBackingInt(@intCast(gop.index)) },
-        });
         elf.base.comp.link_prog_node.increaseEstimatedTotalItems(1);
     }
     const s: Symbol.Id = .local(gop.value_ptr.lsi);
@@ -3583,7 +3588,7 @@ const StringTable = struct {
                 break :size .{ old_size, new_size };
             },
         };
-        try ni.ensureMinimumSize(&elf.mf, gpa, new_size);
+        try ni.ensureMinimumSize(gpa, &elf.mf, new_size);
         const slice = ni.slice(&elf.mf)[old_size..];
         @memcpy(slice[0..key.len], key);
         slice[key.len] = 0;
@@ -4014,21 +4019,21 @@ fn initHeaders(
     try elf.symtab.ensureTotalCapacity(gpa, 1);
 
     if (is_archive) {
-        elf.nodes.appendAssumeCapacity(.archive);
+        const archive_ni = elf.addNodeAssumeCapacity(.root, .archive);
 
-        const archive_ni: MappedFile.Node.Index = .root;
-
-        const archive_header_ni = try archive_ni.addOnlyHeaderChild(&elf.mf, gpa, .{
-            // We intentionally do not set `.alignment = .@"2"` here, because the string table data
-            // in this node does not need to have an aligned length. (This node's offset is aligned
-            // regardless by virtue of it being a header.)
-            .size = std.elf.ARMAG.len + @sizeOf(std.elf.ar_hdr),
-            // The archive header uses 'next_moved' events to resize the "//" member, so that it
-            // absorbs all padding between `archive_header_ni` and the actual object file members.
-            .enable_next_moved = true,
-            .next_moved = true,
-        });
-        elf.nodes.appendAssumeCapacity(.archive_header);
+        const archive_header_ni = elf.addNodeAssumeCapacity(
+            try archive_ni.addOnlyHeaderChild(gpa, &elf.mf, .{
+                // We intentionally do not set `.alignment = .@"2"` here, because the string table data
+                // in this node does not need to have an aligned length. (This node's offset is aligned
+                // regardless by virtue of it being a header.)
+                .size = std.elf.ARMAG.len + @sizeOf(std.elf.ar_hdr),
+                // The archive header uses 'next_moved' events to resize the "//" member, so that it
+                // absorbs all padding between `archive_header_ni` and the actual object file members.
+                .enable_next_moved = true,
+                .next_moved = true,
+            }),
+            .archive_header,
+        );
         const archive_header_slice = archive_header_ni.slice(&elf.mf);
         @memcpy(archive_header_slice[0..std.elf.ARMAG.len], std.elf.ARMAG);
         const strtab_ar_hdr: *std.elf.ar_hdr = @ptrCast(archive_header_slice[std.elf.ARMAG.len..]);
@@ -4042,18 +4047,19 @@ fn initHeaders(
             .ar_fmag = std.elf.ARFMAG.*,
         };
 
-        elf.ni.elf = try archive_ni.addOnlyFooterChild(&elf.mf, gpa, .{
+        elf.ni.elf = elf.addNodeAssumeCapacity(try archive_ni.addOnlyFooterChild(gpa, &elf.mf, .{
             .alignment = node_block_align.max(.@"2"),
             .bubbles_moved = false,
             .resized = true, // ensure that this node's `ar_hdr.ar_size` is updated at least once
-        });
-        elf.nodes.appendAssumeCapacity(.elf);
+        }), .elf);
 
-        const elf_ar_hdr_ni = try archive_ni.addFooterChildBefore(&elf.mf, gpa, .wrap(elf.ni.elf), .{
-            .alignment = .@"2",
-            .size = @sizeOf(std.elf.ar_hdr),
-        });
-        elf.nodes.appendAssumeCapacity(.archive_elf_member_header);
+        const elf_ar_hdr_ni = elf.addNodeAssumeCapacity(
+            try archive_ni.addFooterChildBefore(gpa, &elf.mf, .wrap(elf.ni.elf), .{
+                .alignment = .@"2",
+                .size = @sizeOf(std.elf.ar_hdr),
+            }),
+            .archive_elf_member_header,
+        );
 
         // Must be populated before we call `populateArchiveMemberName` below.
         elf.archive = .{
@@ -4079,10 +4085,7 @@ fn initHeaders(
         defer gpa.free(zcu_member_name);
         // After this call returns, `elf_ar_hdr` is invalidated.
         try elf.populateArchiveMemberName(elf_ar_hdr, zcu_member_name);
-    } else {
-        elf.ni.elf = .root;
-        elf.nodes.appendAssumeCapacity(.elf);
-    }
+    } else elf.ni.elf = elf.addNodeAssumeCapacity(.root, .elf);
 
     const entsize: struct { ph: u32, sh: u32 } = switch (class) {
         .NONE, _ => unreachable,
@@ -4098,69 +4101,65 @@ fn initHeaders(
     if (@"type" != .REL) {
         // This node will contain the ehdr, which must be at the start of the ELF file, so this
         // node must itself be a header of the `.elf` node.
-        elf.ni.rodata = try elf.ni.elf.addOnlyHeaderChild(&elf.mf, gpa, .{
+        elf.ni.rodata = elf.addNodeAssumeCapacity(try elf.ni.elf.addOnlyHeaderChild(gpa, &elf.mf, .{
             // Must be at least `addr_align` for `elf.ni.phdr` to be placed inside this node
             .alignment = node_block_align.max(addr_align),
             .moved = true,
             .bubbles_moved = false,
-        });
-        elf.nodes.appendAssumeCapacity(.{ .segment = phndx.rodata });
+        }), .{ .segment = phndx.rodata });
         elf.phdrs.items[phndx.rodata] = .wrap(elf.ni.rodata);
 
-        elf.ni.phdr = try elf.ni.rodata.addFloatingChild(&elf.mf, gpa, .{
+        elf.ni.phdr = elf.addNodeAssumeCapacity(try elf.ni.rodata.addFloatingChild(gpa, &elf.mf, .{
             .size = @as(u64, phnum) * entsize.ph,
             .alignment = addr_align, // keep in sync with `elf.ni.rodata` alignment above
             .moved = true,
             .resized = true,
             .bubbles_moved = false,
-        });
-        elf.nodes.appendAssumeCapacity(.{ .segment = phndx.phdr });
+        }), .{ .segment = phndx.phdr });
         elf.phdrs.items[phndx.phdr] = .wrap(elf.ni.phdr);
 
-        elf.ni.text = try elf.ni.elf.addFloatingChild(&elf.mf, gpa, .{
+        elf.ni.text = elf.addNodeAssumeCapacity(try elf.ni.elf.addFloatingChild(gpa, &elf.mf, .{
             .alignment = node_block_align,
             .moved = true,
             .bubbles_moved = false,
-        });
-        elf.nodes.appendAssumeCapacity(.{ .segment = phndx.text });
+        }), .{ .segment = phndx.text });
         elf.phdrs.items[phndx.text] = .wrap(elf.ni.text);
 
-        elf.ni.data = try elf.ni.elf.addFloatingChild(&elf.mf, gpa, .{
+        elf.ni.data = elf.addNodeAssumeCapacity(try elf.ni.elf.addFloatingChild(gpa, &elf.mf, .{
             // Must be at least `addr_align` for `elf.ni.data_rel_ro` to be placed inside this node
             .alignment = node_block_align.max(addr_align),
             .moved = true,
             .bubbles_moved = false,
-        });
-        elf.nodes.appendAssumeCapacity(.{ .segment = phndx.data });
+        }), .{ .segment = phndx.data });
         elf.phdrs.items[phndx.data] = .wrap(elf.ni.data);
 
-        if (plt.got_plt == null) {
-            const plt_ni = try elf.ni.elf.addFloatingChild(&elf.mf, gpa, .{
+        if (plt.got_plt == null) elf.phdrs.items[phndx.plt] = .wrap(elf.addNodeAssumeCapacity(
+            try elf.ni.elf.addFloatingChild(gpa, &elf.mf, .{
                 .alignment = node_block_align,
                 .moved = true,
                 .bubbles_moved = false,
-            });
-            elf.nodes.appendAssumeCapacity(.{ .segment = phndx.plt });
-            elf.phdrs.items[phndx.plt] = .wrap(plt_ni);
-        }
+            }),
+            .{ .segment = phndx.plt },
+        ));
 
-        elf.ni.data_rel_ro = try elf.ni.data.addFloatingChild(&elf.mf, gpa, .{
+        elf.ni.data_rel_ro = elf.addNodeAssumeCapacity(try elf.ni.data.addFloatingChild(gpa, &elf.mf, .{
             // Must be at least `addr_align` for the `PT_DYNAMIC` node to be placed inside this one
             // later (if `have_dynamic_section`). Keep in sync with `elf.ni.data` alignment above.
             .alignment = node_block_align.max(addr_align),
             .moved = true,
             .bubbles_moved = false,
-        });
-        elf.nodes.appendAssumeCapacity(.{ .segment = phndx.relro });
+        }), .{ .segment = phndx.relro });
         elf.phdrs.items[phndx.relro] = .wrap(elf.ni.data_rel_ro);
 
         if (comp.config.any_non_single_threaded) {
-            elf.ni.tls = .wrap(try elf.ni.rodata.addFloatingChild(&elf.mf, gpa, .{
-                .alignment = node_block_align,
-                .moved = true,
-                .bubbles_moved = false,
-            }));
-            elf.nodes.appendAssumeCapacity(.{ .segment = phndx.tls });
+            elf.ni.tls = .wrap(elf.addNodeAssumeCapacity(
+                try elf.ni.rodata.addFloatingChild(gpa, &elf.mf, .{
+                    .alignment = node_block_align,
+                    .moved = true,
+                    .bubbles_moved = false,
+                }),
+                .{ .segment = phndx.tls },
+            ));
             elf.phdrs.items[phndx.tls] = elf.ni.tls;
         }
 
@@ -4184,11 +4183,10 @@ fn initHeaders(
                 .REL => elf.ni.elf,
                 .DYN, .EXEC => elf.ni.rodata,
             };
-            elf.ni.ehdr = try parent_ni.addOnlyHeaderChild(&elf.mf, gpa, .{
+            elf.ni.ehdr = elf.addNodeAssumeCapacity(try parent_ni.addOnlyHeaderChild(gpa, &elf.mf, .{
                 .size = @sizeOf(ElfN.Ehdr),
                 .alignment = addr_align,
-            });
-            elf.nodes.appendAssumeCapacity(.ehdr);
+            }), .ehdr);
 
             const ehdr: *ElfN.Ehdr = @ptrCast(@alignCast(elf.ni.ehdr.slice(&elf.mf)));
             ehdr.ident = .{
@@ -4238,13 +4236,12 @@ fn initHeaders(
         },
     }
 
-    elf.ni.shdr = try elf.ni.elf.addFloatingChild(&elf.mf, gpa, .{
+    elf.ni.shdr = elf.addNodeAssumeCapacity(try elf.ni.elf.addFloatingChild(gpa, &elf.mf, .{
         .size = node_block_align.forward(1 * entsize.sh), // as above, only the SHN_UNDEF initially
         .alignment = addr_align.max(node_block_align),
         .moved = true,
         .resized = true,
-    });
-    elf.nodes.appendAssumeCapacity(.shdr);
+    }), .shdr);
 
     switch (class) {
         .NONE, _ => unreachable,
@@ -4298,18 +4295,16 @@ fn initHeaders(
                     .@"align" = @intCast(elf.ni.phdr.alignment(&elf.mf).toByteUnits()),
                 };
 
-                if (maybe_interp) |_| {
-                    phdr[phndx.interp] = .{
-                        .type = .INTERP,
-                        .offset = 0,
-                        .vaddr = 0,
-                        .paddr = 0,
-                        .filesz = 0,
-                        .memsz = 0,
-                        .flags = .{ .R = true },
-                        .@"align" = 1,
-                    };
-                }
+                if (maybe_interp) |_| phdr[phndx.interp] = .{
+                    .type = .INTERP,
+                    .offset = 0,
+                    .vaddr = 0,
+                    .paddr = 0,
+                    .filesz = 0,
+                    .memsz = 0,
+                    .flags = .{ .R = true },
+                    .@"align" = 1,
+                };
 
                 phdr[phndx.rodata] = .{
                     .type = .NULL,
@@ -4567,13 +4562,15 @@ fn initHeaders(
             .node_align = node_block_align,
         });
         if (maybe_interp) |interp| {
-            const interp_ni = try elf.ni.rodata.addFloatingChild(&elf.mf, gpa, .{
-                .size = interp.len + 1,
-                .moved = true,
-                .resized = true,
-                .bubbles_moved = false,
-            });
-            elf.nodes.appendAssumeCapacity(.{ .segment = phndx.interp });
+            const interp_ni = elf.addNodeAssumeCapacity(
+                try elf.ni.rodata.addFloatingChild(gpa, &elf.mf, .{
+                    .size = interp.len + 1,
+                    .moved = true,
+                    .resized = true,
+                    .bubbles_moved = false,
+                }),
+                .{ .segment = phndx.interp },
+            );
             elf.phdrs.items[phndx.interp] = .wrap(interp_ni);
 
             const sec_interp_shndx = try elf.addSection(interp_ni, .{
@@ -4588,12 +4585,14 @@ fn initHeaders(
         }
         if (have_dynamic) {
             assert(elf.ni.data_rel_ro.alignment(&elf.mf).compare(.gte, addr_align));
-            const dynamic_ni = try elf.ni.data_rel_ro.addFloatingChild(&elf.mf, gpa, .{
-                .alignment = addr_align,
-                .moved = true,
-                .bubbles_moved = false,
-            });
-            elf.nodes.appendAssumeCapacity(.{ .segment = phndx.dynamic });
+            const dynamic_ni = elf.addNodeAssumeCapacity(
+                try elf.ni.data_rel_ro.addFloatingChild(gpa, &elf.mf, .{
+                    .alignment = addr_align,
+                    .moved = true,
+                    .bubbles_moved = false,
+                }),
+                .{ .segment = phndx.dynamic },
+            );
             elf.phdrs.items[phndx.dynamic] = .wrap(dynamic_ni);
 
             const dynstr_shndx = try elf.addSection(elf.ni.rodata, .{
@@ -4778,13 +4777,15 @@ fn initHeaders(
             }
         }
         if (have_eh_frame) {
-            elf.ni.gnu_eh_frame = .wrap(try elf.ni.rodata.addFloatingChild(&elf.mf, gpa, .{
-                .size = @sizeOf(Dwarf.EhFrameHdr),
-                .alignment = .@"4",
-                .moved = true,
-                .bubbles_moved = false,
-            }));
-            elf.nodes.appendAssumeCapacity(.{ .segment = phndx.gnu_eh_frame });
+            elf.ni.gnu_eh_frame = .wrap(elf.addNodeAssumeCapacity(
+                try elf.ni.rodata.addFloatingChild(gpa, &elf.mf, .{
+                    .size = @sizeOf(Dwarf.EhFrameHdr),
+                    .alignment = .@"4",
+                    .moved = true,
+                    .bubbles_moved = false,
+                }),
+                .{ .segment = phndx.gnu_eh_frame },
+            ));
             elf.phdrs.items[phndx.gnu_eh_frame] = elf.ni.gnu_eh_frame;
 
             elf.shndx.eh_frame_hdr = try elf.addSection(elf.ni.gnu_eh_frame.unwrap().?, .{
@@ -5106,6 +5107,7 @@ fn getNode(elf: *const Elf, ni: MappedFile.Node.Index) Node {
 /// Asserts that `ni` is a section, input section, copied global, NAV, UAV, or lazy code/data.
 fn getNodeShndx(elf: *const Elf, ni: MappedFile.Node.Index) Section.Index {
     return switch (elf.getNode(ni)) {
+        .deleted,
         .archive,
         .archive_header,
         .archive_input_member,
@@ -5142,6 +5144,7 @@ fn getNodeShndx(elf: *const Elf, ni: MappedFile.Node.Index) Section.Index {
 }
 fn getNodeVAddr(elf: *Elf, ni: MappedFile.Node.Index) u64 {
     return switch (elf.getNode(ni)) {
+        .deleted,
         .archive,
         .archive_header,
         .archive_input_member,
@@ -5179,7 +5182,12 @@ fn getNodeVAddr(elf: *Elf, ni: MappedFile.Node.Index) u64 {
 fn computeNodeVAddr(elf: *Elf, ni: MappedFile.Node.Index) u64 {
     const parent_ni = ni.parent(&elf.mf).unwrap().?;
     const parent_vaddr = parent_vaddr: switch (elf.getNode(parent_ni)) {
-        .archive, .archive_header, .archive_input_member, .archive_elf_member_header => unreachable,
+        .deleted,
+        .archive,
+        .archive_header,
+        .archive_input_member,
+        .archive_elf_member_header,
+        => unreachable,
         .elf => return 0,
         .ehdr, .shdr => unreachable,
         .segment => |phndx| switch (elf.phdrSlice()) {
@@ -5229,6 +5237,7 @@ fn resetNodeRelocs(elf: *Elf, ni: MappedFile.Node.Index) void {
         skip_node_relocs: MappedFile.Node.Index.Optional = .none,
         first_got_reloc: ?*GotReloc.Index = null,
     } = switch (elf.getNode(ni)) {
+        .deleted,
         .archive,
         .archive_header,
         .archive_input_member,
@@ -5284,8 +5293,8 @@ fn resetNodeRelocs(elf: *Elf, ni: MappedFile.Node.Index) void {
         },
         .func_debug_info => |fi| .{
             .first_symbol_reloc = &elf.dwarf_funcs.items[@backingInt(fi)].debug_info_first_symbol_reloc,
-            .skip_symbol_relocs = if (elf.navs.getPtr(fi.nav(&elf.dwarf))) |nav|
-                nav.lsi.index().ptr(elf).node
+            .skip_symbol_relocs = if (elf.navs.getPtr(fi.get(&elf.dwarf).owner_nav)) |owner_nav|
+                owner_nav.lsi.index().ptr(elf).node
             else
                 .none,
             .first_node_reloc = &elf.dwarf_funcs.items[@backingInt(fi)].debug_info_first_node_reloc,
@@ -5875,9 +5884,9 @@ fn navMapIndex(elf: *Elf, zcu: *Zcu, nav_index: InternPool.Nav.Index) Error!Node
             },
         };
         try shndx.ensureAligned(elf, alignment);
-        const node = try shndx.get(elf).ni.addFloatingChild(&elf.mf, gpa, .{
+        const node = elf.addNodeAssumeCapacity(try shndx.get(elf).ni.addFloatingChild(gpa, &elf.mf, .{
             .alignment = alignment,
-        });
+        }), .{ .nav = nmi });
         nav_gop.value_ptr.* = .{
             .lsi = elf.addLocalSymbolAssumeCapacity(.{
                 .node = .wrap(node),
@@ -5890,7 +5899,6 @@ fn navMapIndex(elf: *Elf, zcu: *Zcu, nav_index: InternPool.Nav.Index) Error!Node
             .first_symbol_reloc = .none,
             .first_got_reloc = .none,
         };
-        elf.nodes.appendAssumeCapacity(.{ .nav = nmi });
     }
     return nmi;
 }
@@ -5919,10 +5927,10 @@ fn uavMapIndex(
     if (!uav_gop.found_existing) {
         const shndx: Section.Index = .data_rel_ro; // TODO: it would be better to use `.rodata` if the UAV value doesn't have relocs
         try shndx.ensureAligned(elf, resolved_align);
-        const node = try shndx.get(elf).ni.addFloatingChild(&elf.mf, gpa, .{
+        const node = elf.addNodeAssumeCapacity(try shndx.get(elf).ni.addFloatingChild(gpa, &elf.mf, .{
             .moved = true, // see assert at end of `genUav`
             .alignment = resolved_align,
-        });
+        }), .{ .uav = umi });
         var name_buf: [std.fmt.count("__anon_{d}", .{std.math.maxInt(u32)})]u8 = undefined;
         const name = std.mem.print(&name_buf, "__anon_{d}", .{umi}) catch unreachable;
         uav_gop.value_ptr.* = .{
@@ -5936,7 +5944,6 @@ fn uavMapIndex(
             }),
             .first_symbol_reloc = .none,
         };
-        elf.nodes.appendAssumeCapacity(.{ .uav = umi });
         elf.const_prog_node.increaseEstimatedTotalItems(1);
         elf.pending_uavs.appendAssumeCapacity(umi);
     } else {
@@ -5944,7 +5951,7 @@ fn uavMapIndex(
         const shndx = elf.getNode(node.parent(&elf.mf).unwrap().?).section;
         try shndx.ensureAligned(elf, resolved_align);
         if (resolved_align.order(node.alignment(&elf.mf)).compare(.gt)) {
-            try node.realign(&elf.mf, gpa, resolved_align);
+            try node.realign(gpa, &elf.mf, resolved_align);
         }
     }
     return umi;
@@ -6173,11 +6180,13 @@ fn loadObject(
         };
 
         try elf.nodes.ensureUnusedCapacity(gpa, 1);
-        const new_member_ni = try archive.ni.addFooterChildBefore(&elf.mf, gpa, first_member_oni, .{
-            .size = Alignment.@"2".forward(@sizeOf(std.elf.ar_hdr) + fl.size),
-            .alignment = .@"2",
-        });
-        elf.nodes.appendAssumeCapacity(.{ .archive_input_member = input_index });
+        const new_member_ni = elf.addNodeAssumeCapacity(
+            try archive.ni.addFooterChildBefore(gpa, &elf.mf, first_member_oni, .{
+                .size = Alignment.@"2".forward(@sizeOf(std.elf.ar_hdr) + fl.size),
+                .alignment = .@"2",
+            }),
+            .{ .archive_input_member = input_index },
+        );
         input.extra = .{ .node = new_member_ni };
         elf.input_prog_node.increaseEstimatedTotalItems(1);
 
@@ -6391,22 +6400,20 @@ fn loadObject(
                     .alignment = need_align,
                     .moved = true, // see assert at end of `flushInputSection`
                 };
-                const ni = if (opts.node_fixed) ni: {
-                    const shndx_ni = opts.shndx.get(elf).ni;
-                    const after_oni: MappedFile.Node.Index.Optional = after: {
-                        const last_ni = shndx_ni.last(&elf.mf).unwrap() orelse break :after .none;
-                        break :after switch (last_ni.position(&elf.mf)) {
-                            .header => .wrap(last_ni),
-                            .footer, .floating => .none,
+                const ni = elf.addNodeAssumeCapacity(
+                    if (opts.node_fixed) ni: {
+                        const shndx_ni = opts.shndx.get(elf).ni;
+                        const after_oni: MappedFile.Node.Index.Optional = after: {
+                            const last_ni = shndx_ni.last(&elf.mf).unwrap() orelse break :after .none;
+                            break :after switch (last_ni.position(&elf.mf)) {
+                                .header => .wrap(last_ni),
+                                .footer, .floating => .none,
+                            };
                         };
-                    };
-                    break :ni try shndx_ni.addHeaderChildAfter(&elf.mf, gpa, after_oni, add_node_opts);
-                } else ni: {
-                    break :ni try opts.shndx.get(elf).ni.addFloatingChild(&elf.mf, gpa, add_node_opts);
-                };
-                elf.nodes.appendAssumeCapacity(.{
-                    .input_section = @fromBackingInt(@intCast(elf.input_sections.items.len)),
-                });
+                        break :ni try shndx_ni.addHeaderChildAfter(gpa, &elf.mf, after_oni, add_node_opts);
+                    } else try opts.shndx.get(elf).ni.addFloatingChild(gpa, &elf.mf, add_node_opts),
+                    .{ .input_section = @fromBackingInt(@intCast(elf.input_sections.items.len)) },
+                );
                 section.isi = @fromBackingInt(@intCast(elf.input_sections.items.len));
                 elf.input_sections.addOneAssumeCapacity().* = .{
                     .input = input_index,
@@ -6659,7 +6666,7 @@ fn populateArchiveMemberName(elf: *Elf, member_ar_hdr: *std.elf.ar_hdr, member_n
     // We set the size of the archive header node exactly, because we want padding bytes to go into
     // the root `.archive` node. That way, those bytes could still be used to grow the string table
     // if necessary, but they could also be used for new archive members.
-    try archive_header_ni.resizeLeaf(&elf.mf, gpa, old_archive_header_size + member_name.len + 2);
+    try archive_header_ni.resizeLeaf(gpa, &elf.mf, old_archive_header_size + member_name.len + 2);
 
     const dest_slice = archive_header_ni.slice(&elf.mf)[@intCast(old_archive_header_size)..];
     @memcpy(dest_slice[0 .. dest_slice.len - 2], member_name);
@@ -6811,8 +6818,12 @@ fn loadDso(elf: *Elf, path: std.Build.Cache.Path, fr: *Io.File.Reader) (LoadPars
                             // We have a copy relocation for this global, but the amount of space we
                             // reserved for it could be too small or underaligned!
                             try Section.Index.data.ensureAligned(elf, gop.value_ptr.alignment);
-                            try copied_global.node.resizeLeaf(&elf.mf, gpa, gop.value_ptr.alignment.forward(gop.value_ptr.size));
-                            try copied_global.node.realign(&elf.mf, gpa, gop.value_ptr.alignment);
+                            try copied_global.node.resizeLeaf(
+                                gpa,
+                                &elf.mf,
+                                gop.value_ptr.alignment.forward(gop.value_ptr.size),
+                            );
+                            try copied_global.node.realign(gpa, &elf.mf, gop.value_ptr.alignment);
                             const global_ptr = elf.globalByName(name).?;
                             switch (elf.symPtr(global_ptr.symtab_index)) {
                                 inline else => |sym_ptr| elf.targetStore(&sym_ptr.size, @intCast(gop.value_ptr.size)),
@@ -7034,6 +7045,59 @@ fn prelinkInner(elf: *Elf) Error!void {
             .extra = .{ .file_symbol = zcu_file_symbol },
         };
         elf.input_pending_index += 1;
+
+        try elf.nodes.ensureUnusedCapacity(gpa, 4 + 5);
+
+        elf.dwarf.debug_abbrev.ni = .wrap(elf.addNodeAssumeCapacity(
+            try elf.shndx.debug_abbrev.get(elf).ni.addFloatingChild(gpa, &elf.mf, .{}),
+            .{ .debug_shared = .debug_abbrev },
+        ));
+        elf.dwarf.debug_line_str.ni = .wrap(elf.addNodeAssumeCapacity(
+            try elf.shndx.debug_line_str.get(elf).ni.addFloatingChild(gpa, &elf.mf, .{}),
+            .{ .debug_shared = .debug_line_str },
+        ));
+        elf.dwarf.debug_str.ni = .wrap(elf.addNodeAssumeCapacity(
+            try elf.shndx.debug_str.get(elf).ni.addFloatingChild(gpa, &elf.mf, .{}),
+            .{ .debug_shared = .debug_str },
+        ));
+        elf.dwarf.debug_str_offsets.ni = .wrap(elf.addNodeAssumeCapacity(
+            try elf.shndx.debug_str_offsets.get(elf).ni.addFloatingChild(gpa, &elf.mf, .{}),
+            .{ .debug_shared = .debug_str_offsets },
+        ));
+
+        for ([5]Section.Index{
+            elf.shndx.eh_frame,
+            elf.shndx.debug_frame,
+            elf.shndx.debug_info,
+            elf.shndx.debug_line,
+            elf.shndx.debug_rnglists,
+        }) |debug_shndx| {
+            if (debug_shndx == .UNDEF) continue;
+            const debug_ni = debug_shndx.get(elf).ni;
+            _ = debug_ni.last(&elf.mf).unwrap() orelse continue;
+            const frame_format = debug_shndx.debugFrameFormat(elf);
+            const unit_padding_ni = elf.addNodeAssumeCapacity(
+                try debug_ni.addFloatingChild(gpa, &elf.mf, .{
+                    .alignment = if (frame_format) |_| switch (elf.identClass()) {
+                        .NONE, _ => unreachable,
+                        .@"32" => .@"4",
+                        .@"64" => .@"8",
+                    } else .@"1",
+                    .next_moved = true,
+                    .enable_next_moved = true,
+                }),
+                .unit_padding,
+            );
+            var debug_nw: MappedFile.Node.Writer = undefined;
+            unit_padding_ni.writer(gpa, &elf.mf, &debug_nw);
+            defer debug_nw.deinit();
+            (if (frame_format) |format|
+                elf.dwarf.genDebugFrameCie(&debug_nw.interface, null, format)
+            else
+                elf.dwarf.genUnitPadding(&debug_nw.interface)) catch |err| switch (err) {
+                error.WriteFailed => return debug_nw.err.?,
+            };
+        }
     }
 }
 
@@ -7049,148 +7113,106 @@ pub fn zcuFilesReady(elf: *Elf, zcu: *Zcu) link.Error!void {
 fn zcuFilesReadyInner(elf: *Elf, zcu: *Zcu) Error!void {
     const gpa = zcu.gpa;
 
-    if (elf.dwarf.units.count() == 0) {
-        try elf.dwarf.initUnits(zcu);
-        try elf.nodes.ensureUnusedCapacity(gpa, 4 + 5 + 5 * elf.dwarf.units.count());
-        try elf.dwarf_units.appendNTimes(gpa, .{
-            .frame_cie_first_target_reloc = .none,
-            .debug_info_header_first_target_reloc = .none,
-            .debug_info_header_first_node_reloc = .none,
-            .debug_line_header_first_target_reloc = .none,
-            .debug_line_header_first_node_reloc = .none,
-            .debug_rnglists_first_target_reloc = .none,
-            .debug_rnglists_symbol_relocs = .empty,
-        }, elf.dwarf.units.count());
+    try elf.dwarf.initUnits(zcu);
+    const old_units_len = elf.dwarf_units.items.len;
+    const new_units_len = elf.dwarf.units.count();
+    try elf.dwarf_units.appendNTimes(gpa, .{
+        .frame_cie_first_target_reloc = .none,
+        .debug_info_header_first_target_reloc = .none,
+        .debug_info_header_first_node_reloc = .none,
+        .debug_line_header_first_target_reloc = .none,
+        .debug_line_header_first_node_reloc = .none,
+        .debug_rnglists_first_target_reloc = .none,
+        .debug_rnglists_symbol_relocs = .empty,
+    }, new_units_len - old_units_len);
+    try elf.nodes.ensureUnusedCapacity(gpa, 5 * (new_units_len - old_units_len));
 
-        elf.dwarf.debug_abbrev.ni =
-            .wrap(try elf.shndx.debug_abbrev.get(elf).ni.addFloatingChild(&elf.mf, gpa, .{}));
-        elf.nodes.appendAssumeCapacity(.{ .debug_shared = .debug_abbrev });
+    for (old_units_len.., elf.dwarf.units.values()[old_units_len..]) |unit_index, *unit| {
+        const ui: Dwarf.Unit.Index = @fromBackingInt(@intCast(unit_index));
+        switch (elf.shndx.debug_info) {
+            .UNDEF => {},
+            else => |debug_info_shndx| {
+                const debug_info_ni = elf.addNodeAssumeCapacity(
+                    try debug_info_shndx.get(elf).ni.addFloatingChild(gpa, &elf.mf, .{
+                        .alignment = elf.mf.flags.block_size,
+                        .enable_next_moved = true,
+                    }),
+                    .{ .unit_debug_info = ui },
+                );
+                unit.debug_info_ni = .wrap(debug_info_ni);
 
-        elf.dwarf.debug_line_str.ni =
-            .wrap(try elf.shndx.debug_line_str.get(elf).ni.addFloatingChild(&elf.mf, gpa, .{}));
-        elf.nodes.appendAssumeCapacity(.{ .debug_shared = .debug_line_str });
-
-        elf.dwarf.debug_str.ni =
-            .wrap(try elf.shndx.debug_str.get(elf).ni.addFloatingChild(&elf.mf, gpa, .{}));
-        elf.nodes.appendAssumeCapacity(.{ .debug_shared = .debug_str });
-
-        elf.dwarf.debug_str_offsets.ni =
-            .wrap(try elf.shndx.debug_str_offsets.get(elf).ni.addFloatingChild(&elf.mf, gpa, .{}));
-        elf.nodes.appendAssumeCapacity(.{ .debug_shared = .debug_str_offsets });
-
-        for ([5]Section.Index{
-            elf.shndx.eh_frame,
-            elf.shndx.debug_frame,
-            elf.shndx.debug_info,
-            elf.shndx.debug_line,
-            elf.shndx.debug_rnglists,
-        }) |debug_shndx| {
-            if (debug_shndx == .UNDEF) continue;
-            const debug_ni = debug_shndx.get(elf).ni;
-            _ = debug_ni.last(&elf.mf).unwrap() orelse continue;
-            const frame_format = debug_shndx.debugFrameFormat(elf);
-            const unit_padding_ni = try debug_ni.addFloatingChild(&elf.mf, gpa, .{
-                .alignment = if (frame_format) |_| switch (elf.identClass()) {
-                    .NONE, _ => unreachable,
-                    .@"32" => .@"4",
-                    .@"64" => .@"8",
-                } else .@"1",
-                .next_moved = true,
-                .enable_next_moved = true,
-            });
-            elf.nodes.appendAssumeCapacity(.unit_padding);
-            var debug_nw: MappedFile.Node.Writer = undefined;
-            unit_padding_ni.writer(&elf.mf, gpa, &debug_nw);
-            defer debug_nw.deinit();
-            (if (frame_format) |format|
-                elf.dwarf.genDebugFrameCie(&debug_nw.interface, null, format)
-            else
-                elf.dwarf.genUnitPadding(&debug_nw.interface)) catch |err| switch (err) {
-                error.WriteFailed => return debug_nw.err.?,
-            };
+                unit.debug_info_header_ni = .wrap(elf.addNodeAssumeCapacity(
+                    try debug_info_ni.addOnlyHeaderChild(gpa, &elf.mf, .{
+                        .next_moved = true,
+                        .enable_next_moved = true,
+                    }),
+                    .{ .unit_debug_info_header = ui },
+                ));
+            },
         }
+        switch (elf.shndx.debug_line) {
+            .UNDEF => {},
+            else => |debug_line_shndx| {
+                const debug_line_ni = elf.addNodeAssumeCapacity(
+                    try debug_line_shndx.get(elf).ni.addFloatingChild(gpa, &elf.mf, .{
+                        .alignment = elf.mf.flags.block_size,
+                        .enable_next_moved = true,
+                    }),
+                    .{ .unit_debug_line = ui },
+                );
+                unit.debug_line_ni = .wrap(debug_line_ni);
 
-        for (0.., elf.dwarf.units.values()) |unit_index, *unit| {
-            const ui: Dwarf.Unit.Index = @fromBackingInt(@intCast(unit_index));
-            switch (elf.shndx.debug_info) {
-                .UNDEF => {},
-                else => |debug_info_shndx| {
-                    const debug_info_ni =
-                        try debug_info_shndx.get(elf).ni.addFloatingChild(&elf.mf, gpa, .{
-                            .alignment = elf.mf.flags.block_size,
-                            .enable_next_moved = true,
-                        });
-                    unit.debug_info_ni = .wrap(debug_info_ni);
-                    elf.nodes.appendAssumeCapacity(.{ .unit_debug_info = ui });
-
-                    unit.debug_info_header_ni =
-                        .wrap(try debug_info_ni.addOnlyHeaderChild(&elf.mf, gpa, .{
-                            .next_moved = true,
-                            .enable_next_moved = true,
-                        }));
-                    elf.nodes.appendAssumeCapacity(.{ .unit_debug_info_header = ui });
-                },
-            }
-            switch (elf.shndx.debug_line) {
-                .UNDEF => {},
-                else => |debug_line_shndx| {
-                    const debug_line_ni =
-                        try debug_line_shndx.get(elf).ni.addFloatingChild(&elf.mf, gpa, .{
-                            .alignment = elf.mf.flags.block_size,
-                            .enable_next_moved = true,
-                        });
-                    unit.debug_line_ni = .wrap(debug_line_ni);
-                    elf.nodes.appendAssumeCapacity(.{ .unit_debug_line = ui });
-
-                    unit.debug_line_header_ni =
-                        .wrap(try debug_line_ni.addOnlyHeaderChild(&elf.mf, gpa, .{
-                            // Idle tasks are going to try to keep this up to date before we are able to
-                            // write out the full header, so just reserve space for them to do so.
-                            .size = elf.dwarf.unitLengthSize(),
-                            .enable_next_moved = true,
-                        }));
-                    elf.nodes.appendAssumeCapacity(.{ .unit_debug_line_header = ui });
-                },
-            }
-            switch (elf.shndx.debug_rnglists) {
-                .UNDEF => {},
-                else => |debug_rnglists_shndx| {
-                    unit.debug_rnglists_ni =
-                        .wrap(try debug_rnglists_shndx.get(elf).ni.addFloatingChild(&elf.mf, gpa, .{
-                            .next_moved = true,
-                            .enable_next_moved = true,
-                        }));
-                    elf.nodes.appendAssumeCapacity(.{ .unit_debug_rnglists = ui });
-                },
-            }
+                unit.debug_line_header_ni = .wrap(elf.addNodeAssumeCapacity(
+                    try debug_line_ni.addOnlyHeaderChild(gpa, &elf.mf, .{
+                        // Idle tasks are going to try to keep this up to date before we are able to
+                        // write out the full header, so just reserve space for them to do so.
+                        .size = elf.dwarf.unitLengthSize(),
+                        .enable_next_moved = true,
+                    }),
+                    .{ .unit_debug_line_header = ui },
+                ));
+            },
         }
+        switch (elf.shndx.debug_rnglists) {
+            .UNDEF => {},
+            else => |debug_rnglists_shndx| unit.debug_rnglists_ni = .wrap(elf.addNodeAssumeCapacity(
+                try debug_rnglists_shndx.get(elf).ni.addFloatingChild(gpa, &elf.mf, .{
+                    .next_moved = true,
+                    .enable_next_moved = true,
+                }),
+                .{ .unit_debug_rnglists = ui },
+            )),
+        }
+    }
 
-        for (elf.dwarf.units.keys(), elf.dwarf.units.values()) |mod, *unit| {
-            var drh_nw: MappedFile.Node.Writer = undefined;
-            unit.debug_rnglists_ni.unwrap().?.writer(&elf.mf, gpa, &drh_nw);
-            defer drh_nw.deinit();
-            const debug_rnglists_offsets_table_offset =
-                elf.dwarf.genDebugRnglistsHeader(unit, &drh_nw) catch |err| switch (err) {
-                    else => |e| return e,
-                    error.WriteFailed => return drh_nw.err.?,
-                };
-
-            var dih_nw: MappedFile.Node.Writer = undefined;
-            const debug_info_header_ni = unit.debug_info_header_ni.unwrap().?;
-            debug_info_header_ni.writer(&elf.mf, gpa, &dih_nw);
-            defer dih_nw.deinit();
-            elf.resetNodeRelocs(debug_info_header_ni);
-            elf.dwarf.genDebugInfoHeader(
-                mod,
-                unit,
-                &dih_nw,
-                debug_rnglists_offsets_table_offset,
-                zcu,
-            ) catch |err| switch (err) {
+    for (
+        elf.dwarf.units.keys()[old_units_len..],
+        elf.dwarf.units.values()[old_units_len..],
+    ) |mod, *unit| {
+        var drh_nw: MappedFile.Node.Writer = undefined;
+        unit.debug_rnglists_ni.unwrap().?.writer(gpa, &elf.mf, &drh_nw);
+        defer drh_nw.deinit();
+        const debug_rnglists_offsets_table_offset =
+            elf.dwarf.genDebugRnglistsHeader(unit, &drh_nw) catch |err| switch (err) {
                 else => |e| return e,
-                error.WriteFailed => return dih_nw.err.?,
+                error.WriteFailed => return drh_nw.err.?,
             };
-        }
+
+        var dih_nw: MappedFile.Node.Writer = undefined;
+        const debug_info_header_ni = unit.debug_info_header_ni.unwrap().?;
+        debug_info_header_ni.writer(gpa, &elf.mf, &dih_nw);
+        defer dih_nw.deinit();
+        elf.resetNodeRelocs(debug_info_header_ni);
+        elf.dwarf.genDebugInfoHeader(
+            mod,
+            unit,
+            &dih_nw,
+            debug_rnglists_offsets_table_offset,
+            zcu,
+        ) catch |err| switch (err) {
+            else => |e| return e,
+            error.WriteFailed => return dih_nw.err.?,
+        };
     }
 }
 
@@ -7203,7 +7225,7 @@ fn flushFiles(elf: *Elf) Error!void {
         try debug_line_header_ni.moved(gpa, &elf.mf);
         try debug_line_header_ni.nextMoved(gpa, &elf.mf);
         var dlh_nw: MappedFile.Node.Writer = undefined;
-        debug_line_header_ni.writer(&elf.mf, gpa, &dlh_nw);
+        debug_line_header_ni.writer(gpa, &elf.mf, &dlh_nw);
         defer dlh_nw.deinit();
         elf.resetNodeRelocs(debug_line_header_ni);
         elf.dwarf.genDebugLineHeader(mod, unit, &dlh_nw, elf.base.comp.zcu.?) catch |err| switch (err) {
@@ -7235,7 +7257,7 @@ fn prepareDynamic(elf: *Elf) Error!void {
 
     const dynamic_size = dynamic_len * 2 * elf.targetPtrSize();
 
-    try elf.shndx.dynamic.get(elf).ni.resizeLeaf(&elf.mf, comp.gpa, dynamic_size);
+    try elf.shndx.dynamic.get(elf).ni.resizeLeaf(comp.gpa, &elf.mf, dynamic_size);
     switch (elf.shdrPtr(elf.shndx.dynamic)) {
         inline else => |shdr| elf.targetStore(&shdr.size, @intCast(dynamic_size)),
     }
@@ -7405,17 +7427,20 @@ fn addSection(elf: *Elf, segment_ni: MappedFile.Node.Index, opts: struct {
             break :shndx .{ @fromBackingInt(shndx), @as(u64, elf.targetLoad(&ehdr.shentsize)) * @as(u64, shnum) };
         },
     };
-    try elf.ni.shdr.ensureMinimumSize(&elf.mf, gpa, new_shdr_size);
+    try elf.ni.shdr.ensureMinimumSize(gpa, &elf.mf, new_shdr_size);
     const parent_ni = switch (elf.ehdrType()) {
         .REL => elf.ni.elf,
         .EXEC, .DYN => segment_ni,
     };
     assert(opts.addralign.check(opts.size));
-    const ni = try parent_ni.addFloatingChild(&elf.mf, gpa, .{
+    const ni = elf.addNodeAssumeCapacity(try parent_ni.addFloatingChild(gpa, &elf.mf, .{
         .size = opts.node_align.forward(opts.size),
         .alignment = opts.addralign.max(opts.node_align),
         .resized = opts.size > 0,
         .bubbles_moved = opts.flags.ALLOC,
+    }), switch (opts.manual_size) {
+        false => .{ .section = shndx },
+        true => .{ .section_manual_size = shndx },
     });
     const addr = elf.computeNodeVAddr(ni);
     const lsi: Symbol.LocalIndex = if (opts.flags.ALLOC) elf.addLocalSymbolAssumeCapacity(.{
@@ -7431,10 +7456,6 @@ fn addSection(elf: *Elf, segment_ni: MappedFile.Node.Index, opts: struct {
         .RELA => .{ .free_head = .none },
         else => .{ .shndx = .UNDEF },
     } });
-    elf.nodes.appendAssumeCapacity(switch (opts.manual_size) {
-        false => .{ .section = shndx },
-        true => .{ .section_manual_size = shndx },
-    });
     switch (elf.shdrPtr(shndx)) {
         inline else => |shdr, class| {
             shdr.* = .{
@@ -7505,7 +7526,7 @@ fn ensureUnusedRelocCapacity(elf: *Elf, node: MappedFile.Node.Index, len: usize)
                 .NONE, _ => unreachable,
                 inline else => |ct_class| (elf.got.count() + new_got_entries) * @sizeOf(ct_class.ElfN().Addr),
             };
-            try elf.shndx.got.get(elf).ni.ensureMinimumSize(&elf.mf, gpa, need_got_size);
+            try elf.shndx.got.get(elf).ni.ensureMinimumSize(gpa, &elf.mf, need_got_size);
 
             if (elf.shndx.dynamic != .UNDEF) {
                 try elf.shndx.rela_dyn.relaEnsureAdditionalCapacity(elf, new_got_entries);
@@ -8100,6 +8121,7 @@ fn addGotRelocAssumeCapacity(
 ) void {
     assert(elf.ehdrType() != .REL);
     switch (elf.getNode(node)) {
+        .deleted,
         .archive,
         .archive_header,
         .archive_input_member,
@@ -8361,14 +8383,13 @@ fn maybeAddCopyRelocation(elf: *Elf, global_name: String(.strtab)) Error!bool {
     try Section.Index.data.ensureAligned(elf, dso_global.alignment);
 
     try elf.nodes.ensureUnusedCapacity(gpa, 1);
-    const node = try Section.Index.data.get(elf).ni.addFloatingChild(&elf.mf, gpa, .{
+    const node = try Section.Index.data.get(elf).ni.addFloatingChild(gpa, &elf.mf, .{
         .size = dso_global.alignment.forward(dso_global.size),
         .alignment = dso_global.alignment,
     });
     errdefer comptime unreachable;
 
     const vaddr = elf.computeNodeVAddr(node);
-    elf.nodes.appendAssumeCapacity(.{ .copied_global = global_name });
     const rela_index = elf.shndx.rela_dyn.relaAddOneAssumeCapacity(elf, .{
         .type = .copy(elf),
         .offset = vaddr,
@@ -8423,7 +8444,7 @@ fn updateNavInner(elf: *Elf, pt: Zcu.PerThread, nav_index: InternPool.Nav.Index)
 
     {
         var nw: MappedFile.Node.Writer = undefined;
-        ni.writer(&elf.mf, gpa, &nw);
+        ni.writer(gpa, &elf.mf, &nw);
         defer nw.deinit();
         elf.resetNodeRelocs(ni);
         codegen.generateSymbol(
@@ -8549,16 +8570,16 @@ fn updateFuncInner(
 
     {
         var nw: MappedFile.Node.Writer = undefined;
-        ni.writer(&elf.mf, gpa, &nw);
+        ni.writer(gpa, &elf.mf, &nw);
         defer nw.deinit();
         var debug_output_buf: Dwarf.WipNav.Debug = undefined;
         const debug_output: link.File.DebugInfoOutput, const dwarf_func = debug_output: {
             if (elf.ehdrMachine() != .X86_64) break :debug_output .{ .none, undefined };
             const dwarf = &elf.dwarf;
-            const mod = zcu.navFileScope(func.owner_nav).mod.?;
+            const mod = zcu.fileByIndex(nav.srcInst(ip).resolveFile(ip)).mod.?;
             if (mod.strip and mod.unwind_tables == .none) break :debug_output .{ .none, undefined };
 
-            try elf.nodes.ensureUnusedCapacity(gpa, 5);
+            try elf.nodes.ensureUnusedCapacity(gpa, 4);
             const dwarf_fi = try dwarf.getFunc(func.owner_nav);
 
             const wip_nav = &debug_output_buf.wip_nav;
@@ -8586,27 +8607,28 @@ fn updateFuncInner(
                 .@"64" => .@"8",
             };
             const frame_ni = unit.frame_ni.unwrap() orelse frame_ni: {
-                const frame_ni = try switch (wip_nav.frame_format) {
+                const frame_ni = elf.addNodeAssumeCapacity(try switch (wip_nav.frame_format) {
                     .debug_frame => elf.shndx.debug_frame,
                     .eh_frame => elf.shndx.eh_frame,
-                }.get(elf).ni.addFloatingChild(&elf.mf, gpa, .{
+                }.get(elf).ni.addFloatingChild(gpa, &elf.mf, .{
                     .alignment = frame_align.max(elf.mf.flags.block_size),
                     .enable_next_moved = true,
-                });
+                }), .{ .unit_frame = wip_nav.unit });
                 unit.frame_ni = .wrap(frame_ni);
-                elf.nodes.appendAssumeCapacity(.{ .unit_frame = wip_nav.unit });
                 break :frame_ni frame_ni;
             };
             _ = unit.cie_ni.unwrap() orelse {
-                const cie_ni = try frame_ni.addOnlyHeaderChild(&elf.mf, gpa, .{
-                    .alignment = frame_align,
-                    .next_moved = true,
-                    .enable_next_moved = true,
-                });
+                const cie_ni = elf.addNodeAssumeCapacity(
+                    try frame_ni.addOnlyHeaderChild(gpa, &elf.mf, .{
+                        .alignment = frame_align,
+                        .next_moved = true,
+                        .enable_next_moved = true,
+                    }),
+                    .{ .unit_frame_cie = wip_nav.unit },
+                );
                 unit.cie_ni = .wrap(cie_ni);
-                elf.nodes.appendAssumeCapacity(.{ .unit_frame_cie = wip_nav.unit });
                 var cie_nw: MappedFile.Node.Writer = undefined;
-                cie_ni.writer(&elf.mf, gpa, &cie_nw);
+                cie_ni.writer(gpa, &elf.mf, &cie_nw);
                 defer cie_nw.deinit();
                 dwarf.genDebugFrameCie(&cie_nw.interface, switch (elf.ehdrMachine()) {
                     else => unreachable,
@@ -8621,7 +8643,7 @@ fn updateFuncInner(
                 try fde_ni.nextMoved(gpa, &elf.mf);
                 break :fde_ni fde_ni;
             } else fde_ni: {
-                const fde_ni = try frame_ni.addFloatingChild(&elf.mf, gpa, .{
+                const fde_ni = try frame_ni.addFloatingChild(gpa, &elf.mf, .{
                     .alignment = frame_align,
                     .moved = true,
                     .next_moved = true,
@@ -8630,7 +8652,7 @@ fn updateFuncInner(
                 dwarf_func.fde_ni = .wrap(fde_ni);
                 break :fde_ni fde_ni;
             };
-            fde_ni.writer(&elf.mf, gpa, &wip_nav.fde_writer);
+            fde_ni.writer(gpa, &elf.mf, &wip_nav.fde_writer);
 
             if (mod.strip) break :debug_output .{ .{ .eh_frame = wip_nav }, dwarf_func };
 
@@ -8642,20 +8664,21 @@ fn updateFuncInner(
             const debug_info_ni = dwarf_func.debug_info_ni.unwrap().?;
             try debug_info_ni.moved(gpa, &elf.mf);
             try debug_info_ni.nextMoved(gpa, &elf.mf);
-            debug_info_ni.writer(&elf.mf, gpa, &debug.info_writer);
+            debug_info_ni.writer(gpa, &elf.mf, &debug.info_writer);
 
             const debug_line_ni = dwarf_func.debug_line_ni.unwrap() orelse debug_line_ni: {
-                const debug_line_ni =
-                    try unit.debug_line_ni.unwrap().?.addFloatingChild(&elf.mf, gpa, .{
+                const debug_line_ni = elf.addNodeAssumeCapacity(
+                    try unit.debug_line_ni.unwrap().?.addFloatingChild(gpa, &elf.mf, .{
                         .moved = true,
                         .next_moved = true,
                         .enable_next_moved = true,
-                    });
+                    }),
+                    .{ .func_debug_line = dwarf_fi },
+                );
                 dwarf_func.debug_line_ni = .wrap(debug_line_ni);
-                elf.nodes.appendAssumeCapacity(.{ .func_debug_line = dwarf_fi });
                 break :debug_line_ni debug_line_ni;
             };
-            debug_line_ni.writer(&elf.mf, gpa, &debug.line_writer);
+            debug_line_ni.writer(gpa, &elf.mf, &debug.line_writer);
 
             break :debug_output .{ .{ .dwarf2 = debug }, dwarf_func };
         };
@@ -8705,13 +8728,13 @@ fn updateFuncInner(
                     .debug_frame => elf.shndx.debug_frame,
                     .eh_frame => elf.shndx.eh_frame,
                 }.get(elf).ni;
-                try frame_ni.trimStart(&elf.mf, gpa);
+                try frame_ni.trimStart(gpa, &elf.mf);
                 switch (wip_nav.frame_format) {
                     .debug_frame => {},
                     .eh_frame => {
                         const last_offset, const last_size =
                             frame_ni.last(&elf.mf).unwrap().?.location(&elf.mf).resolve(&elf.mf);
-                        try frame_ni.ensureMinimumSize(&elf.mf, gpa, last_offset + last_size + 4);
+                        try frame_ni.ensureMinimumSize(gpa, &elf.mf, last_offset + last_size + 4);
                     },
                 }
             },
@@ -8721,18 +8744,18 @@ fn updateFuncInner(
                     elf.shndx.debug_info,
                     elf.shndx.debug_line,
                     elf.shndx.debug_rnglists,
-                }) |debug_shndx| try debug_shndx.get(elf).ni.trimStart(&elf.mf, gpa);
+                }) |debug_shndx| try debug_shndx.get(elf).ni.trimStart(gpa, &elf.mf);
                 const unit = debug.wip_nav.unit.get(debug.wip_nav.dwarf);
                 {
                     const debug_info_ni = unit.debug_info_ni.unwrap().?;
                     const last_offset, const last_size =
                         debug_info_ni.last(&elf.mf).unwrap().?.location(&elf.mf).resolve(&elf.mf);
-                    try debug_info_ni.ensureMinimumSize(&elf.mf, gpa, last_offset + last_size +
-                        comptime Dwarf.uleb128Bytes(@backingInt(Dwarf.AbbrevCode.null)) * 2);
+                    try debug_info_ni.ensureMinimumSize(gpa, &elf.mf, last_offset + last_size +
+                        comptime Dwarf.uleb128Size(@backingInt(Dwarf.AbbrevCode.null)) * 2);
                 }
                 {
                     var dr_nw: MappedFile.Node.Writer = undefined;
-                    unit.debug_rnglists_ni.unwrap().?.writer(&elf.mf, gpa, &dr_nw);
+                    unit.debug_rnglists_ni.unwrap().?.writer(gpa, &elf.mf, &dr_nw);
                     defer dr_nw.deinit();
                     const first_symbol_reloc = elf.symbol_relocs.items.len;
                     debug.wip_nav.dwarf.genDebugRnglists(
@@ -8762,6 +8785,25 @@ fn updateFuncInner(
 
     // The NAV's node is done---now generate any UAVs or lazy code/data which the NAV needs.
     try elf.genPending(pt);
+}
+
+pub fn updateLineNumber(elf: *Elf, pt: Zcu.PerThread, src_inst: InternPool.TrackedInst.Index) void {
+    const func = elf.dwarf.funcs.getPtr(src_inst) orelse return;
+    elf.dwarf.updateLineNumber(pt.zcu, src_inst, func.debug_info_ni.unwrap().?.slice(&elf.mf));
+}
+
+pub fn lostTracking(
+    elf: *Elf,
+    _: Zcu.PerThread,
+    src_inst: InternPool.TrackedInst.Index,
+) std.mem.Allocator.Error!void {
+    const func = elf.dwarf.funcs.getPtr(src_inst) orelse return;
+    elf.resetNodeRelocs(func.fde_ni.unwrap().?);
+    elf.resetNodeRelocs(func.debug_info_ni.unwrap().?);
+    elf.resetNodeRelocs(func.debug_line_ni.unwrap().?);
+    try elf.deleteNode(&func.fde_ni);
+    try elf.deleteNode(&func.debug_info_ni);
+    try elf.deleteNode(&func.debug_line_ni);
 }
 
 pub fn updateErrorData(elf: *Elf, pt: Zcu.PerThread) link.Error!void {
@@ -8996,18 +9038,18 @@ pub fn idle(elf: *Elf, tid: Zcu.PerThread.Id) link.Error!bool {
 
             break :task;
         }
-        while (elf.mf.updates.pop()) |ni| {
+        while (elf.mf.updates.pop()) |ni| : (elf.mf.update_prog_node.completeOne()) {
+            if (ni.pendingDelete(&elf.mf)) continue;
             const clean_moved = ni.cleanMoved(&elf.mf);
             const clean_resized = ni.cleanResized(&elf.mf);
             const clean_next_moved = ni.cleanNextMoved(&elf.mf);
-            if (clean_moved or clean_resized or clean_next_moved) {
-                const sub_prog_node = elf.idleProgNode(tid, elf.mf.update_prog_node, elf.getNode(ni));
-                defer sub_prog_node.end();
-                if (clean_moved) try elf.flushMoved(ni);
-                if (clean_resized) try elf.flushResized(ni);
-                if (clean_next_moved) try elf.flushNextMoved(ni);
-                break :task;
-            } else elf.mf.update_prog_node.completeOne();
+            if (!clean_moved and !clean_resized and !clean_next_moved) continue;
+            const sub_prog_node = elf.idleProgNode(tid, elf.mf.update_prog_node, elf.getNode(ni));
+            defer sub_prog_node.end();
+            if (clean_moved) try elf.flushMoved(ni);
+            if (clean_resized) try elf.flushResized(ni);
+            if (clean_next_moved) try elf.flushNextMoved(ni);
+            break :task;
         }
     }
     if (elf.input_sections.items.len > elf.input_section_pending_index) return true;
@@ -9085,7 +9127,7 @@ fn idleProgNode(
                     .func_debug_info => "debug",
                     .func_debug_line => "line",
                 },
-                ip.getNav(fi.nav(&elf.dwarf)).fqn.fmt(ip),
+                ip.getNav(fi.get(&elf.dwarf).owner_nav).fqn.fmt(ip),
             }) catch &name;
         },
     }, 0);
@@ -9109,14 +9151,13 @@ fn genUav(
     pt: Zcu.PerThread,
     umi: Node.UavMapIndex,
 ) Error!void {
-    const comp = elf.base.comp;
-    const gpa = comp.gpa;
+    const gpa = elf.base.comp.gpa;
 
     const uav_val = umi.uavValue(elf);
     const ni = umi.symbol(elf).index().ptr(elf).node.unwrap().?;
 
     var nw: MappedFile.Node.Writer = undefined;
-    ni.writer(&elf.mf, gpa, &nw);
+    ni.writer(gpa, &elf.mf, &nw);
     defer nw.deinit();
     elf.resetNodeRelocs(ni);
     codegen.generateSymbol(
@@ -9150,7 +9191,7 @@ fn genLazy(elf: *Elf, pt: Zcu.PerThread, lmr: Node.LazyMapRef) Error!void {
 
     var required_alignment: InternPool.Alignment = .none;
     var nw: MappedFile.Node.Writer = undefined;
-    ni.writer(&elf.mf, gpa, &nw);
+    ni.writer(gpa, &elf.mf, &nw);
     defer nw.deinit();
     elf.resetNodeRelocs(ni);
     codegen.generateLazySymbol(
@@ -9241,7 +9282,7 @@ fn flushInputSection(elf: *Elf, isi: InputSection.Index) Error!void {
         }),
     };
     var nw: MappedFile.Node.Writer = undefined;
-    isi.node(elf).writer(&elf.mf, gpa, &nw);
+    isi.node(elf).writer(gpa, &elf.mf, &nw);
     defer nw.deinit();
     const n_bytes = nw.interface.sendFileAll(&fr, .limited(@intCast(file_loc.size))) catch |err| switch (err) {
         error.ReadFailed => return diags.fail("failed to read input section '{s}' from \"{f}{f}\": {t}", .{
@@ -9296,17 +9337,12 @@ fn flushMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void
     defer trace.end();
 
     switch (elf.getNode(ni)) {
-        .archive => unreachable,
-        .archive_header => unreachable,
-
-        .archive_input_member,
-        .archive_elf_member_header,
-        .elf,
-        => {
+        .deleted => unreachable,
+        .archive, .archive_header => unreachable,
+        .archive_input_member, .archive_elf_member_header, .elf => {
             assert(elf.archive != null);
             return;
         },
-
         .ehdr, .shdr => elf.flushElfOffset(ni),
         .segment => |phndx| {
             elf.flushElfOffset(ni);
@@ -9570,7 +9606,8 @@ fn flushMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void
         },
         .func_frame_fde => |fi| {
             const dwarf_func = &elf.dwarf_funcs.items[@backingInt(fi)];
-            const mod = elf.base.comp.zcu.?.navFileScope(fi.nav(&elf.dwarf)).mod.?;
+            const zcu = elf.base.comp.zcu.?;
+            const mod = zcu.fileByIndex(fi.srcInst(&elf.dwarf).resolveFile(&zcu.intern_pool)).mod.?;
             switch (mod.unwind_tables) {
                 .none => {},
                 .sync, .async => {
@@ -9594,8 +9631,8 @@ fn flushMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void
             }
             elf.flushMovedNodeRelocs(ni, elf.computeNodeVAddr(ni), .{
                 .first_symbol_reloc = dwarf_func.debug_info_first_symbol_reloc,
-                .skip_symbol_relocs = if (elf.navs.getPtr(fi.nav(&elf.dwarf))) |nav|
-                    nav.lsi.index().ptr(elf).node
+                .skip_symbol_relocs = if (elf.navs.getPtr(fi.get(&elf.dwarf).owner_nav)) |owner_nav|
+                    owner_nav.lsi.index().ptr(elf).node
                 else
                     .none,
                 .first_node_reloc = dwarf_func.debug_info_first_node_reloc,
@@ -9770,6 +9807,7 @@ fn flushResized(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!vo
 
     _, const size = ni.location(&elf.mf).resolve(&elf.mf);
     switch (elf.getNode(ni)) {
+        .deleted => unreachable,
         .archive, .archive_header => {},
         .archive_input_member => unreachable,
         .archive_elf_member_header => unreachable,
@@ -9869,6 +9907,7 @@ fn flushNextMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!
     defer trace.end();
 
     switch (elf.getNode(ni)) {
+        .deleted,
         .archive,
         .archive_input_member,
         .archive_elf_member_header,
@@ -10002,7 +10041,7 @@ fn flushNextMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!
                             switch (tag) {
                                 else => unreachable,
                                 .unit_debug_info_header, .value_debug_info, .global_debug_info, .func_debug_info => {
-                                    comptime assert(Dwarf.uleb128Bytes(@backingInt(Dwarf.AbbrevCode.null)) == 1);
+                                    comptime assert(Dwarf.uleb128Size(@backingInt(Dwarf.AbbrevCode.null)) == 1);
                                     @memset(fw.unusedCapacitySlice(), @backingInt(Dwarf.AbbrevCode.null));
                                 },
                                 .unit_debug_line_header, .func_debug_line => Dwarf.genDebugLinePadding(&fw, fw.unusedCapacityLen()) catch
@@ -10591,10 +10630,10 @@ pub fn printNode(
         .func_frame_fde, .func_debug_info, .func_debug_line => |fi| {
             const zcu = elf.base.comp.zcu.?;
             const ip = &zcu.intern_pool;
-            const nav = ip.getNav(fi.nav(&elf.dwarf));
+            const owner_nav = ip.getNav(fi.get(&elf.dwarf).owner_nav);
             try w.print("({f}, {f})", .{
-                Type.fromInterned(nav.resolved.?.type).fmt(.{ .zcu = zcu, .tid = tid }),
-                nav.fqn.fmt(ip),
+                Type.fromInterned(owner_nav.resolved.?.type).fmt(.{ .zcu = zcu, .tid = tid }),
+                owner_nav.fqn.fmt(ip),
             });
         },
     }
@@ -10655,7 +10694,7 @@ fn ensureSegmentAligned(elf: *Elf, start_phndx: u32, min_align: Alignment) Error
         // Align the actual node
         const seg_ni = elf.phdrs.items[phndx].unwrap().?;
         if (min_align.compare(.gt, seg_ni.alignment(&elf.mf))) {
-            try seg_ni.realign(&elf.mf, gpa, min_align);
+            try seg_ni.realign(gpa, &elf.mf, min_align);
         }
         // Update the phdr `@"align"` field if necessary
         switch (elf.phdrSlice()) {
@@ -10684,6 +10723,21 @@ fn ensureSegmentAligned(elf: *Elf, start_phndx: u32, min_align: Alignment) Error
             else => unreachable,
         }
     }
+}
+
+pub fn addNodeAssumeCapacity(elf: *Elf, ni: MappedFile.Node.Index, node: Node) MappedFile.Node.Index {
+    if (elf.nodes.len - @backingInt(ni) > 0) {
+        assert(elf.getNode(ni) == .deleted);
+        elf.nodes.set(@backingInt(ni), node);
+    } else elf.nodes.appendAssumeCapacity(node);
+    return ni;
+}
+
+fn deleteNode(elf: *Elf, node: *MappedFile.Node.Index.Optional) std.mem.Allocator.Error!void {
+    const ni = node.unwrap().?;
+    try ni.delete(elf.base.comp.gpa, &elf.mf);
+    elf.nodes.set(@backingInt(ni), .deleted);
+    node.* = .none;
 }
 
 /// If `sym` has a PLT entry, returns the address of that entry (specifically, the address which a

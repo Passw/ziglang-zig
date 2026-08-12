@@ -861,6 +861,7 @@ fn updateZirRefs(pt: Zcu.PerThread) (Io.Cancelable || Allocator.Error)!void {
                 log.debug("tracking failed for %{d}", .{old_inst});
                 tracked_inst.inst = .lost;
                 try zcu.markDependeeOutdated(.not_marked_po, .{ .src_hash = tracked_inst_index });
+                try comp.link_queue.enqueueZcu(comp, pt.tid, .{ .lost_tracking = tracked_inst_index });
                 continue;
             };
             tracked_inst.inst = InternPool.TrackedInst.MaybeLost.ZirIndex.wrap(new_inst);
@@ -981,7 +982,7 @@ fn updateZirRefs(pt: Zcu.PerThread) (Io.Cancelable || Allocator.Error)!void {
 /// Ensures that `zcu.fileRootType` on this `file_index` is populated (not `.none`). This implies
 /// that the file's namespace is scanned, discovering declarations.
 ///
-/// Typical Zig compilations begin by claling this function on the root source file of the standard
+/// Typical Zig compilations begin by calling this function on the root source file of the standard
 /// library, `lib/std/std.zig`. The resulting namespace scan discovers a `comptime` declaration in
 /// that file, which is queued for analysis, and everything goes from there.
 pub fn ensureFilePopulated(pt: Zcu.PerThread, file_index: Zcu.File.Index) (Allocator.Error || Io.Cancelable)!void {
