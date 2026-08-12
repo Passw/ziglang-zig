@@ -3728,11 +3728,11 @@ pub fn updateNav(wasm: *Wasm, pt: Zcu.PerThread, nav_index: InternPool.Nav.Index
     }
 }
 
-pub fn updateLineNumber(wasm: *Wasm, pt: Zcu.PerThread, ti_id: InternPool.TrackedInst.Index) link.Error!void {
+pub fn updateLineNumber(wasm: *Wasm, pt: Zcu.PerThread, ti_id: InternPool.TrackedInst.Index, line: u32) link.Error!void {
     const comp = wasm.base.comp;
     const diags = &comp.link_diags;
     if (wasm.dwarf) |*dw| {
-        dw.updateLineNumber(pt.zcu, ti_id) catch |err| switch (err) {
+        dw.updateLineNumber(pt.zcu, ti_id, line) catch |err| switch (err) {
             error.OutOfMemory, error.Canceled, error.AlreadyReported => |e| return e,
             else => |e| return diags.fail("failed to update dwarf line numbers: {s}", .{@errorName(e)}),
         };

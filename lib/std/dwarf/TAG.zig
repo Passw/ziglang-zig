@@ -120,3 +120,4 @@ pub const PGI_interface_block = 0xA020;
 // ZIG extensions.
 pub const ZIG_padding = 0xfdb1;
 pub const ZIG_comptime_value = 0xfdb2;
+pub const ZIG_lost_declaration = 0xfdb3;

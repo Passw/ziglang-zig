@@ -721,12 +721,13 @@ fn updateUav(
     rendered_decl.ctype_deps = try c.addCTypeDependencies(pt, &dg.ctype_deps);
 }
 
-pub fn updateLineNumber(c: *C, pt: Zcu.PerThread, ti_id: InternPool.TrackedInst.Index) error{}!void {
+pub fn updateLineNumber(c: *C, pt: Zcu.PerThread, ti_id: InternPool.TrackedInst.Index, line: u32) error{}!void {
     // The C backend does not currently emit "#line" directives. Even if it did, it would not be
     // capable of updating those line numbers without re-generating the entire declaration.
     _ = c;
     _ = pt;
     _ = ti_id;
+    _ = line;
 }
 
 pub fn flush(c: *C, arena: Allocator, tid: Zcu.PerThread.Id, prog_node: std.Progress.Node) link.Error!void {

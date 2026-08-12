@@ -870,10 +870,11 @@ pub const File = struct {
     /// On an incremental update, fixup the line number of all `Nav`s at the given `TrackedInst`, because
     /// its line number has changed. The ZIR instruction `ti_id` has tag `.declaration`.
     /// Never called when LLVM is codegenning the ZCU.
-    fn updateLineNumber(base: *File, pt: Zcu.PerThread, ti_id: InternPool.TrackedInst.Index) Error!void {
+    fn updateLineNumber(base: *File, pt: Zcu.PerThread, ti_id: InternPool.TrackedInst.Index, line: u32) Error!void {
         assert(pt.zcu.llvm_object == null);
         {
             const ti = ti_id.resolveFull(&pt.zcu.intern_pool).?;
+            assert(ti.inst != .main_struct_inst);
             const file = pt.zcu.fileByIndex(ti.file);
             const inst = file.zir.?.instructions.get(@backingInt(ti.inst));
             assert(inst.tag == .declaration);
@@ -885,7 +886,7 @@ pub const File = struct {
             .coff2 => {},
             inline else => |tag| {
                 dev.check(tag.devFeature());
-                return @as(*tag.Type(), @fieldParentPtr("base", base)).updateLineNumber(pt, ti_id);
+                return @as(*tag.Type(), @fieldParentPtr("base", base)).updateLineNumber(pt, ti_id, line);
             },
         }
     }
@@ -1452,7 +1453,10 @@ pub const ZcuTask = union(enum) {
         ty: InternPool.Index,
         success: bool,
     },
-    debug_update_line_number: InternPool.TrackedInst.Index,
+    debug_update_line_number: struct {
+        inst: InternPool.TrackedInst.Index,
+        line: u32,
+    },
     lost_tracking: InternPool.TrackedInst.Index,
 };
 
@@ -1713,12 +1717,12 @@ pub fn doZcuTask(comp: *Compilation, tid: Zcu.PerThread.Id, task: ZcuTask) void 
             };
             break :nav null;
         },
-        .debug_update_line_number => |ti| nav: {
+        .debug_update_line_number => |line_update| nav: {
             const nav_prog_node = comp.link_prog_node.start("Update line number", 0);
             defer nav_prog_node.end();
             if (pt.zcu.llvm_object == null) {
                 if (comp.bin_file) |lf| {
-                    lf.updateLineNumber(pt, ti) catch |err| switch (err) {
+                    lf.updateLineNumber(pt, line_update.inst, line_update.line) catch |err| switch (err) {
                         error.OutOfMemory => diags.setAllocFailure(),
                         else => |e| log.err("update line number failed: {s}", .{@errorName(e)}),
                     };

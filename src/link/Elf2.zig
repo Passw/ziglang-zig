@@ -501,7 +501,7 @@ const Section = struct {
     ni: MappedFile.Node.Index,
     /// A symbol which is exactly at the start of this section.
     ///
-    /// If the section does not have flag `std.elf.SHF.ALLOC`, this is `.null`.
+    /// When not emitting a relocatable, or for special section types, this is `.null`.
     lsi: Symbol.LocalIndex,
     rela: union {
         /// This field is active if and only if this section is *not* a `SHT_RELA` section.
@@ -848,10 +848,10 @@ const Section = struct {
             }
         }
 
-        /// Asserts that `rela_shndx` is a `SHT_RELA` section, and asserts that `index` refers to an
-        /// `R_*_RELATIVE` relocation inside of it; then, updates that relocation's addend (which is
-        /// an address in this DSO without the runtime load offset applied) to the given value.
-        fn relaSetRelativeOffset(rela_shndx: Index, elf: *Elf, index: RelaIndex, new_addend: u64) void {
+        /// Asserts that `rela_shndx` is a `SHT_RELA` section and updates the `addend` field of the
+        /// `ElfN.Rela` entry at the given index. Asserts that `index` is not in the free-list (i.e.
+        /// it is not deleted).
+        fn relaSetAddend(rela_shndx: Index, elf: *Elf, index: RelaIndex, new_addend: u64) void {
             switch (elf.shdrPtr(rela_shndx)) {
                 inline else => |shdr, class| {
                     assert(elf.targetLoad(&shdr.type) == .RELA);
@@ -1603,6 +1603,20 @@ const SymbolReloc = struct {
         }
     };
 
+    fn flushMovedNode(reloc: *SymbolReloc, elf: *Elf, node_vaddr: u64) void {
+        if (reloc.rela_index.unwrap()) |rela_index| {
+            // The node has moved, so the offset of the relocation within the section might have
+            // changed, so update the `offset` field of the `ElfN.Rela` entry.
+            reloc.relaSection(elf).relaSetOffset(elf, rela_index, node_vaddr + reloc.offset);
+        }
+        // This is not just the inverse of the above condition, because if `reloc` is relative
+        // to the base of this DSO, then `rela_index` is an `R_*_RELATIVE` relocation, but we
+        // still need to call `SymbolReloc.apply` to update that relocation's addend.
+        if (elf.ehdrType() != .REL) {
+            reloc.apply(elf);
+        }
+    }
+
     fn apply(reloc: *SymbolReloc, elf: *Elf) void {
         assert(elf.ehdrType() != .REL);
         if (reloc.node.hasMoved(&elf.mf) or reloc.target.hasMoved(elf)) {
@@ -1688,7 +1702,7 @@ const SymbolReloc = struct {
                 }
                 assert(reloc.type.action.simple.cast == .unsigned);
                 assert(reloc.type.action.simple.shift == .@"0");
-                elf.shndx.rela_dyn.relaSetRelativeOffset(elf, rela_index, target_val);
+                elf.shndx.rela_dyn.relaSetAddend(elf, rela_index, target_val);
                 return;
             },
         };
@@ -1767,30 +1781,58 @@ const NodeReloc = struct {
         }
     };
 
+    fn flushMovedNode(reloc: *NodeReloc, elf: *Elf, node_vaddr: u64) void {
+        if (reloc.rela_index.unwrap()) |rela_index| {
+            assert(elf.ehdrType() == .REL);
+            // The node has moved, so the offset of the relocation within the section might have
+            // changed, so update the `offset` field of the `ElfN.Rela` entry.
+            elf.getNodeShndx(reloc.node).get(elf).rela.shndx.relaSetOffset(elf, rela_index, node_vaddr + reloc.offset);
+        } else {
+            assert(elf.ehdrType() != .REL);
+            reloc.apply(elf);
+        }
+    }
+
+    fn flushMovedTarget(reloc: *NodeReloc, elf: *Elf, target_section_offset: u64) void {
+        if (reloc.rela_index.unwrap()) |rela_index| {
+            assert(elf.ehdrType() == .REL);
+            // The target has moved, so the `addend` field of the `ElfN.Rela` entry needs to be updated.
+            elf.getNodeShndx(reloc.node).get(elf).rela.shndx.relaSetAddend(elf, rela_index, target_section_offset +% @as(u64, @bitCast(reloc.addend)));
+        } else {
+            assert(elf.ehdrType() != .REL);
+            reloc.apply(elf);
+        }
+    }
+
     fn apply(reloc: *NodeReloc, elf: *Elf) void {
-        assert(elf.ehdrType() != .REL);
-        if (reloc.node.hasMoved(&elf.mf) or reloc.target.hasMoved(&elf.mf)) {
-            // There's no point applying the relocation now, because it will be re-applied by
-            // `flushMoved` at some point anyway.
-            return;
-        }
-        switch (reloc.result) {
-            .ok => {},
-            .overflowed => elf.overflowed_reloc_count -= 1,
-            .misaligned => elf.misaligned_reloc_count -= 1,
-        }
-        if (reloc.applyInner(elf)) {
-            @branchHint(.likely);
-            reloc.result = .ok;
-        } else |err| switch (err) {
-            error.RelocationOverflow => {
-                reloc.result = .overflowed;
-                elf.overflowed_reloc_count += 1;
-            },
-            error.RelocationMisaligned => {
-                reloc.result = .misaligned;
-                elf.misaligned_reloc_count += 1;
-            },
+        if (reloc.rela_index.unwrap()) |rela_index| {
+            assert(elf.ehdrType() == .REL);
+            _ = rela_index;
+        } else {
+            assert(elf.ehdrType() != .REL);
+            if (reloc.node.hasMoved(&elf.mf) or reloc.target.hasMoved(&elf.mf)) {
+                // There's no point applying the relocation now, because it will be re-applied by
+                // `flushMoved` at some point anyway.
+                return;
+            }
+            switch (reloc.result) {
+                .ok => {},
+                .overflowed => elf.overflowed_reloc_count -= 1,
+                .misaligned => elf.misaligned_reloc_count -= 1,
+            }
+            if (reloc.applyInner(elf)) {
+                @branchHint(.likely);
+                reloc.result = .ok;
+            } else |err| switch (err) {
+                error.RelocationOverflow => {
+                    reloc.result = .overflowed;
+                    elf.overflowed_reloc_count += 1;
+                },
+                error.RelocationMisaligned => {
+                    reloc.result = .misaligned;
+                    elf.misaligned_reloc_count += 1;
+                },
+            }
         }
     }
     fn applyInner(reloc: *const NodeReloc, elf: *Elf) error{ RelocationOverflow, RelocationMisaligned }!void {
@@ -5220,7 +5262,42 @@ fn computeNodeVAddr(elf: *Elf, ni: MappedFile.Node.Index) u64 {
     const offset, _ = ni.location(&elf.mf).resolve(&elf.mf);
     return parent_vaddr + offset;
 }
-fn getNodeElfOffset(elf: *Elf, ni: MappedFile.Node.Index) u64 {
+fn computeNodeSectionOffset(elf: *Elf, ni: MappedFile.Node.Index) u64 {
+    const parent_ni = ni.parent(&elf.mf).unwrap().?;
+    const parent_section_offset = parent_section_offset: switch (elf.getNode(parent_ni)) {
+        .deleted,
+        .archive,
+        .archive_header,
+        .archive_input_member,
+        .archive_elf_member_header,
+        .elf,
+        .ehdr,
+        .shdr,
+        .segment,
+        => unreachable,
+        .section, .section_manual_size => 0,
+        .input_section, .copied_global => unreachable,
+        .nav, .uav, .lazy_code, .lazy_const_data => unreachable,
+        .debug_shared, .unit_padding => unreachable,
+        .unit_frame, .unit_debug_info, .unit_debug_line => {
+            const parent_section_offset, _ = parent_ni.location(&elf.mf).resolve(&elf.mf);
+            break :parent_section_offset parent_section_offset;
+        },
+        .unit_frame_cie,
+        .unit_debug_info_header,
+        .unit_debug_line_header,
+        .unit_debug_rnglists,
+        .value_debug_info,
+        .global_debug_info,
+        .func_frame_fde,
+        .func_debug_info,
+        .func_debug_line,
+        => unreachable,
+    };
+    const offset, _ = ni.location(&elf.mf).resolve(&elf.mf);
+    return parent_section_offset + offset;
+}
+fn computeNodeElfOffset(elf: *Elf, ni: MappedFile.Node.Index) u64 {
     return ni.fileLocation(&elf.mf, false).offset - elf.ni.elf.fileLocation(&elf.mf, false).offset;
 }
 
@@ -5293,8 +5370,8 @@ fn resetNodeRelocs(elf: *Elf, ni: MappedFile.Node.Index) void {
         },
         .func_debug_info => |fi| .{
             .first_symbol_reloc = &elf.dwarf_funcs.items[@backingInt(fi)].debug_info_first_symbol_reloc,
-            .skip_symbol_relocs = if (elf.navs.getPtr(fi.get(&elf.dwarf).owner_nav)) |owner_nav|
-                owner_nav.lsi.index().ptr(elf).node
+            .skip_symbol_relocs = if (elf.navs.getPtr(fi.nav(&elf.dwarf))) |nav|
+                nav.lsi.index().ptr(elf).node
             else
                 .none,
             .first_node_reloc = &elf.dwarf_funcs.items[@backingInt(fi)].debug_info_first_node_reloc,
@@ -5358,17 +5435,7 @@ fn flushMovedNodeRelocs(
         for (elf.symbol_relocs.items[@backingInt(opts.first_symbol_reloc)..]) |*reloc| {
             if (reloc.node.toOptional() == opts.skip_symbol_relocs) continue;
             if (reloc.node != node) break;
-            if (reloc.rela_index.unwrap()) |rela_index| {
-                // The node has moved, so the offset of the relocation within the section might have
-                // changed, so update the `offset` field of the `ElfN.Rela` entry.
-                reloc.relaSection(elf).relaSetOffset(elf, rela_index, node_vaddr + reloc.offset);
-            }
-            // This is not just the inverse of the above condition, because if `reloc` is relative
-            // to the base of this DSO, then `rela_index` is an `R_*_RELATIVE` relocation, but we
-            // still need to call `SymbolReloc.apply` to update that relocation's addend.
-            if (elf.ehdrType() != .REL) {
-                reloc.apply(elf);
-            }
+            reloc.flushMovedNode(elf, node_vaddr);
         }
     }
 
@@ -5376,15 +5443,7 @@ fn flushMovedNodeRelocs(
         for (elf.node_relocs.items[@backingInt(opts.first_node_reloc)..]) |*reloc| {
             if (reloc.node.toOptional() == opts.skip_node_relocs) continue;
             if (reloc.node != node) break;
-            if (reloc.rela_index.unwrap()) |rela_index| {
-                assert(elf.ehdrType() == .REL);
-                // The node has moved, so the offset of the relocation within the section might have
-                // changed, so update the `offset` field of the `ElfN.Rela` entry.
-                elf.getNodeShndx(reloc.node).get(elf).rela.shndx.relaSetOffset(elf, rela_index, node_vaddr + reloc.offset);
-            } else {
-                assert(elf.ehdrType() != .REL);
-                reloc.apply(elf);
-            }
+            reloc.flushMovedNode(elf, node_vaddr);
         }
     }
 
@@ -7113,7 +7172,7 @@ pub fn zcuFilesReady(elf: *Elf, zcu: *Zcu) link.Error!void {
 fn zcuFilesReadyInner(elf: *Elf, zcu: *Zcu) Error!void {
     const gpa = zcu.gpa;
 
-    try elf.dwarf.initUnits(zcu);
+    try elf.dwarf.updateUnits(zcu);
     const old_units_len = elf.dwarf_units.items.len;
     const new_units_len = elf.dwarf.units.count();
     try elf.dwarf_units.appendNTimes(gpa, .{
@@ -7204,11 +7263,11 @@ fn zcuFilesReadyInner(elf: *Elf, zcu: *Zcu) Error!void {
         defer dih_nw.deinit();
         elf.resetNodeRelocs(debug_info_header_ni);
         elf.dwarf.genDebugInfoHeader(
+            zcu,
             mod,
             unit,
             &dih_nw,
             debug_rnglists_offsets_table_offset,
-            zcu,
         ) catch |err| switch (err) {
             else => |e| return e,
             error.WriteFailed => return dih_nw.err.?,
@@ -7397,7 +7456,11 @@ fn addSection(elf: *Elf, segment_ni: MappedFile.Node.Index, opts: struct {
     const gpa = elf.base.comp.gpa;
     try elf.nodes.ensureUnusedCapacity(gpa, 1);
     try elf.shdrs.ensureUnusedCapacity(gpa, 1);
-    if (opts.flags.ALLOC) try elf.ensureUnusedSymbolCapacity(1, .all_local);
+    const want_symbol = opts.flags.ALLOC or switch (opts.type) {
+        .NULL, .PROGBITS, .NOBITS, .X86_64_UNWIND => elf.ehdrType() == .REL,
+        else => false,
+    };
+    if (want_symbol) try elf.ensureUnusedSymbolCapacity(1, .all_local);
 
     const shstrtab_entry = try elf.string(.shstrtab, opts.name);
     const shndx: Section.Index, const new_shdr_size = shndx: switch (elf.ehdrPtr()) {
@@ -7443,19 +7506,22 @@ fn addSection(elf: *Elf, segment_ni: MappedFile.Node.Index, opts: struct {
         true => .{ .section_manual_size = shndx },
     });
     const addr = elf.computeNodeVAddr(ni);
-    const lsi: Symbol.LocalIndex = if (opts.flags.ALLOC) elf.addLocalSymbolAssumeCapacity(.{
-        .node = .wrap(ni),
-        .name = .empty,
-        .value = addr,
-        .size = 0,
-        .type = .SECTION,
-        .shndx = shndx,
-    }) else .null;
-    elf.shdrs.appendAssumeCapacity(.{ .lsi = lsi, .ni = ni, .rela = switch (opts.type) {
-        .REL => unreachable,
-        .RELA => .{ .free_head = .none },
-        else => .{ .shndx = .UNDEF },
-    } });
+    elf.shdrs.appendAssumeCapacity(.{
+        .lsi = if (want_symbol) elf.addLocalSymbolAssumeCapacity(.{
+            .node = ni.toOptional(),
+            .name = .empty,
+            .value = addr,
+            .size = 0,
+            .type = .SECTION,
+            .shndx = shndx,
+        }) else .null,
+        .ni = ni,
+        .rela = switch (opts.type) {
+            .REL => unreachable,
+            .RELA => .{ .free_head = .none },
+            else => .{ .shndx = .UNDEF },
+        },
+    });
     switch (elf.shdrPtr(shndx)) {
         inline else => |shdr, class| {
             shdr.* = .{
@@ -7463,7 +7529,7 @@ fn addSection(elf: *Elf, segment_ni: MappedFile.Node.Index, opts: struct {
                 .type = opts.type,
                 .flags = .{ .shf = opts.flags },
                 .addr = @intCast(addr),
-                .offset = @intCast(elf.getNodeElfOffset(ni)),
+                .offset = @intCast(elf.computeNodeElfOffset(ni)),
                 .size = @intCast(opts.size),
                 .link = opts.link,
                 .info = opts.info,
@@ -8068,7 +8134,7 @@ fn addNodeRelocAssumeCapacity(
                         .abs32 => .UA32,
                         .abs64 => .UA64,
                     } },
-                    .X86_64 => .{ .SPARC = switch (@"type") {
+                    .X86_64 => .{ .X86_64 = switch (@"type") {
                         .abs32 => .@"32",
                         .abs64 => .@"64",
                     } },
@@ -8078,8 +8144,11 @@ fn addNodeRelocAssumeCapacity(
                 // the section offset now, but there's no point, because `flushMovedNodeRelocs` will
                 // eventually do it for us anyway, so just init to 0.
                 .offset = 0,
-                .raw_sym_index = @backingInt(shndx.get(elf).lsi.index()),
-                .addend = addend,
+                .raw_sym_index = @backingInt(switch (shndx.get(elf).lsi) {
+                    .null => unreachable,
+                    else => |lsi| lsi.index(),
+                }),
+                .addend = 0,
             });
             elf.node_relocs.appendAssumeCapacity(.{
                 .node = node,
@@ -8576,7 +8645,8 @@ fn updateFuncInner(
         const debug_output: link.File.DebugInfoOutput, const dwarf_func = debug_output: {
             if (elf.ehdrMachine() != .X86_64) break :debug_output .{ .none, undefined };
             const dwarf = &elf.dwarf;
-            const mod = zcu.fileByIndex(nav.srcInst(ip).resolveFile(ip)).mod.?;
+            const src_inst = nav.srcInst(ip);
+            const mod = zcu.fileByIndex(src_inst.resolveFile(ip)).mod.?;
             if (mod.strip and mod.unwind_tables == .none) break :debug_output .{ .none, undefined };
 
             try elf.nodes.ensureUnusedCapacity(gpa, 4);
@@ -8662,6 +8732,7 @@ fn updateFuncInner(
             debug.blocks = .empty;
 
             const debug_info_ni = dwarf_func.debug_info_ni.unwrap().?;
+            try dwarf.decls.put(zcu.comp.gpa, src_inst, debug_info_ni);
             try debug_info_ni.moved(gpa, &elf.mf);
             try debug_info_ni.nextMoved(gpa, &elf.mf);
             debug_info_ni.writer(gpa, &elf.mf, &debug.info_writer);
@@ -8787,23 +8858,31 @@ fn updateFuncInner(
     try elf.genPending(pt);
 }
 
-pub fn updateLineNumber(elf: *Elf, pt: Zcu.PerThread, src_inst: InternPool.TrackedInst.Index) void {
-    const func = elf.dwarf.funcs.getPtr(src_inst) orelse return;
-    elf.dwarf.updateLineNumber(pt.zcu, src_inst, func.debug_info_ni.unwrap().?.slice(&elf.mf));
+pub fn updateLineNumber(
+    elf: *Elf,
+    _: Zcu.PerThread,
+    inst: InternPool.TrackedInst.Index,
+    line: u32,
+) void {
+    elf.dwarf.updateLineNumber(&elf.mf, inst, line);
 }
 
 pub fn lostTracking(
     elf: *Elf,
     _: Zcu.PerThread,
-    src_inst: InternPool.TrackedInst.Index,
-) std.mem.Allocator.Error!void {
-    const func = elf.dwarf.funcs.getPtr(src_inst) orelse return;
-    elf.resetNodeRelocs(func.fde_ni.unwrap().?);
-    elf.resetNodeRelocs(func.debug_info_ni.unwrap().?);
-    elf.resetNodeRelocs(func.debug_line_ni.unwrap().?);
-    try elf.deleteNode(&func.fde_ni);
-    try elf.deleteNode(&func.debug_info_ni);
-    try elf.deleteNode(&func.debug_line_ni);
+    inst: InternPool.TrackedInst.Index,
+) link.Error!void {
+    const decl_ni = elf.dwarf.decls.get(inst) orelse return;
+    const comp = elf.base.comp;
+    var diw: std.Io.Writer = .fixed(decl_ni.slice(&elf.mf));
+    elf.resetNodeRelocs(decl_ni);
+    diw.writeUleb128(try elf.dwarf.refAbbrevCode(.decl_lost)) catch unreachable;
+    decl_ni.resizeLeaf(comp.gpa, &elf.mf, diw.end) catch |err| switch (err) {
+        error.MappedFileIo => return comp.link_diags.fail("failed to write output file: {t}", .{
+            elf.mf.io_err.?,
+        }),
+        else => |e| return e,
+    };
 }
 
 pub fn updateErrorData(elf: *Elf, pt: Zcu.PerThread) link.Error!void {
@@ -9127,7 +9206,7 @@ fn idleProgNode(
                     .func_debug_info => "debug",
                     .func_debug_line => "line",
                 },
-                ip.getNav(fi.get(&elf.dwarf).owner_nav).fqn.fmt(ip),
+                ip.getNav(fi.nav(&elf.dwarf)).fqn.fmt(ip),
             }) catch &name;
         },
     }, 0);
@@ -9304,7 +9383,7 @@ fn flushInputSection(elf: *Elf, isi: InputSection.Index) Error!void {
 }
 
 fn flushElfOffset(elf: *Elf, ni: MappedFile.Node.Index) void {
-    const elf_offset = elf.getNodeElfOffset(ni);
+    const elf_offset = elf.computeNodeElfOffset(ni);
     switch (elf.getNode(ni)) {
         else => unreachable,
         .ehdr => assert(elf_offset == 0),
@@ -9508,32 +9587,34 @@ fn flushMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void
             });
         },
         .debug_shared => |ss| {
+            const target_section_offset = elf.computeNodeSectionOffset(ni);
             var target_ri = elf.dwarf_shared.getPtr(ss).first_target_reloc;
             while (target_ri != .none) {
                 const target_reloc = target_ri.get(elf);
                 assert(target_reloc.target == ni);
-                target_reloc.apply(elf);
+                target_reloc.flushMovedTarget(elf, target_section_offset);
                 target_ri = target_reloc.next;
             }
         },
         .unit_padding, .unit_frame, .unit_debug_info, .unit_debug_line => {},
         .unit_frame_cie => |ui| {
-            const dwarf_unit = &elf.dwarf_units.items[@backingInt(ui)];
-            var target_ri = dwarf_unit.frame_cie_first_target_reloc;
+            const target_section_offset = elf.computeNodeSectionOffset(ni);
+            var target_ri = elf.dwarf_units.items[@backingInt(ui)].frame_cie_first_target_reloc;
             while (target_ri != .none) {
                 const target_reloc = target_ri.get(elf);
                 assert(target_reloc.target == ni);
-                target_reloc.apply(elf);
+                target_reloc.flushMovedTarget(elf, target_section_offset);
                 target_ri = target_reloc.next;
             }
         },
         .unit_debug_info_header => |ui| {
             const dwarf_unit = &elf.dwarf_units.items[@backingInt(ui)];
+            const target_section_offset = elf.computeNodeSectionOffset(ni);
             var target_ri = dwarf_unit.debug_info_header_first_target_reloc;
             while (target_ri != .none) {
                 const target_reloc = target_ri.get(elf);
                 assert(target_reloc.target == ni);
-                target_reloc.apply(elf);
+                target_reloc.flushMovedTarget(elf, target_section_offset);
                 target_ri = target_reloc.next;
             }
             elf.flushMovedNodeRelocs(ni, elf.computeNodeVAddr(ni), .{
@@ -9542,11 +9623,12 @@ fn flushMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void
         },
         .unit_debug_line_header => |ui| {
             const dwarf_unit = &elf.dwarf_units.items[@backingInt(ui)];
+            const target_section_offset = elf.computeNodeSectionOffset(ni);
             var target_ri = dwarf_unit.debug_line_header_first_target_reloc;
             while (target_ri != .none) {
                 const target_reloc = target_ri.get(elf);
                 assert(target_reloc.target == ni);
-                target_reloc.apply(elf);
+                target_reloc.flushMovedTarget(elf, target_section_offset);
                 target_ri = target_reloc.next;
             }
             elf.flushMovedNodeRelocs(ni, elf.computeNodeVAddr(ni), .{
@@ -9555,34 +9637,29 @@ fn flushMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void
         },
         .unit_debug_rnglists => |ui| {
             const dwarf_unit = &elf.dwarf_units.items[@backingInt(ui)];
+            const target_section_offset = elf.computeNodeSectionOffset(ni);
             var target_ri = dwarf_unit.debug_rnglists_first_target_reloc;
             while (target_ri != .none) {
                 const target_reloc = target_ri.get(elf);
                 assert(target_reloc.target == ni);
-                target_reloc.apply(elf);
+                target_reloc.flushMovedTarget(elf, target_section_offset);
                 target_ri = target_reloc.next;
             }
             const node_vaddr = elf.computeNodeVAddr(ni);
             for (dwarf_unit.debug_rnglists_symbol_relocs.keys()) |symbol_ri| {
                 const symbol_reloc = symbol_ri.get(elf);
                 assert(symbol_reloc.node == ni);
-                if (symbol_reloc.rela_index.unwrap()) |rela_index| {
-                    // The node has moved, so the offset of the relocation within the section might have
-                    // changed, so update the `offset` field of the `ElfN.Rela` entry.
-                    symbol_reloc.relaSection(elf).relaSetOffset(elf, rela_index, node_vaddr + symbol_reloc.offset);
-                }
-                if (elf.ehdrType() != .REL) {
-                    symbol_reloc.apply(elf);
-                }
+                symbol_reloc.flushMovedNode(elf, node_vaddr);
             }
         },
         .value_debug_info => |vi| {
             const dwarf_value = &elf.dwarf_values.items[@backingInt(vi)];
+            const target_section_offset = elf.computeNodeSectionOffset(ni);
             var target_ri = dwarf_value.debug_info_first_target_reloc;
             while (target_ri != .none) {
                 const target_reloc = target_ri.get(elf);
                 assert(target_reloc.target == ni);
-                target_reloc.apply(elf);
+                target_reloc.flushMovedTarget(elf, target_section_offset);
                 target_ri = target_reloc.next;
             }
             elf.flushMovedNodeRelocs(ni, elf.computeNodeVAddr(ni), .{
@@ -9592,11 +9669,12 @@ fn flushMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void
         },
         .global_debug_info => |vi| {
             const dwarf_global = &elf.dwarf_globals.items[@backingInt(vi)];
+            const target_section_offset = elf.computeNodeSectionOffset(ni);
             var target_ri = dwarf_global.debug_info_first_target_reloc;
             while (target_ri != .none) {
                 const target_reloc = target_ri.get(elf);
                 assert(target_reloc.target == ni);
-                target_reloc.apply(elf);
+                target_reloc.flushMovedTarget(elf, target_section_offset);
                 target_ri = target_reloc.next;
             }
             elf.flushMovedNodeRelocs(ni, elf.computeNodeVAddr(ni), .{
@@ -9607,7 +9685,7 @@ fn flushMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void
         .func_frame_fde => |fi| {
             const dwarf_func = &elf.dwarf_funcs.items[@backingInt(fi)];
             const zcu = elf.base.comp.zcu.?;
-            const mod = zcu.fileByIndex(fi.srcInst(&elf.dwarf).resolveFile(&zcu.intern_pool)).mod.?;
+            const mod = zcu.navFileScope(fi.nav(&elf.dwarf)).mod.?;
             switch (mod.unwind_tables) {
                 .none => {},
                 .sync, .async => {
@@ -9622,17 +9700,18 @@ fn flushMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void
         },
         .func_debug_info => |fi| {
             const dwarf_func = &elf.dwarf_funcs.items[@backingInt(fi)];
+            const target_section_offset = elf.computeNodeSectionOffset(ni);
             var target_ri = dwarf_func.debug_info_first_target_reloc;
             while (target_ri != .none) {
                 const target_reloc = target_ri.get(elf);
                 assert(target_reloc.target == ni);
-                target_reloc.apply(elf);
+                target_reloc.flushMovedTarget(elf, target_section_offset);
                 target_ri = target_reloc.next;
             }
             elf.flushMovedNodeRelocs(ni, elf.computeNodeVAddr(ni), .{
                 .first_symbol_reloc = dwarf_func.debug_info_first_symbol_reloc,
-                .skip_symbol_relocs = if (elf.navs.getPtr(fi.get(&elf.dwarf).owner_nav)) |owner_nav|
-                    owner_nav.lsi.index().ptr(elf).node
+                .skip_symbol_relocs = if (elf.navs.getPtr(fi.nav(&elf.dwarf))) |nav|
+                    nav.lsi.index().ptr(elf).node
                 else
                     .none,
                 .first_node_reloc = dwarf_func.debug_info_first_node_reloc,
@@ -10630,10 +10709,10 @@ pub fn printNode(
         .func_frame_fde, .func_debug_info, .func_debug_line => |fi| {
             const zcu = elf.base.comp.zcu.?;
             const ip = &zcu.intern_pool;
-            const owner_nav = ip.getNav(fi.get(&elf.dwarf).owner_nav);
+            const nav = ip.getNav(fi.nav(&elf.dwarf));
             try w.print("({f}, {f})", .{
-                Type.fromInterned(owner_nav.resolved.?.type).fmt(.{ .zcu = zcu, .tid = tid }),
-                owner_nav.fqn.fmt(ip),
+                Type.fromInterned(nav.resolved.?.type).fmt(.{ .zcu = zcu, .tid = tid }),
+                nav.fqn.fmt(ip),
             });
         },
     }

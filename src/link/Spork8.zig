@@ -168,10 +168,11 @@ pub fn updateNav(spork8: *Spork8, pt: Zcu.PerThread, nav_index: InternPool.Nav.I
     log.debug("updateNav {f}", .{nav.fqn.fmt(ip)});
 }
 
-pub fn updateLineNumber(spork8: *Spork8, pt: Zcu.PerThread, ti_id: InternPool.TrackedInst.Index) !void {
+pub fn updateLineNumber(spork8: *Spork8, pt: Zcu.PerThread, inst: InternPool.TrackedInst.Index, line: u32) !void {
     _ = spork8;
     _ = pt;
-    _ = ti_id;
+    _ = inst;
+    _ = line;
 }
 
 pub fn deleteExport(

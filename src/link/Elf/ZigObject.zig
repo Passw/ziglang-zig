@@ -1946,11 +1946,11 @@ pub fn updateExports(
     }
 }
 
-pub fn updateLineNumber(self: *ZigObject, pt: Zcu.PerThread, ti_id: InternPool.TrackedInst.Index) link.Error!void {
+pub fn updateLineNumber(self: *ZigObject, pt: Zcu.PerThread, ti_id: InternPool.TrackedInst.Index, line: u32) link.Error!void {
     if (self.dwarf) |*dwarf| {
         const comp = dwarf.bin_file.comp;
         const diags = &comp.link_diags;
-        dwarf.updateLineNumber(pt.zcu, ti_id) catch |err| switch (err) {
+        dwarf.updateLineNumber(pt.zcu, ti_id, line) catch |err| switch (err) {
             error.OutOfMemory, error.Canceled, error.AlreadyReported => |e| return e,
             else => |e| return diags.fail("failed to update dwarf line numbers: {s}", .{@errorName(e)}),
         };

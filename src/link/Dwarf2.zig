@@ -8,7 +8,8 @@ units: std.array_hash_map.Auto(*Module, Unit),
 /// Indices are `link.ConstPool.Index`.
 values: std.ArrayList(Value),
 globals: std.array_hash_map.Auto(InternPool.Nav.Index, Global),
-funcs: std.array_hash_map.Auto(InternPool.TrackedInst.Index, Func),
+funcs: std.array_hash_map.Auto(InternPool.Nav.Index, Func),
+decls: std.array_hash_map.Auto(InternPool.TrackedInst.Index, MappedFile.Node.Index),
 
 debug_abbrev: Abbrev,
 frame: Frame,
@@ -32,7 +33,8 @@ pub const Unit = struct {
     debug_line_header_ni: MappedFile.Node.Index.Optional,
     debug_line_header_changed: bool,
     debug_rnglists_ni: MappedFile.Node.Index.Optional,
-    debug_rnglists_offset: usize,
+    debug_rnglists_offsets_table_offset: usize,
+    debug_rnglists_end: usize,
 
     pub const Index = enum(u32) {
         _,
@@ -123,7 +125,6 @@ pub const Global = struct {
 };
 
 pub const Func = struct {
-    owner_nav: InternPool.Nav.Index,
     fde_ni: MappedFile.Node.Index.Optional,
     debug_info_ni: MappedFile.Node.Index.Optional,
     debug_line_ni: MappedFile.Node.Index.Optional,
@@ -131,7 +132,7 @@ pub const Func = struct {
     pub const Index = enum(u32) {
         _,
 
-        pub fn srcInst(fi: Func.Index, dwarf: *Dwarf) InternPool.TrackedInst.Index {
+        pub fn nav(fi: Func.Index, dwarf: *Dwarf) InternPool.Nav.Index {
             return dwarf.funcs.keys()[@backingInt(fi)];
         }
 
@@ -156,7 +157,7 @@ pub const Frame = struct {
 
 pub const Abbrev = struct {
     ni: MappedFile.Node.Index.Optional,
-    offset: usize,
+    end: usize,
     set: std.enums.EnumSet(AbbrevCode),
 };
 
@@ -628,7 +629,7 @@ pub const WipNav = struct {
         pub fn startDebugInfo(debug: *Debug) link.Error!void {
             assert(debug.wip_nav.func != .none);
             debug.startDebugInfoInner() catch |err| switch (err) {
-                error.WriteFailed => return debug.wip_nav.reportWriteError(&debug.info_writer),
+                error.WriteFailed => return debug.wip_nav.dwarf.reportWriteError(&debug.info_writer),
                 else => |e| return e,
             };
         }
@@ -637,7 +638,8 @@ pub const WipNav = struct {
             const zcu = debug.pt.zcu;
             const ip = &zcu.intern_pool;
             const func = zcu.funcInfo(debug.wip_nav.func);
-            const inst_info = ip.getNav(func.owner_nav).srcInst(ip).resolveFull(ip).?;
+            const src_inst = ip.getNav(func.owner_nav).srcInst(ip);
+            const inst_info = src_inst.resolveFull(ip).?;
             const decl = zcu.fileByIndex(inst_info.file).zir.?.getDeclaration(inst_info.inst);
             const nav = ip.getNav(func.owner_nav);
             const diw = &debug.info_writer.interface;
@@ -655,7 +657,7 @@ pub const WipNav = struct {
         pub fn startDebugLine(debug: *Debug) link.Error!void {
             assert(debug.wip_nav.func != .none);
             debug.startDebugLineInner() catch |err| switch (err) {
-                error.WriteFailed => return debug.wip_nav.reportWriteError(&debug.line_writer),
+                error.WriteFailed => return debug.wip_nav.dwarf.reportWriteError(&debug.line_writer),
                 else => |e| return e,
             };
         }
@@ -698,24 +700,25 @@ pub const WipNav = struct {
         pub fn finishFunc(debug: *Debug, func_length: u64) link.Error!void {
             assert(debug.wip_nav.func != .none);
             debug.finishDebugInfo(func_length) catch |err| switch (err) {
-                error.WriteFailed => return debug.wip_nav.reportWriteError(&debug.info_writer),
+                error.WriteFailed => return debug.wip_nav.dwarf.reportWriteError(&debug.info_writer),
                 else => |e| return e,
             };
             debug.finishDebugLine() catch |err| switch (err) {
-                error.WriteFailed => return debug.wip_nav.reportWriteError(&debug.line_writer),
+                error.WriteFailed => return debug.wip_nav.dwarf.reportWriteError(&debug.line_writer),
                 else => |e| return e,
             };
         }
         fn finishDebugInfo(debug: *Debug, func_length: u64) link.EmitError!void {
+            const dwarf = debug.wip_nav.dwarf;
             const diw = &debug.info_writer.interface;
             std.mem.writeInt(
                 u32,
                 diw.buffered()[debug.info_func_length_offset..][0..4],
                 @intCast(func_length),
-                debug.wip_nav.dwarf.endian,
+                dwarf.endian,
             );
             try diw.writeUleb128(@backingInt(AbbrevCode.null));
-            try debug.wip_nav.dwarf.genDebugInfoPadding(diw, diw.unusedCapacityLen());
+            try dwarf.genDebugInfoPadding(diw, diw.unusedCapacityLen());
         }
         fn finishDebugLine(debug: *Debug) link.EmitError!void {
             const dlw = &debug.line_writer.interface;
@@ -731,7 +734,7 @@ pub const WipNav = struct {
             loc: Loc,
         ) link.Error!void {
             return debug.genLocalVarDebugInfoInner(tag, opt_name, ty, loc) catch |err| switch (err) {
-                error.WriteFailed => return debug.wip_nav.reportWriteError(&debug.info_writer),
+                error.WriteFailed => return debug.wip_nav.dwarf.reportWriteError(&debug.info_writer),
                 else => |e| e,
             };
         }
@@ -761,7 +764,7 @@ pub const WipNav = struct {
             val: ZigValue,
         ) link.Error!void {
             return debug.genLocalConstDebugInfoInner(tag, opt_name, val) catch |err| switch (err) {
-                error.WriteFailed => return debug.wip_nav.reportWriteError(&debug.info_writer),
+                error.WriteFailed => return debug.wip_nav.dwarf.reportWriteError(&debug.info_writer),
                 else => |e| e,
             };
         }
@@ -798,7 +801,7 @@ pub const WipNav = struct {
 
         pub fn genVarArgsDebugInfo(debug: *Debug) link.Error!void {
             return debug.genVarArgsDebugInfoInner() catch |err| switch (err) {
-                error.WriteFailed => return debug.wip_nav.reportWriteError(&debug.info_writer),
+                error.WriteFailed => return debug.wip_nav.dwarf.reportWriteError(&debug.info_writer),
                 else => |e| e,
             };
         }
@@ -815,7 +818,7 @@ pub const WipNav = struct {
             end: bool,
         ) link.Error!void {
             return debug.advanceLineAndPcInner(delta_line, delta_pc, end) catch |err| switch (err) {
-                error.WriteFailed => return debug.wip_nav.reportWriteError(&debug.line_writer),
+                error.WriteFailed => return debug.wip_nav.dwarf.reportWriteError(&debug.line_writer),
             };
         }
         fn advanceLineAndPcInner(
@@ -870,7 +873,7 @@ pub const WipNav = struct {
 
         pub fn setColumn(debug: *Debug, column: u32) link.Error!void {
             return debug.setColumnInner(column) catch |err| switch (err) {
-                error.WriteFailed => return debug.wip_nav.reportWriteError(&debug.line_writer),
+                error.WriteFailed => return debug.wip_nav.dwarf.reportWriteError(&debug.line_writer),
             };
         }
         fn setColumnInner(debug: *Debug, column: u32) Writer.Error!void {
@@ -881,7 +884,7 @@ pub const WipNav = struct {
 
         pub fn negateStmt(debug: *Debug) link.Error!void {
             return debug.negateStmtInner() catch |err| switch (err) {
-                error.WriteFailed => return debug.wip_nav.reportWriteError(&debug.line_writer),
+                error.WriteFailed => return debug.wip_nav.dwarf.reportWriteError(&debug.line_writer),
             };
         }
         fn negateStmtInner(debug: *Debug) Writer.Error!void {
@@ -890,7 +893,7 @@ pub const WipNav = struct {
 
         pub fn setPrologueEnd(debug: *Debug) link.Error!void {
             return debug.setPrologueEndInner() catch |err| switch (err) {
-                error.WriteFailed => return debug.wip_nav.reportWriteError(&debug.line_writer),
+                error.WriteFailed => return debug.wip_nav.dwarf.reportWriteError(&debug.line_writer),
             };
         }
         fn setPrologueEndInner(debug: *Debug) Writer.Error!void {
@@ -899,7 +902,7 @@ pub const WipNav = struct {
 
         pub fn setEpilogueBegin(debug: *Debug) link.Error!void {
             return debug.setEpilogueBeginInner() catch |err| switch (err) {
-                error.WriteFailed => return debug.wip_nav.reportWriteError(&debug.line_writer),
+                error.WriteFailed => return debug.wip_nav.dwarf.reportWriteError(&debug.line_writer),
             };
         }
         fn setEpilogueBeginInner(debug: *Debug) Writer.Error!void {
@@ -908,7 +911,7 @@ pub const WipNav = struct {
 
         pub fn enterBlock(debug: *Debug, code_off: usize) link.Error!void {
             return debug.enterBlockInner(code_off) catch |err| switch (err) {
-                error.WriteFailed => return debug.wip_nav.reportWriteError(&debug.info_writer),
+                error.WriteFailed => return debug.wip_nav.dwarf.reportWriteError(&debug.info_writer),
                 else => |e| e,
             };
         }
@@ -928,7 +931,7 @@ pub const WipNav = struct {
 
         pub fn leaveBlock(debug: *Debug, code_off: usize) link.Error!void {
             return debug.leaveBlockInner(code_off) catch |err| switch (err) {
-                error.WriteFailed => return debug.wip_nav.reportWriteError(&debug.info_writer),
+                error.WriteFailed => return debug.wip_nav.dwarf.reportWriteError(&debug.info_writer),
                 else => |e| e,
             };
         }
@@ -961,7 +964,7 @@ pub const WipNav = struct {
             column: u32,
         ) link.Error!void {
             return debug.enterInlineFuncInner(func, code_off, line, column) catch |err| switch (err) {
-                error.WriteFailed => return debug.wip_nav.reportWriteError(&debug.info_writer),
+                error.WriteFailed => return debug.wip_nav.dwarf.reportWriteError(&debug.info_writer),
                 else => |e| e,
             };
         }
@@ -996,7 +999,7 @@ pub const WipNav = struct {
 
         pub fn leaveInlineFunc(debug: *Debug, func: InternPool.Index, code_off: usize) link.Error!void {
             return debug.leaveInlineFuncInner(func, code_off) catch |err| switch (err) {
-                error.WriteFailed => return debug.wip_nav.reportWriteError(&debug.info_writer),
+                error.WriteFailed => return debug.wip_nav.dwarf.reportWriteError(&debug.info_writer),
                 else => |e| e,
             };
         }
@@ -1029,7 +1032,7 @@ pub const WipNav = struct {
 
         pub fn setInlineFunc(debug: *Debug, func: InternPool.Index) link.Error!void {
             return debug.setInlineFuncInner(func) catch |err| switch (err) {
-                error.WriteFailed => return debug.wip_nav.reportWriteError(&debug.line_writer),
+                error.WriteFailed => return debug.wip_nav.dwarf.reportWriteError(&debug.line_writer),
                 else => |e| e,
             };
         }
@@ -1187,7 +1190,7 @@ pub const WipNav = struct {
 
     pub fn genDebugFrameHeader(wip_nav: *WipNav) link.Error!void {
         wip_nav.genDebugFrameHeaderInner() catch |err| switch (err) {
-            error.WriteFailed => return wip_nav.reportWriteError(&wip_nav.fde_writer),
+            error.WriteFailed => return wip_nav.dwarf.reportWriteError(&wip_nav.fde_writer),
             else => |e| return e,
         };
     }
@@ -1230,7 +1233,7 @@ pub const WipNav = struct {
 
     pub fn genDebugFrame(wip_nav: *WipNav, loc: u32, cfa: Cfa) link.Error!void {
         return wip_nav.genDebugFrameInner(loc, cfa) catch |err| switch (err) {
-            error.WriteFailed => return wip_nav.reportWriteError(&wip_nav.fde_writer),
+            error.WriteFailed => return wip_nav.dwarf.reportWriteError(&wip_nav.fde_writer),
             else => |e| return e,
         };
     }
@@ -1336,16 +1339,6 @@ pub const WipNav = struct {
             },
         );
     }
-
-    fn reportWriteError(wip_nav: *WipNav, mfnw: *const MappedFile.Node.Writer) link.Error {
-        switch (mfnw.err.?) {
-            else => |e| return e,
-            error.MappedFileIo => return wip_nav.dwarf.lf.comp.link_diags.fail(
-                "failed to write output file: {t}",
-                .{mfnw.mf.io_err.?},
-            ),
-        }
-    }
 };
 
 pub fn init(lf: *link.File, format: DW.Format) Dwarf {
@@ -1365,10 +1358,11 @@ pub fn init(lf: *link.File, format: DW.Format) Dwarf {
         .values = .empty,
         .globals = .empty,
         .funcs = .empty,
+        .decls = .empty,
 
         .debug_abbrev = .{
             .ni = .none,
-            .offset = 0,
+            .end = 0,
             .set = .empty,
         },
         .frame = .{
@@ -1443,7 +1437,7 @@ pub fn deinit(dwarf: *Dwarf) void {
     dwarf.* = undefined;
 }
 
-pub fn initUnits(dwarf: *Dwarf, zcu: *Zcu) std.mem.Allocator.Error!void {
+pub fn updateUnits(dwarf: *Dwarf, zcu: *Zcu) std.mem.Allocator.Error!void {
     try dwarf.units.ensureTotalCapacity(zcu.gpa, zcu.module_roots.count() - dwarf.units.count());
     for (zcu.module_roots.keys(), zcu.module_roots.values()) |mod, root| if (root.unwrap()) |root_zfi| {
         if (!zcu.alive_files.contains(root_zfi)) continue;
@@ -1461,7 +1455,8 @@ pub fn initUnits(dwarf: *Dwarf, zcu: *Zcu) std.mem.Allocator.Error!void {
             .debug_line_header_ni = .none,
             .debug_line_header_changed = true,
             .debug_rnglists_ni = .none,
-            .debug_rnglists_offset = undefined,
+            .debug_rnglists_offsets_table_offset = undefined,
+            .debug_rnglists_end = undefined,
         };
         const root_di, const root_fi = try unit_gop.value_ptr.getFile(
             zcu.gpa,
@@ -1476,15 +1471,48 @@ pub fn getUnit(dwarf: *Dwarf, mod: *Module) Unit.Index {
     return @fromBackingInt(@intCast(dwarf.units.getIndex(mod).?));
 }
 
-pub fn getFunc(dwarf: *Dwarf, owner_nav: InternPool.Nav.Index) link.Error!Func.Index {
+pub fn getGlobal(dwarf: *Dwarf, nav: InternPool.Nav.Index) link.Error!Global.Index {
     const comp = dwarf.lf.comp;
     const gpa = comp.gpa;
-    const zcu = comp.zcu.?;
-    const ip = &zcu.intern_pool;
-    const src_inst = ip.getNav(owner_nav).srcInst(ip);
-    const func_gop = try dwarf.funcs.getOrPut(gpa, src_inst);
+    const global_gop = try dwarf.globals.getOrPut(gpa, nav);
+    if (!global_gop.found_existing) global_gop.value_ptr.* = .{
+        .debug_info_ni = .none,
+    };
+    const gi: Global.Index = @fromBackingInt(@intCast(global_gop.index));
+    if (global_gop.value_ptr.debug_info_ni == .none) {
+        const elf = dwarf.lf.cast(.elf2).?;
+        try elf.nodes.ensureUnusedCapacity(gpa, 1);
+        try elf.dwarf_globals.ensureUnusedCapacity(gpa, 1);
+        const unit = dwarf.getUnit(comp.zcu.?.zcu.navFileScope(nav).mod.?).get(dwarf);
+        assert(unit.debug_info_ni != .none);
+        global_gop.value_ptr.debug_info_ni = elf.addNodeAssumeCapacity(
+            elf.mf.addLastChildNode(gpa, unit.debug_info_ni, .{
+                .enable_next_moved = true,
+            }) catch |err| switch (err) {
+                else => |e| return e,
+                error.MappedFileIo => return comp.link_diags.fail("failed to write output file: {t}", .{
+                    elf.mf.io_err.?,
+                }),
+            },
+            .{ .global_debug_info = gi },
+        );
+        elf.dwarf_globals.addOneAssumeCapacity().* = .{
+            .debug_info_first_target_reloc = .none,
+            .debug_info_first_node_reloc = .none,
+            .debug_info_first_symbol_reloc = .none,
+        };
+    }
+    return gi;
+}
+pub fn getGlobalIfExists(dwarf: *Dwarf, nav: InternPool.Nav.Index) ?Global.Index {
+    return @fromBackingInt(@intCast(dwarf.globals.getIndex(nav) orelse return null));
+}
+
+pub fn getFunc(dwarf: *Dwarf, nav: InternPool.Nav.Index) link.Error!Func.Index {
+    const comp = dwarf.lf.comp;
+    const gpa = comp.gpa;
+    const func_gop = try dwarf.funcs.getOrPut(gpa, nav);
     if (!func_gop.found_existing) func_gop.value_ptr.* = .{
-        .owner_nav = owner_nav,
         .fde_ni = .none,
         .debug_info_ni = .none,
         .debug_line_ni = .none,
@@ -1494,7 +1522,7 @@ pub fn getFunc(dwarf: *Dwarf, owner_nav: InternPool.Nav.Index) link.Error!Func.I
         const elf = dwarf.lf.cast(.elf2).?;
         try elf.nodes.ensureUnusedCapacity(gpa, 1);
         try elf.dwarf_funcs.ensureUnusedCapacity(gpa, 1);
-        const unit = dwarf.getUnit(zcu.fileByIndex(src_inst.resolveFile(ip)).mod.?).get(dwarf);
+        const unit = dwarf.getUnit(comp.zcu.?.navFileScope(nav).mod.?).get(dwarf);
         func_gop.value_ptr.debug_info_ni = .wrap(elf.addNodeAssumeCapacity(
             unit.debug_info_ni.unwrap().?.addFloatingChild(gpa, &elf.mf, .{
                 .enable_next_moved = true,
@@ -1518,10 +1546,8 @@ pub fn getFunc(dwarf: *Dwarf, owner_nav: InternPool.Nav.Index) link.Error!Func.I
     }
     return fi;
 }
-pub fn getFuncIfExists(dwarf: *Dwarf, owner_nav: InternPool.Nav.Index) ?Func.Index {
-    const ip = &dwarf.lf.comp.zcu.?.intern_pool;
-    return @fromBackingInt(@intCast(dwarf.funcs.getIndex(ip.getNav(owner_nav).srcInst(ip)) orelse
-        return null));
+pub fn getFuncIfExists(dwarf: *Dwarf, nav: InternPool.Nav.Index) ?Func.Index {
+    return @fromBackingInt(@intCast(dwarf.funcs.getIndex(nav) orelse return null));
 }
 
 pub fn unitLengthSize(dwarf: *Dwarf) usize {
@@ -1654,11 +1680,11 @@ pub fn updateEhFrameFde(dwarf: *Dwarf, fde: []u8, fde_offset: u64) void {
 
 pub fn genDebugInfoHeader(
     dwarf: *Dwarf,
+    zcu: *Zcu,
     mod: *Module,
     unit: *Unit,
     dih_nw: *MappedFile.Node.Writer,
     debug_rnglists_offsets_table_offset: usize,
-    zcu: *Zcu,
 ) link.EmitError!void {
     const comp = zcu.comp;
     const dihw = &dih_nw.interface;
@@ -1695,20 +1721,22 @@ pub fn genDebugInfoHeader(
         zcu.builtin_modules.get(mod.getBuiltinOptions(comp.config).hash()).?,
         zcu.root_mod,
         zcu.std_mod,
-    }) |name, dep| try dwarf.genModuleDependency(dih_nw, name, dep, module_offset);
+    }) |name, dep| try dwarf.genModuleDependency(zcu, dih_nw, name, dep, module_offset);
     for (mod.deps.keys(), mod.deps.values()) |name, dep|
-        try dwarf.genModuleDependency(dih_nw, name, dep, module_offset);
+        try dwarf.genModuleDependency(zcu, dih_nw, name, dep, module_offset);
     for ([2]AbbrevCode{ .pad_1, .pad_n }) |pad| _ = try dwarf.refAbbrevCode(pad);
     try dwarf.genDebugInfoPadding(dihw, dihw.unusedCapacityLen());
 }
 
 fn genModuleDependency(
     dwarf: *Dwarf,
+    zcu: *Zcu,
     nw: *MappedFile.Node.Writer,
     name: []const u8,
     dep: *Module,
     module_offset: usize,
 ) link.EmitError!void {
+    if (!zcu.alive_files.contains(zcu.module_roots.get(dep).?.unwrap() orelse return)) return;
     const diw = &nw.interface;
     try diw.writeUleb128(try dwarf.refAbbrevCode(.module_dependency));
     try diw.writeAll(name);
@@ -1889,7 +1917,7 @@ pub fn genDebugRnglistsHeader(
         .@"32" => try drhw.writeInt(u32, 4, dwarf.endian),
         .@"64" => try drhw.writeInt(u64, 8, dwarf.endian),
     }
-    unit.debug_rnglists_offset = drhw.end;
+    unit.debug_rnglists_end = drhw.end;
     try drhw.writeByte(DW.RLE.end_of_list);
     return offsets_table_offset;
 }
@@ -1902,24 +1930,22 @@ pub fn genDebugRnglists(
     func_length: u64,
 ) link.EmitError!void {
     const drw = &dr_nw.interface;
-    drw.end = unit.debug_rnglists_offset;
+    drw.end = unit.debug_rnglists_end;
     try drw.writeByte(DW.RLE.start_length);
     try dwarf.symbolAddress(dr_nw, func_si, 0);
     try drw.writeUleb128(func_length);
-    unit.debug_rnglists_offset = drw.end;
+    unit.debug_rnglists_end = drw.end;
     try drw.writeByte(DW.RLE.end_of_list);
 }
 
 pub fn updateLineNumber(
     dwarf: *Dwarf,
-    zcu: *Zcu,
-    src_inst: InternPool.TrackedInst.Index,
-    debug_info: []u8,
+    mf: *MappedFile,
+    inst: InternPool.TrackedInst.Index,
+    line: u32,
 ) void {
-    const inst_info = src_inst.resolveFull(&zcu.intern_pool).?;
-    assert(inst_info.inst != .main_struct_inst);
-    const src_line = zcu.fileByIndex(inst_info.file).zir.?.getDeclaration(inst_info.inst).src_line;
-    std.mem.writeInt(u32, debug_info[AbbrevCode.decl_bytes..][0..4], src_line + 1, dwarf.endian);
+    const decl_ni = dwarf.decls.get(inst) orelse return;
+    std.mem.writeInt(u32, decl_ni.slice(mf)[AbbrevCode.decl_bytes..][0..4], line + 1, dwarf.endian);
 }
 
 fn refAbbrevCodeIfExists(
@@ -1930,36 +1956,45 @@ fn refAbbrevCodeIfExists(
     return if (dwarf.debug_abbrev.set.contains(abbrev_code)) @backingInt(abbrev_code) else null;
 }
 
-fn refAbbrevCode(
+pub fn refAbbrevCode(
     dwarf: *Dwarf,
     abbrev_code: AbbrevCode,
-) link.EmitError!@typeInfo(AbbrevCode).@"enum".tag_type {
+) link.Error!@typeInfo(AbbrevCode).@"enum".tag_type {
     if (dwarf.refAbbrevCodeIfExists(abbrev_code)) |backing_int| {
         @branchHint(.likely);
         return backing_int;
     }
-    const elf = dwarf.lf.cast(.elf2).?;
-    const comp = elf.base.comp;
-    var nw: MappedFile.Node.Writer = undefined;
-    dwarf.debug_abbrev.ni.unwrap().?.writer(comp.gpa, &elf.mf, &nw);
-    defer nw.deinit();
+    var da_nw: MappedFile.Node.Writer = undefined;
+    dwarf.debug_abbrev.ni.unwrap().?.writer(dwarf.lf.comp.gpa, &dwarf.lf.cast(.elf2).?.mf, &da_nw);
+    defer da_nw.deinit();
+    dwarf.genDebugAbbrev(&da_nw, abbrev_code) catch |err| switch (err) {
+        else => |e| return e,
+        error.WriteFailed => return dwarf.reportWriteError(&da_nw),
+    };
+    dwarf.debug_abbrev.set.insert(abbrev_code);
+    return dwarf.refAbbrevCodeIfExists(abbrev_code).?;
+}
+
+fn genDebugAbbrev(
+    dwarf: *Dwarf,
+    da_nw: *MappedFile.Node.Writer,
+    abbrev_code: AbbrevCode,
+) link.EmitError!void {
     const abbrev = AbbrevCode.abbrevs.get(abbrev_code);
-    const daw = &nw.interface;
-    daw.end = dwarf.debug_abbrev.offset;
+    const daw = &da_nw.interface;
+    daw.end = dwarf.debug_abbrev.end;
     try daw.writeUleb128(@backingInt(abbrev_code));
     try daw.writeUleb128(@backingInt(abbrev.tag));
     try daw.writeByte(if (abbrev.children) DW.CHILDREN.yes else DW.CHILDREN.no);
     for (abbrev.attrs) |*attr| {
         try daw.writeUleb128(@backingInt(switch (attr[0]) {
             else => |at| at,
-            .ZIG_call_line_relative => |at| if (comp.config.incremental) at else .call_line,
+            .ZIG_call_line_relative => |at| if (dwarf.lf.comp.config.incremental) at else .call_line,
         }));
         try daw.writeUleb128(@backingInt(attr[1]));
     }
     for (0..2) |_| try daw.writeUleb128(0);
-    dwarf.debug_abbrev.offset = daw.end;
-    dwarf.debug_abbrev.set.insert(abbrev_code);
-    return dwarf.refAbbrevCodeIfExists(abbrev_code).?;
+    dwarf.debug_abbrev.end = daw.end;
 }
 
 fn sectionOffset(
@@ -2007,6 +2042,16 @@ fn strp(dwarf: *Dwarf, s: *Str, nw: *MappedFile.Node.Writer, str: []const u8) li
     });
 }
 
+fn reportWriteError(dwarf: *Dwarf, nw: *const MappedFile.Node.Writer) link.Error {
+    switch (nw.err.?) {
+        else => |e| return e,
+        error.MappedFileIo => return dwarf.lf.comp.link_diags.fail(
+            "failed to write output file: {t}",
+            .{nw.mf.io_err.?},
+        ),
+    }
+}
+
 fn DeclValEnum(comptime T: type) type {
     const decl_names = @typeInfo(T).@"struct".decl_names;
     @setEvalBranchQuota(10 * decl_names.len);
@@ -2034,7 +2079,8 @@ pub const AbbrevCode = enum {
     // padding codes must be one byte uleb128 values to function
     pad_1,
     pad_n,
-    // decl, generic decl, and instance codes are assumed to all have the same uleb128 length
+    // decl, specification, and instance codes are assumed to all have the same uleb128 size
+    decl_lost,
     decl_alias,
     decl_empty_enum,
     decl_enum,
@@ -2054,9 +2100,9 @@ pub const AbbrevCode = enum {
     decl_func_generic,
     decl_extern_nullary_func,
     decl_extern_func,
-    generic_decl_var,
-    generic_decl_const,
-    generic_decl_func,
+    decl_specification_struct,
+    decl_specification_union,
+    decl_specification_func,
     decl_instance_alias,
     decl_instance_empty_enum,
     decl_instance_enum,
@@ -2174,20 +2220,23 @@ pub const AbbrevCode = enum {
         DeclValEnum(DW.AT),
         DeclValEnum(DW.FORM),
     };
-    const decl_abbrev_common_attrs = &[_]Attr{
+    const decl_attrs = &[_]Attr{
         //.{ .ZIG_parent, .ref_addr },
         .{ .decl_line, .data4 },
         .{ .decl_column, .udata },
         .{ .accessibility, .data1 },
         .{ .name, .strp },
     };
-    const generic_decl_abbrev_common_attrs = decl_abbrev_common_attrs ++ &[_]Attr{
+
+    const decl_specification_attrs = decl_attrs ++ &[_]Attr{
         .{ .declaration, .flag_present },
     };
-    const decl_instance_abbrev_common_attrs = &[_]Attr{
-        .{ .ZIG_parent, .ref_addr },
-        .{ .abstract_origin, .ref_addr },
+
+    const decl_instance_attrs = &[_]Attr{
+        //.{ .ZIG_parent, .ref_addr },
+        .{ .specification, .ref_addr },
     };
+
     const abbrevs = std.EnumArray(AbbrevCode, struct {
         tag: DeclValEnum(DW.TAG),
         children: bool = false,
@@ -2202,35 +2251,38 @@ pub const AbbrevCode = enum {
                 .{ .ZIG_padding, .block },
             },
         },
+        .decl_lost = .{
+            .tag = .ZIG_lost_declaration,
+        },
         .decl_alias = .{
             .tag = .imported_declaration,
-            .attrs = decl_abbrev_common_attrs ++ .{
+            .attrs = decl_attrs ++ .{
                 .{ .import, .ref_addr },
             },
         },
         .decl_empty_enum = .{
             .tag = .enumeration_type,
-            .attrs = decl_abbrev_common_attrs ++ .{
+            .attrs = decl_attrs ++ .{
                 .{ .type, .ref_addr },
             },
         },
         .decl_enum = .{
             .tag = .enumeration_type,
             .children = true,
-            .attrs = decl_abbrev_common_attrs ++ .{
+            .attrs = decl_attrs ++ .{
                 .{ .type, .ref_addr },
             },
         },
         .decl_namespace_struct = .{
             .tag = .structure_type,
-            .attrs = decl_abbrev_common_attrs ++ .{
+            .attrs = decl_attrs ++ .{
                 .{ .declaration, .flag },
             },
         },
         .decl_struct = .{
             .tag = .structure_type,
             .children = true,
-            .attrs = decl_abbrev_common_attrs ++ .{
+            .attrs = decl_attrs ++ .{
                 .{ .byte_size, .udata },
                 .{ .alignment, .udata },
             },
@@ -2238,14 +2290,14 @@ pub const AbbrevCode = enum {
         .decl_packed_struct = .{
             .tag = .structure_type,
             .children = true,
-            .attrs = decl_abbrev_common_attrs ++ .{
+            .attrs = decl_attrs ++ .{
                 .{ .type, .ref_addr },
             },
         },
         .decl_union = .{
             .tag = .union_type,
             .children = true,
-            .attrs = decl_abbrev_common_attrs ++ .{
+            .attrs = decl_attrs ++ .{
                 .{ .byte_size, .udata },
                 .{ .alignment, .udata },
             },
@@ -2253,13 +2305,13 @@ pub const AbbrevCode = enum {
         .decl_packed_union = .{
             .tag = .union_type,
             .children = true,
-            .attrs = decl_abbrev_common_attrs ++ .{
+            .attrs = decl_attrs ++ .{
                 .{ .type, .ref_addr },
             },
         },
         .decl_var = .{
             .tag = .variable,
-            .attrs = decl_abbrev_common_attrs ++ .{
+            .attrs = decl_attrs ++ .{
                 .{ .linkage_name, .strp },
                 .{ .type, .ref_addr },
                 .{ .location, .exprloc },
@@ -2269,7 +2321,7 @@ pub const AbbrevCode = enum {
         },
         .decl_const = .{
             .tag = .constant,
-            .attrs = decl_abbrev_common_attrs ++ .{
+            .attrs = decl_attrs ++ .{
                 .{ .linkage_name, .strp },
                 .{ .type, .ref_addr },
                 .{ .alignment, .udata },
@@ -2278,7 +2330,7 @@ pub const AbbrevCode = enum {
         },
         .decl_const_runtime_bits = .{
             .tag = .constant,
-            .attrs = decl_abbrev_common_attrs ++ .{
+            .attrs = decl_attrs ++ .{
                 .{ .linkage_name, .strp },
                 .{ .type, .ref_addr },
                 .{ .alignment, .udata },
@@ -2288,7 +2340,7 @@ pub const AbbrevCode = enum {
         },
         .decl_const_comptime_state = .{
             .tag = .constant,
-            .attrs = decl_abbrev_common_attrs ++ .{
+            .attrs = decl_attrs ++ .{
                 .{ .linkage_name, .strp },
                 .{ .type, .ref_addr },
                 .{ .alignment, .udata },
@@ -2298,7 +2350,7 @@ pub const AbbrevCode = enum {
         },
         .decl_const_runtime_bits_comptime_state = .{
             .tag = .constant,
-            .attrs = decl_abbrev_common_attrs ++ .{
+            .attrs = decl_attrs ++ .{
                 .{ .linkage_name, .strp },
                 .{ .type, .ref_addr },
                 .{ .alignment, .udata },
@@ -2309,7 +2361,7 @@ pub const AbbrevCode = enum {
         },
         .decl_nullary_func = .{
             .tag = .subprogram,
-            .attrs = decl_abbrev_common_attrs ++ .{
+            .attrs = decl_attrs ++ .{
                 .{ .linkage_name, .strp },
                 .{ .type, .ref_addr },
                 .{ .low_pc, .addr },
@@ -2322,7 +2374,7 @@ pub const AbbrevCode = enum {
         .decl_func = .{
             .tag = .subprogram,
             .children = true,
-            .attrs = decl_abbrev_common_attrs ++ .{
+            .attrs = decl_attrs ++ .{
                 .{ .linkage_name, .strp },
                 //.{ .type, .ref_addr },
                 .{ .low_pc, .addr },
@@ -2334,20 +2386,20 @@ pub const AbbrevCode = enum {
         },
         .decl_nullary_func_generic = .{
             .tag = .subprogram,
-            .attrs = decl_abbrev_common_attrs ++ .{
+            .attrs = decl_attrs ++ .{
                 .{ .type, .ref_addr },
             },
         },
         .decl_func_generic = .{
             .tag = .subprogram,
             .children = true,
-            .attrs = decl_abbrev_common_attrs ++ .{
+            .attrs = decl_attrs ++ .{
                 .{ .type, .ref_addr },
             },
         },
         .decl_extern_nullary_func = .{
             .tag = .subprogram,
-            .attrs = decl_abbrev_common_attrs ++ .{
+            .attrs = decl_attrs ++ .{
                 .{ .linkage_name, .strp },
                 .{ .type, .ref_addr },
                 .{ .low_pc, .addr },
@@ -2358,7 +2410,7 @@ pub const AbbrevCode = enum {
         .decl_extern_func = .{
             .tag = .subprogram,
             .children = true,
-            .attrs = decl_abbrev_common_attrs ++ .{
+            .attrs = decl_attrs ++ .{
                 .{ .linkage_name, .strp },
                 .{ .type, .ref_addr },
                 .{ .low_pc, .addr },
@@ -2366,47 +2418,47 @@ pub const AbbrevCode = enum {
                 .{ .noreturn, .flag },
             },
         },
-        .generic_decl_var = .{
+        .decl_specification_struct = .{
             .tag = .variable,
-            .attrs = generic_decl_abbrev_common_attrs,
+            .attrs = decl_specification_attrs,
         },
-        .generic_decl_const = .{
+        .decl_specification_union = .{
             .tag = .constant,
-            .attrs = generic_decl_abbrev_common_attrs,
+            .attrs = decl_specification_attrs,
         },
-        .generic_decl_func = .{
+        .decl_specification_func = .{
             .tag = .subprogram,
-            .attrs = generic_decl_abbrev_common_attrs,
+            .attrs = decl_specification_attrs,
         },
         .decl_instance_alias = .{
             .tag = .imported_declaration,
-            .attrs = decl_instance_abbrev_common_attrs ++ .{
+            .attrs = decl_instance_attrs ++ .{
                 .{ .import, .ref_addr },
             },
         },
         .decl_instance_empty_enum = .{
             .tag = .enumeration_type,
-            .attrs = decl_instance_abbrev_common_attrs ++ .{
+            .attrs = decl_instance_attrs ++ .{
                 .{ .type, .ref_addr },
             },
         },
         .decl_instance_enum = .{
             .tag = .enumeration_type,
             .children = true,
-            .attrs = decl_instance_abbrev_common_attrs ++ .{
+            .attrs = decl_instance_attrs ++ .{
                 .{ .type, .ref_addr },
             },
         },
         .decl_instance_namespace_struct = .{
             .tag = .structure_type,
-            .attrs = decl_instance_abbrev_common_attrs ++ .{
+            .attrs = decl_instance_attrs ++ .{
                 .{ .declaration, .flag },
             },
         },
         .decl_instance_struct = .{
             .tag = .structure_type,
             .children = true,
-            .attrs = decl_instance_abbrev_common_attrs ++ .{
+            .attrs = decl_instance_attrs ++ .{
                 .{ .byte_size, .udata },
                 .{ .alignment, .udata },
             },
@@ -2414,14 +2466,14 @@ pub const AbbrevCode = enum {
         .decl_instance_packed_struct = .{
             .tag = .structure_type,
             .children = true,
-            .attrs = decl_instance_abbrev_common_attrs ++ .{
+            .attrs = decl_instance_attrs ++ .{
                 .{ .type, .ref_addr },
             },
         },
         .decl_instance_union = .{
             .tag = .union_type,
             .children = true,
-            .attrs = decl_instance_abbrev_common_attrs ++ .{
+            .attrs = decl_instance_attrs ++ .{
                 .{ .byte_size, .udata },
                 .{ .alignment, .udata },
             },
@@ -2429,13 +2481,13 @@ pub const AbbrevCode = enum {
         .decl_instance_packed_union = .{
             .tag = .union_type,
             .children = true,
-            .attrs = decl_instance_abbrev_common_attrs ++ .{
+            .attrs = decl_instance_attrs ++ .{
                 .{ .type, .ref_addr },
             },
         },
         .decl_instance_var = .{
             .tag = .variable,
-            .attrs = decl_instance_abbrev_common_attrs ++ .{
+            .attrs = decl_instance_attrs ++ .{
                 .{ .linkage_name, .strp },
                 .{ .type, .ref_addr },
                 .{ .location, .exprloc },
@@ -2445,7 +2497,7 @@ pub const AbbrevCode = enum {
         },
         .decl_instance_const = .{
             .tag = .constant,
-            .attrs = decl_instance_abbrev_common_attrs ++ .{
+            .attrs = decl_instance_attrs ++ .{
                 .{ .linkage_name, .strp },
                 .{ .type, .ref_addr },
                 .{ .alignment, .udata },
@@ -2454,7 +2506,7 @@ pub const AbbrevCode = enum {
         },
         .decl_instance_const_runtime_bits = .{
             .tag = .constant,
-            .attrs = decl_instance_abbrev_common_attrs ++ .{
+            .attrs = decl_instance_attrs ++ .{
                 .{ .linkage_name, .strp },
                 .{ .type, .ref_addr },
                 .{ .alignment, .udata },
@@ -2464,7 +2516,7 @@ pub const AbbrevCode = enum {
         },
         .decl_instance_const_comptime_state = .{
             .tag = .constant,
-            .attrs = decl_instance_abbrev_common_attrs ++ .{
+            .attrs = decl_instance_attrs ++ .{
                 .{ .linkage_name, .strp },
                 .{ .type, .ref_addr },
                 .{ .alignment, .udata },
@@ -2474,7 +2526,7 @@ pub const AbbrevCode = enum {
         },
         .decl_instance_const_runtime_bits_comptime_state = .{
             .tag = .constant,
-            .attrs = decl_instance_abbrev_common_attrs ++ .{
+            .attrs = decl_instance_attrs ++ .{
                 .{ .linkage_name, .strp },
                 .{ .type, .ref_addr },
                 .{ .alignment, .udata },
@@ -2485,7 +2537,7 @@ pub const AbbrevCode = enum {
         },
         .decl_instance_nullary_func = .{
             .tag = .subprogram,
-            .attrs = decl_instance_abbrev_common_attrs ++ .{
+            .attrs = decl_instance_attrs ++ .{
                 .{ .linkage_name, .strp },
                 .{ .type, .ref_addr },
                 .{ .low_pc, .addr },
@@ -2498,7 +2550,7 @@ pub const AbbrevCode = enum {
         .decl_instance_func = .{
             .tag = .subprogram,
             .children = true,
-            .attrs = decl_instance_abbrev_common_attrs ++ .{
+            .attrs = decl_instance_attrs ++ .{
                 .{ .linkage_name, .strp },
                 .{ .type, .ref_addr },
                 .{ .low_pc, .addr },
@@ -2510,20 +2562,20 @@ pub const AbbrevCode = enum {
         },
         .decl_instance_nullary_func_generic = .{
             .tag = .subprogram,
-            .attrs = decl_instance_abbrev_common_attrs ++ .{
+            .attrs = decl_instance_attrs ++ .{
                 .{ .type, .ref_addr },
             },
         },
         .decl_instance_func_generic = .{
             .tag = .subprogram,
             .children = true,
-            .attrs = decl_instance_abbrev_common_attrs ++ .{
+            .attrs = decl_instance_attrs ++ .{
                 .{ .type, .ref_addr },
             },
         },
         .decl_instance_extern_nullary_func = .{
             .tag = .subprogram,
-            .attrs = decl_instance_abbrev_common_attrs ++ .{
+            .attrs = decl_instance_attrs ++ .{
                 .{ .linkage_name, .strp },
                 .{ .type, .ref_addr },
                 .{ .low_pc, .addr },
@@ -2534,7 +2586,7 @@ pub const AbbrevCode = enum {
         .decl_instance_extern_func = .{
             .tag = .subprogram,
             .children = true,
-            .attrs = decl_instance_abbrev_common_attrs ++ .{
+            .attrs = decl_instance_attrs ++ .{
                 .{ .linkage_name, .strp },
                 .{ .type, .ref_addr },
                 .{ .low_pc, .addr },
