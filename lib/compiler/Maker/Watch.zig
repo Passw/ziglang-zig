@@ -84,7 +84,7 @@ const Os = switch (builtin.os.tag) {
             }
 
             fn destroy(lfh: FileHandle, gpa: Allocator) void {
-                const ptr: [*]u8 = @ptrCast(lfh.handle);
+                const ptr: [*]align(@alignOf(std.os.linux.file_handle)) u8 = @ptrCast(@alignCast(lfh.handle));
                 const allocated_slice = ptr[0 .. @sizeOf(std.os.linux.file_handle) + lfh.handle.handle_bytes];
                 return gpa.free(allocated_slice);
             }
@@ -122,6 +122,24 @@ const Os = switch (builtin.os.tag) {
                 .generation = 0,
                 .maker = maker,
             };
+        }
+
+        fn deinit(w: *Watch) void {
+            const gpa = w.maker.gpa;
+
+            for (w.os.handle_table.keys(), w.os.handle_table.values()) |fh, *reaction| {
+                fh.destroy(gpa);
+                reaction.reaction_set.deinit(gpa);
+            }
+            w.os.handle_table.deinit(gpa);
+
+            for (w.os.poll_fds.values()) |pollfd| {
+                Io.Threaded.closeFd(pollfd.fd);
+            }
+            w.os.poll_fds.deinit(gpa);
+
+            w.dir_table.deinit(gpa);
+            w.* = undefined;
         }
 
         fn getDirHandle(gpa: Allocator, path: std.Build.Cache.Path, mount_id: *MountId) !FileHandle {
@@ -365,7 +383,7 @@ const Os = switch (builtin.os.tag) {
                 }
             }
 
-            fn notifyApc(apc_context: ?*anyopaque, iosb: *windows.IO_STATUS_BLOCK, _: windows.ULONG) align(std.Io.Threaded.apc_align) callconv(.winapi) void {
+            fn notifyApc(apc_context: ?*anyopaque, iosb: *windows.IO_STATUS_BLOCK, _: windows.ULONG) align(Io.Threaded.apc_align) callconv(.winapi) void {
                 const w: *Watch = @ptrCast(@alignCast(apc_context));
                 const dir: *Directory = @fieldParentPtr("iosb", iosb);
                 assert(iosb.u.Status != .PENDING);
@@ -483,6 +501,18 @@ const Os = switch (builtin.os.tag) {
                 .generation = 0,
                 .maker = maker,
             };
+        }
+
+        fn deinit(w: *Watch) void {
+            const gpa = w.maker.gpa;
+
+            for (w.os.handle_table.keys()) |dir| {
+                dir.deinit(gpa, w);
+            }
+            w.os.handle_table.deinit(gpa);
+
+            w.dir_table.deinit(gpa);
+            w.* = undefined;
         }
 
         fn getFileId(handle: windows.HANDLE) !FileId {
@@ -695,6 +725,21 @@ const Os = switch (builtin.os.tag) {
             };
         }
 
+        fn deinit(w: *Watch) void {
+            const gpa = w.maker.gpa;
+
+            for (w.os.handles.items(.rs), w.os.handles.items(.dir_fd)) |rs, dir_fd| {
+                rs.deinit(gpa);
+                Os.Threaded.closeFd(dir_fd);
+            }
+            w.os.handles.deinit(gpa);
+
+            Os.Threaded.closeFd(w.os.kq_fd);
+
+            w.dir_table.deinit(gpa);
+            w.* = undefined;
+        }
+
         fn update(w: *Watch, steps: []const Configuration.Step.Index) !void {
             const maker = w.maker;
             const gpa = maker.gpa;
@@ -713,7 +758,7 @@ const Os = switch (builtin.os.tag) {
                                     fatal("failed to open directory {f}: {t}", .{ path, err });
                                 };
                             // Empirically the dir has to stay open or else no events are triggered.
-                            errdefer if (!skip_open_dir) std.Io.Threaded.closeFd(dir_fd);
+                            errdefer if (!skip_open_dir) Io.Threaded.closeFd(dir_fd);
                             const changes = [1]posix.Kevent{.{
                                 .ident = @bitCast(@as(isize, dir_fd)),
                                 .filter = std.c.EVFILT.VNODE,
@@ -813,7 +858,7 @@ const Os = switch (builtin.os.tag) {
                     };
                     const filtered_changes = if (i == handles.len - 1) changes[0..1] else &changes;
                     _ = try Io.Kqueue.kevent(w.os.kq_fd, filtered_changes, &.{}, null);
-                    if (path.sub_path.len != 0) std.Io.Threaded.closeFd(dir_fd);
+                    if (path.sub_path.len != 0) Io.Threaded.closeFd(dir_fd);
 
                     w.dir_table.swapRemoveAt(i);
                     handles.swapRemove(i);
@@ -876,6 +921,13 @@ const Os = switch (builtin.os.tag) {
                 .generation = undefined,
                 .maker = maker,
             };
+        }
+        fn deinit(w: *Watch) void {
+            const gpa = w.maker.gpa;
+            const io = w.maker.io;
+            w.os.fse.deinit(gpa, io);
+            w.dir_table.deinit(gpa);
+            w.* = undefined;
         }
         fn update(w: *Watch, steps: []const Configuration.Step.Index) !void {
             try w.os.fse.setPaths(w.maker, steps);
@@ -969,4 +1021,8 @@ pub const WaitResult = enum {
 /// May return `error.MustReconfigure`.
 pub fn wait(w: *Watch, timeout: Timeout) !WaitResult {
     return Os.wait(w, timeout);
+}
+
+pub fn deinit(w: *Watch) void {
+    Os.deinit(w);
 }

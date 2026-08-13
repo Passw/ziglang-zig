@@ -225,7 +225,7 @@ pub fn main(init: process.Init.Minimal) !void {
     var skip_oom_steps = false;
     var test_timeout_ns: ?u64 = null;
     var color: Color = .settingFromEnvironment(&graph.environ_map);
-    var watch = false;
+    var watch_flag = false;
     var fuzz: ?Fuzz.Mode = null;
     var debounce_interval_ms: u16 = 50;
     var listen: bool = false;
@@ -474,7 +474,7 @@ pub fn main(init: process.Init.Minimal) !void {
             } else if (mem.eql(u8, arg, "--verbose-llvm-ir")) {
                 graph.verbose_llvm_ir = true;
             } else if (mem.eql(u8, arg, "--watch")) {
-                watch = true;
+                watch_flag = true;
             } else if (mem.eql(u8, arg, "--time-report")) {
                 graph.time_report = true;
                 if (webui_listen == null) webui_listen = .{ .ip6 = .loopback(0) };
@@ -574,7 +574,7 @@ pub fn main(init: process.Init.Minimal) !void {
     }
 
     const early_exit_mode = fetch_only or help_menu or steps_menu or print_configuration != .none;
-    const server_mode = !early_exit_mode and (watch or webui_listen != null or fuzz != null or listen);
+    const server_mode = !early_exit_mode and (watch_flag or webui_listen != null or fuzz != null or listen);
 
     process.raiseFileDescriptorLimit();
 
@@ -701,7 +701,7 @@ pub fn main(init: process.Init.Minimal) !void {
     var protocol_server_allocation: AvoidableServer = undefined;
     const protocol_server: ?*AvoidableServer = if (listen) s: {
         if (builtin.single_threaded) fatal("--listen is not yet supported on single-threaded hosts", .{});
-        if (watch) fatal("using '--watch' and '--listen' together is not supported", .{});
+        if (watch_flag) fatal("using '--watch' and '--listen' together is not supported", .{});
         if (fuzz != null) fatal("using '--fuzz' and '--listen' together is not supported", .{});
         if (step_names.items.len > 0) fatal("build steps must be provided over the protocol instead of using CLI arguments", .{});
         protocol_server_allocation = .{
@@ -788,7 +788,7 @@ pub fn main(init: process.Init.Minimal) !void {
                 .skip_oom_steps = skip_oom_steps,
                 .unit_test_timeout_ns = test_timeout_ns,
 
-                .watch = watch,
+                .watch = watch_flag,
                 .web_server = web_server,
                 .protocol_server = protocol_server,
                 .protocol_server_mutex = .init,
@@ -801,7 +801,7 @@ pub fn main(init: process.Init.Minimal) !void {
                 .multiline_errors = multiline_errors,
                 .summary = summary orelse if (listen)
                     .none
-                else if (watch or webui_listen != null)
+                else if (watch_flag or webui_listen != null)
                     .new
                 else
                     .failures,
@@ -820,7 +820,8 @@ pub fn main(init: process.Init.Minimal) !void {
             if (protocol_server) |s| {
                 try s.serveStringMessage(.bsp_configuration, try arena.print("{f}", .{scanned_config.path}));
 
-                var w: ?Watch = null;
+                var watch: ?Watch = null;
+                defer if (watch) |*w| w.deinit();
 
                 const Event = union(enum) {
                     message: Reader.Error!Client.Message.Header,
@@ -869,11 +870,11 @@ pub fn main(init: process.Init.Minimal) !void {
 
                                 if (body.flags.watch) {
                                     if (!Watch.have_impl) unreachable;
-                                    if (w == null) w = try .init(&maker);
+                                    if (watch == null) watch = try .init(&maker);
 
-                                    try updateWatch(&maker, &w.?);
+                                    try updateWatch(&maker, &watch.?);
                                     try select.concurrent(.fs_event, Watch.wait, .{
-                                        &w.?,
+                                        &watch.?,
                                         if (in_debounce) .{ .ms = debounce_interval_ms } else .none,
                                     });
                                 }
@@ -902,7 +903,7 @@ pub fn main(init: process.Init.Minimal) !void {
                             .clean => {},
                         }
                         try select.concurrent(.fs_event, Watch.wait, .{
-                            &w.?,
+                            &watch.?,
                             if (in_debounce) .{ .ms = debounce_interval_ms } else .none,
                         });
                         continue :loop try select.await();
@@ -924,10 +925,11 @@ pub fn main(init: process.Init.Minimal) !void {
             };
 
             var w: Watch = w: {
-                if (!watch) break :w undefined;
+                if (!watch_flag) break :w undefined;
                 if (!Watch.have_impl) fatal("--watch not yet implemented for {t}", .{native_os});
                 break :w try .init(&maker);
             };
+            defer w.deinit();
 
             if (web_server) |ws| try ws.updateConfiguration(&maker);
 
@@ -942,7 +944,7 @@ pub fn main(init: process.Init.Minimal) !void {
 
                 if (web_server) |ws| {
                     const c = &scanned_config.configuration;
-                    assert(!watch); // fatal error after CLI parsing
+                    assert(!watch_flag); // fatal error after CLI parsing
                     while (true) switch (try ws.wait()) {
                         .rebuild => {
                             for (maker.step_stack.keys()) |step_index| {
@@ -1019,7 +1021,7 @@ pub fn main(init: process.Init.Minimal) !void {
             if (protocol_server != null) {
                 fatal("(zig build system) TODO send error messages to client when build.zig compilation fails", .{});
             }
-            if (watch and can_fs_watch) {
+            if (watch_flag and can_fs_watch) {
                 fatal("(zig build system) TODO set up fs watching even when build.zig compilation fails", .{});
             } else {
                 fatal("(zig build system) TODO stay running and wait for user to request rebuild even when build.zig compilation fails", .{});
