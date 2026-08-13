@@ -728,13 +728,13 @@ const Os = switch (builtin.os.tag) {
         fn deinit(w: *Watch) void {
             const gpa = w.maker.gpa;
 
-            for (w.os.handles.items(.rs), w.os.handles.items(.dir_fd)) |rs, dir_fd| {
+            for (w.os.handles.items(.rs), w.os.handles.items(.dir_fd)) |*rs, dir_fd| {
                 rs.deinit(gpa);
-                Os.Threaded.closeFd(dir_fd);
+                Io.Threaded.closeFd(dir_fd);
             }
             w.os.handles.deinit(gpa);
 
-            Os.Threaded.closeFd(w.os.kq_fd);
+            Io.Threaded.closeFd(w.os.kq_fd);
 
             w.dir_table.deinit(gpa);
             w.* = undefined;
@@ -875,12 +875,12 @@ const Os = switch (builtin.os.tag) {
             var n = try Io.Kqueue.kevent(w.os.kq_fd, &.{}, &event_buffer, timeout.toTimespec(&timespec_buffer));
             if (n == 0) return .timeout;
             const reaction_sets = w.os.handles.items(.rs);
-            var any_dirty = markDirtySteps(maker, reaction_sets, event_buffer[0..n], false);
+            var any_dirty = try markDirtySteps(maker, reaction_sets, event_buffer[0..n], false);
             timespec_buffer = .{ .sec = 0, .nsec = 0 };
             while (n == event_buffer.len) {
                 n = try Io.Kqueue.kevent(w.os.kq_fd, &.{}, &event_buffer, &timespec_buffer);
                 if (n == 0) break;
-                any_dirty = markDirtySteps(maker, reaction_sets, event_buffer[0..n], any_dirty);
+                any_dirty = try markDirtySteps(maker, reaction_sets, event_buffer[0..n], any_dirty);
             }
             return if (any_dirty) .dirty else .clean;
         }
@@ -890,7 +890,7 @@ const Os = switch (builtin.os.tag) {
             reaction_sets: []ReactionSet,
             events: []const std.c.Kevent,
             start_any_dirty: bool,
-        ) bool {
+        ) !bool {
             var any_dirty = start_any_dirty;
             for (events) |event| {
                 const index: usize = @intCast(event.udata);
@@ -924,9 +924,8 @@ const Os = switch (builtin.os.tag) {
         }
         fn deinit(w: *Watch) void {
             const gpa = w.maker.gpa;
-            const io = w.maker.io;
+            const io = w.maker.graph.io;
             w.os.fse.deinit(gpa, io);
-            w.dir_table.deinit(gpa);
             w.* = undefined;
         }
         fn update(w: *Watch, steps: []const Configuration.Step.Index) !void {
