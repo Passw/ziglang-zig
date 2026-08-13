@@ -1431,7 +1431,7 @@ pub const Object = struct {
 
     pub fn getDebugType(o: *Object, pt: Zcu.PerThread, ty: Type) Allocator.Error!Builder.Metadata {
         assert(!o.builder.strip);
-        const index = try o.type_pool.get(pt, .{ .llvm = o }, ty.toIntern());
+        const index = o.type_pool.get(pt, .{ .llvm = o }, ty.toIntern()) catch |err| return @errorCast(err);
         return o.debug_types.items[@backingInt(index)];
     }
 
@@ -4108,7 +4108,7 @@ pub const Object = struct {
     }
 
     pub fn lazyAbiAlignment(o: *Object, pt: Zcu.PerThread, ty: Type) Allocator.Error!Builder.Alignment.Lazy {
-        const index = try o.type_pool.get(pt, .{ .llvm = o }, ty.toIntern());
+        const index = o.type_pool.get(pt, .{ .llvm = o }, ty.toIntern()) catch |err| return @errorCast(err);
         return o.lazy_abi_aligns.items[@backingInt(index)];
     }
 

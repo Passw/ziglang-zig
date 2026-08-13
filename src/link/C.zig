@@ -209,7 +209,7 @@ pub fn addConst(
     pt: Zcu.PerThread,
     pool_index: link.ConstPool.Index,
     val: InternPool.Index,
-) Allocator.Error!void {
+) link.Error!void {
     const zcu = pt.zcu;
     const gpa = zcu.comp.gpa;
     assert(zcu.intern_pool.typeOf(val) == .type_type);
@@ -310,7 +310,7 @@ pub fn updateConst(
     pt: Zcu.PerThread,
     index: link.ConstPool.Index,
     val: InternPool.Index,
-) Allocator.Error!void {
+) link.Error!void {
     const zcu = pt.zcu;
     const gpa = zcu.comp.gpa;
 
@@ -1344,7 +1344,7 @@ fn addCTypeDependencies(
     c: *C,
     pt: Zcu.PerThread,
     deps: *const codegen.CType.Dependencies,
-) Allocator.Error!CTypeDependencies {
+) link.Error!CTypeDependencies {
     const gpa = pt.zcu.comp.gpa;
 
     try c.bigint_types.ensureUnusedCapacity(gpa, deps.bigint.count());

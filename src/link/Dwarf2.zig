@@ -6,7 +6,7 @@ const_pool: link.ConstPool,
 
 units: std.array_hash_map.Auto(*Module, Unit),
 /// Indices are `link.ConstPool.Index`.
-values: std.ArrayList(Value),
+consts: std.ArrayList(Const),
 globals: std.array_hash_map.Auto(InternPool.Nav.Index, Global),
 funcs: std.array_hash_map.Auto(InternPool.Nav.Index, Func),
 decls: std.array_hash_map.Auto(InternPool.TrackedInst.Index, MappedFile.Node.Index),
@@ -92,20 +92,12 @@ pub const Unit = struct {
     }
 };
 
-pub const Value = struct {
-    debug_info_ni: MappedFile.Node.Index,
+pub const Const = struct {
+    debug_info_ni: MappedFile.Node.Index.Optional,
 
-    pub const Index = enum(u32) {
-        _,
-
-        pub fn cpi(vi: Value.Index, dwarf: *Dwarf) link.ConstPool.Index {
-            return dwarf.values[@backingInt(vi)];
-        }
-
-        pub fn get(vi: Value.Index, dwarf: *Dwarf) *Global {
-            return &dwarf.values[@backingInt(vi)];
-        }
-    };
+    pub fn get(cpi: link.ConstPool.Index, dwarf: *Dwarf) *Const {
+        return &dwarf.consts.items[@backingInt(cpi)];
+    }
 };
 
 pub const Global = struct {
@@ -626,14 +618,14 @@ pub const WipNav = struct {
             return debug.wip_nav.genDebugFrame(loc, cfa);
         }
 
-        pub fn startDebugInfo(debug: *Debug) link.Error!void {
+        pub fn startFuncDebugInfo(debug: *Debug) link.Error!void {
             assert(debug.wip_nav.func != .none);
-            debug.startDebugInfoInner() catch |err| switch (err) {
+            debug.startFuncDebugInfoInner() catch |err| switch (err) {
                 error.WriteFailed => return debug.wip_nav.dwarf.reportWriteError(&debug.info_writer),
                 else => |e| return e,
             };
         }
-        fn startDebugInfoInner(debug: *Debug) link.EmitError!void {
+        fn startFuncDebugInfoInner(debug: *Debug) link.EmitError!void {
             const dwarf = debug.wip_nav.dwarf;
             const zcu = debug.pt.zcu;
             const ip = &zcu.intern_pool;
@@ -644,6 +636,7 @@ pub const WipNav = struct {
             const nav = ip.getNav(func.owner_nav);
             const diw = &debug.info_writer.interface;
             try diw.writeUleb128(try dwarf.refAbbrevCode(.decl_func));
+            try debug.refType(.fromInterned(zcu.fileRootType(inst_info.file)));
             try diw.writeInt(u32, decl.src_line + 1, dwarf.endian);
             try diw.writeUleb128(decl.src_column + 1);
             try diw.writeByte(if (decl.is_pub) DW.ACCESS.public else DW.ACCESS.private);
@@ -730,7 +723,7 @@ pub const WipNav = struct {
             debug: *Debug,
             tag: LocalVarTag,
             opt_name: ?[]const u8,
-            ty: ZigType,
+            ty: Type,
             loc: Loc,
         ) link.Error!void {
             return debug.genLocalVarDebugInfoInner(tag, opt_name, ty, loc) catch |err| switch (err) {
@@ -742,7 +735,7 @@ pub const WipNav = struct {
             debug: *Debug,
             tag: LocalVarTag,
             opt_name: ?[]const u8,
-            ty: ZigType,
+            ty: Type,
             loc: Loc,
         ) link.EmitError!void {
             assert(debug.wip_nav.func != .none);
@@ -761,7 +754,7 @@ pub const WipNav = struct {
             debug: *Debug,
             tag: LocalConstTag,
             opt_name: ?[]const u8,
-            val: ZigValue,
+            val: Value,
         ) link.Error!void {
             return debug.genLocalConstDebugInfoInner(tag, opt_name, val) catch |err| switch (err) {
                 error.WriteFailed => return debug.wip_nav.dwarf.reportWriteError(&debug.info_writer),
@@ -772,7 +765,7 @@ pub const WipNav = struct {
             debug: *Debug,
             tag: LocalConstTag,
             opt_name: ?[]const u8,
-            val: ZigValue,
+            val: Value,
         ) link.EmitError!void {
             assert(debug.wip_nav.func != .none);
             const zcu = debug.pt.zcu;
@@ -1059,11 +1052,11 @@ pub const WipNav = struct {
 
             const old_owner_nav = zcu.funcInfo(debug.wip_nav.func).owner_nav;
             const old_inst_info = ip.getNav(old_owner_nav).srcInst(ip).resolveFull(ip).?;
-            const old_file = zcu.fileByIndex(old_inst_info.file);
+            const old_zf = zcu.fileByIndex(old_inst_info.file);
             const new_inst_info = ip.getNav(new_owner_nav).srcInst(ip).resolveFull(ip).?;
-            const new_file = zcu.fileByIndex(new_inst_info.file);
+            const new_zf = zcu.fileByIndex(new_inst_info.file);
             if (old_inst_info.file != new_inst_info.file) {
-                const new_ui = dwarf.getUnit(new_file.mod.?);
+                const new_ui = dwarf.getUnit(new_zf.mod.?);
                 _, const new_fi =
                     try debug.wip_nav.unit.get(dwarf).getFile(zcu.gpa, new_ui, new_inst_info.file);
 
@@ -1071,8 +1064,8 @@ pub const WipNav = struct {
                 try dlw.writeUleb128(@backingInt(new_fi));
             }
 
-            const old_src_line: i33 = old_file.zir.?.getDeclaration(old_inst_info.inst).src_line;
-            const new_src_line: i33 = new_file.zir.?.getDeclaration(new_inst_info.inst).src_line;
+            const old_src_line: i33 = old_zf.zir.?.getDeclaration(old_inst_info.inst).src_line;
+            const new_src_line: i33 = new_zf.zir.?.getDeclaration(new_inst_info.inst).src_line;
             if (new_src_line != old_src_line) {
                 try dlw.writeByte(DW.LNS.advance_line);
                 try dlw.writeSleb128(new_src_line - old_src_line);
@@ -1137,27 +1130,21 @@ pub const WipNav = struct {
             );
         }
 
-        fn refType(debug: *Debug, ty: ZigType) link.EmitError!void {
+        fn refType(debug: *Debug, ty: Type) link.EmitError!void {
             return debug.refValue(ty.toValue());
         }
 
-        fn refValue(debug: *Debug, value: ZigValue) link.EmitError!void {
-            try debug.wip_nav.dwarf.sectionOffset(&debug.info_writer, try debug.getValueNode(value), 0);
-        }
-
-        fn getValueNode(debug: *Debug, value: ZigValue) link.Error!MappedFile.Node.Index {
-            const zcu = debug.pt.zcu;
-            if (value.typeOf(zcu).toIntern() != .type_type) {
-                assert(value.typeOf(zcu).comptimeOnly(zcu));
-            }
+        fn refValue(debug: *Debug, val: Value) link.EmitError!void {
             const dwarf = debug.wip_nav.dwarf;
-            const index = try dwarf.const_pool.get(debug.pt, .{
-                .elf2 = dwarf.lf.cast(.elf2).?,
-            }, value.toIntern());
-            return dwarf.values.items[@backingInt(index)].debug_info_ni;
+            const cpi = try dwarf.getConst(debug.pt, val);
+            try dwarf.sectionOffset(
+                &debug.info_writer,
+                Const.get(cpi, dwarf).debug_info_ni.unwrap().?,
+                0,
+            );
         }
 
-        fn blockValue(debug: *Debug, val: ZigValue) link.EmitError!void {
+        fn blockValue(debug: *Debug, val: Value) link.EmitError!void {
             const ty = val.typeOf(debug.pt.zcu);
             const diw = &debug.info_writer.interface;
             const size = ty.abiSize(debug.pt.zcu);
@@ -1355,7 +1342,7 @@ pub fn init(lf: *link.File, format: DW.Format) Dwarf {
         .const_pool = .empty,
 
         .units = .empty,
-        .values = .empty,
+        .consts = .empty,
         .globals = .empty,
         .funcs = .empty,
         .decls = .empty,
@@ -1429,9 +1416,10 @@ pub fn deinit(dwarf: *Dwarf) void {
     dwarf.const_pool.deinit(gpa);
     for (dwarf.units.values()) |*unit| unit.deinit(gpa);
     dwarf.units.deinit(gpa);
-    dwarf.values.deinit(gpa);
+    dwarf.consts.deinit(gpa);
     dwarf.globals.deinit(gpa);
     dwarf.funcs.deinit(gpa);
+    dwarf.decls.deinit(gpa);
     dwarf.debug_line_str.map.deinit(gpa);
     dwarf.debug_str.map.deinit(gpa);
     dwarf.* = undefined;
@@ -1471,6 +1459,13 @@ pub fn getUnit(dwarf: *Dwarf, mod: *Module) Unit.Index {
     return @fromBackingInt(@intCast(dwarf.units.getIndex(mod).?));
 }
 
+pub fn getConst(dwarf: *Dwarf, pt: Zcu.PerThread, val: Value) link.Error!link.ConstPool.Index {
+    const zcu = pt.zcu;
+    const ty = val.typeOf(zcu);
+    if (ty.toIntern() != .type_type) assert(ty.comptimeOnly(zcu));
+    return dwarf.const_pool.get(pt, .{ .elf2 = dwarf.lf.cast(.elf2).? }, val.toIntern());
+}
+
 pub fn getGlobal(dwarf: *Dwarf, nav: InternPool.Nav.Index) link.Error!Global.Index {
     const comp = dwarf.lf.comp;
     const gpa = comp.gpa;
@@ -1483,10 +1478,9 @@ pub fn getGlobal(dwarf: *Dwarf, nav: InternPool.Nav.Index) link.Error!Global.Ind
         const elf = dwarf.lf.cast(.elf2).?;
         try elf.nodes.ensureUnusedCapacity(gpa, 1);
         try elf.dwarf_globals.ensureUnusedCapacity(gpa, 1);
-        const unit = dwarf.getUnit(comp.zcu.?.zcu.navFileScope(nav).mod.?).get(dwarf);
-        assert(unit.debug_info_ni != .none);
-        global_gop.value_ptr.debug_info_ni = elf.addNodeAssumeCapacity(
-            elf.mf.addLastChildNode(gpa, unit.debug_info_ni, .{
+        const unit = dwarf.getUnit(comp.zcu.?.navFileScope(nav).mod.?).get(dwarf);
+        global_gop.value_ptr.debug_info_ni = .wrap(elf.addNodeAssumeCapacity(
+            unit.debug_info_ni.unwrap().?.addFloatingChild(gpa, &elf.mf, .{
                 .enable_next_moved = true,
             }) catch |err| switch (err) {
                 else => |e| return e,
@@ -1495,7 +1489,7 @@ pub fn getGlobal(dwarf: *Dwarf, nav: InternPool.Nav.Index) link.Error!Global.Ind
                 }),
             },
             .{ .global_debug_info = gi },
-        );
+        ));
         elf.dwarf_globals.addOneAssumeCapacity().* = .{
             .debug_info_first_target_reloc = .none,
             .debug_info_first_node_reloc = .none,
@@ -1773,7 +1767,6 @@ pub fn genDebugInfoPadding(dwarf: *Dwarf, diw: *Writer, size: u64) Writer.Error!
 
 pub fn genDebugLineHeader(
     dwarf: *Dwarf,
-    mod: *Module,
     unit: *Unit,
     dlh_nw: *MappedFile.Node.Writer,
     zcu: *Zcu,
@@ -1817,7 +1810,7 @@ pub fn genDebugLineHeader(
     try dlhw.writeByte(1);
     try dlhw.writeUleb128(DW.LNCT.path);
     try dlhw.writeUleb128(DW.FORM.line_strp);
-    const dir_count = 1;
+    const dir_count = unit.dirs.count();
     const directory_index_form: DeclValEnum(DW.FORM) = if (dir_count <= 1 << 8)
         .data1
     else if (dir_count <= 1 << 16)
@@ -1825,8 +1818,8 @@ pub fn genDebugLineHeader(
     else
         .udata;
     try dlhw.writeUleb128(dir_count);
-    {
-        const root_dir_path = try mod.root.toAbsolute(&zcu.comp.dirs, comp.gpa);
+    for (unit.dirs.keys()) |ui| {
+        const root_dir_path = try ui.mod(dwarf).root.toAbsolute(&zcu.comp.dirs, comp.gpa);
         defer comp.gpa.free(root_dir_path);
         try dwarf.strp(&dwarf.debug_line_str, dlh_nw, root_dir_path);
     }
@@ -1845,11 +1838,12 @@ pub fn genDebugLineHeader(
     for (unit.files.keys()) |zfi| {
         const zf = zcu.fileByIndex(zfi);
         try dwarf.strp(&dwarf.debug_line_str, dlh_nw, zf.sub_file_path);
+        const di = unit.dirs.getIndex(dwarf.getUnit(zf.mod.?)).?;
         switch (directory_index_form) {
             else => unreachable,
-            .data1 => try dlhw.writeByte(0),
-            .data2 => try dlhw.writeInt(u16, 0, dwarf.endian),
-            .udata => try dlhw.writeUleb128(0),
+            .data1 => try dlhw.writeByte(@intCast(di)),
+            .data2 => try dlhw.writeInt(u16, @intCast(di), dwarf.endian),
+            .udata => try dlhw.writeUleb128(di),
         }
         try dlhw.writeInt(i64, @truncate(zf.stat.mtime.nanoseconds), dwarf.endian);
         try dlhw.writeInt(u64, zf.stat.size, dwarf.endian);
@@ -1936,6 +1930,209 @@ pub fn genDebugRnglists(
     try drw.writeUleb128(func_length);
     unit.debug_rnglists_end = drw.end;
     try drw.writeByte(DW.RLE.end_of_list);
+}
+
+pub fn updateComptimeNav(
+    dwarf: *Dwarf,
+    pt: Zcu.PerThread,
+    nav_index: InternPool.Nav.Index,
+) link.Error!void {
+    const zcu = dwarf.lf.comp.zcu.?;
+    const ip = &zcu.intern_pool;
+    const nav = ip.getNav(nav_index);
+    const inst_info = nav.srcInst(ip).resolveFull(ip).?;
+    const nav_val: Value = .fromInterned(nav.resolved.?.value);
+    const file = zcu.fileByIndex(inst_info.file);
+    const zir = &file.zir.?;
+    const decl = zir.getDeclaration(inst_info.inst);
+    switch (decl.kind) {
+        .unnamed_test, .@"test", .decltest => return,
+        .@"comptime", .@"const", .@"var" => {},
+    }
+    emit: switch (ip.indexToKey(nav_val.toIntern())) {
+        .struct_type => {
+            const loaded_struct = ip.loadStructType(nav_val.toIntern());
+            if (nav_index.toOptional() == loaded_struct.name_nav) {
+                _ = try dwarf.const_pool.get(pt, .{ .elf2 = dwarf.lf.cast(.elf2).? }, nav_val.toIntern());
+                break :emit;
+            }
+        },
+        .enum_type => {
+            const loaded_enum = ip.loadEnumType(nav_val.toIntern());
+            if (nav_index.toOptional() == loaded_enum.name_nav) {
+                _ = try dwarf.const_pool.get(pt, .{ .elf2 = dwarf.lf.cast(.elf2).? }, nav_val.toIntern());
+                break :emit;
+            }
+        },
+        .union_type => {
+            const loaded_union = ip.loadUnionType(nav_val.toIntern());
+            if (nav_index.toOptional() == loaded_union.name_nav) {
+                _ = try dwarf.const_pool.get(pt, .{ .elf2 = dwarf.lf.cast(.elf2).? }, nav_val.toIntern());
+                break :emit;
+            }
+        },
+        .opaque_type => {
+            const loaded_opaque = ip.loadOpaqueType(nav_val.toIntern());
+            if (nav_index.toOptional() == loaded_opaque.name_nav) {
+                _ = try dwarf.const_pool.get(pt, .{ .elf2 = dwarf.lf.cast(.elf2).? }, nav_val.toIntern());
+                break :emit;
+            }
+        },
+        .func => |func| if (func.owner_nav == nav_index and func.generic_owner == .none) {
+            const fi = try dwarf.getFunc(func.owner_nav);
+            const f = fi.get(dwarf);
+            if (f.fde_ni != .none or f.debug_line_ni != .none) return;
+            var di_nw: MappedFile.Node.Writer = undefined;
+            f.debug_info_ni.unwrap().?.writer(zcu.gpa, &dwarf.lf.cast(.elf2).?.mf, &di_nw);
+            defer di_nw.deinit();
+            const parent_cpi = try dwarf.getConst(pt, .fromInterned(zcu.fileRootType(inst_info.file)));
+            dwarf.genDeclFuncGeneric(
+                &di_nw,
+                zir,
+                parent_cpi,
+                &decl,
+                &ip.indexToKey(func.ty).func_type,
+                nav.name.toSlice(ip),
+                zir.getParamBody(func.zir_body_inst.resolve(ip).?),
+            ) catch |err| switch (err) {
+                else => |e| return e,
+                error.WriteFailed => return dwarf.reportWriteError(&di_nw),
+            };
+        } else return,
+
+        else => return,
+
+        // memoization, not values
+        .memoized_call => unreachable,
+    }
+    try dwarf.const_pool.flushPending(pt, .{ .elf2 = dwarf.lf.cast(.elf2).? });
+}
+fn genDeclFuncGeneric(
+    dwarf: *Dwarf,
+    di_nw: *MappedFile.Node.Writer,
+    zir: *const std.zig.Zir,
+    parent_cpi: link.ConstPool.Index,
+    decl: *const std.zig.Zir.Inst.Declaration.Unwrapped,
+    fn_ty: *const InternPool.Key.FuncType,
+    name: []const u8,
+    param_body: []const std.zig.Zir.Inst.Index,
+) link.EmitError!void {
+    const diw = &di_nw.interface;
+    try diw.writeUleb128(try dwarf.refAbbrevCode(.decl_func_generic));
+    try dwarf.sectionOffset(di_nw, Const.get(parent_cpi, dwarf).debug_info_ni.unwrap().?, 0);
+    try diw.writeInt(u32, decl.src_line + 1, dwarf.endian);
+    try diw.writeUleb128(decl.src_column + 1);
+    try diw.writeByte(if (decl.is_pub) DW.ACCESS.public else DW.ACCESS.private);
+    try dwarf.strp(&dwarf.debug_str, di_nw, name);
+    for (param_body) |param_inst| switch (zir.getParamName(param_inst) orelse continue) {
+        .empty => {
+            try diw.writeUleb128(try dwarf.refAbbrevCode(.unnamed_arg));
+            try diw.writeUleb128(0);
+        },
+        else => |param_name| {
+            try diw.writeUleb128(try dwarf.refAbbrevCode(.arg));
+            try dwarf.strp(&dwarf.debug_str, di_nw, zir.nullTerminatedString(param_name));
+            try diw.writeUleb128(0);
+        },
+    };
+    if (fn_ty.is_var_args) try diw.writeUleb128(try dwarf.refAbbrevCode(.is_var_args));
+    try diw.writeUleb128(@backingInt(AbbrevCode.null));
+    try dwarf.genDebugInfoPadding(diw, diw.unusedCapacityLen());
+}
+
+pub fn addConst(dwarf: *Dwarf, cpi: link.ConstPool.Index, val: InternPool.Index) link.Error!void {
+    const comp = dwarf.lf.comp;
+    const zcu = comp.zcu.?;
+    const ip = &zcu.intern_pool;
+    try dwarf.consts.ensureUnusedCapacity(comp.gpa, 1);
+
+    assert(@backingInt(cpi) == dwarf.consts.items.len);
+    dwarf.consts.appendAssumeCapacity(.{
+        .debug_info_ni = switch (ip.indexToKey(val)) {
+            else => .none,
+            .struct_type, .union_type, .enum_type, .opaque_type => |_, tag| debug_info_ni: {
+                if (switch (tag) {
+                    .struct_type => ip.loadStructType(val).name_nav,
+                    .union_type => ip.loadUnionType(val).name_nav,
+                    .enum_type => ip.loadEnumType(val).name_nav,
+                    .opaque_type => ip.loadOpaqueType(val).name_nav,
+                    else => unreachable,
+                }.unwrap()) |name_nav| {
+                    const name_gi = try dwarf.getGlobal(name_nav);
+                    break :debug_info_ni name_gi.get(dwarf).debug_info_ni.unwrap().?;
+                }
+                const elf = dwarf.lf.cast(.elf2).?;
+                try elf.nodes.ensureUnusedCapacity(comp.gpa, 1);
+                try elf.dwarf_consts.ensureUnusedCapacity(comp.gpa, 1);
+                const src_inst = Type.fromInterned(val).typeDeclInstAllowGeneratedTag(zcu).?;
+                const unit = dwarf.getUnit(zcu.fileByIndex(src_inst.resolveFile(ip)).mod.?).get(dwarf);
+                const debug_info_ni = elf.addNodeAssumeCapacity(
+                    unit.debug_info_ni.unwrap().?.addFloatingChild(comp.gpa, &elf.mf, .{
+                        .enable_next_moved = true,
+                    }) catch |err| switch (err) {
+                        else => |e| return e,
+                        error.MappedFileIo => return comp.link_diags.fail("failed to write output file: {t}", .{
+                            elf.mf.io_err.?,
+                        }),
+                    },
+                    .{ .const_debug_info = cpi },
+                );
+                elf.dwarf_consts.putAssumeCapacity(cpi, .{
+                    .debug_info_first_target_reloc = .none,
+                    .debug_info_first_symbol_reloc = .none,
+                    .debug_info_first_node_reloc = .none,
+                });
+
+                break :debug_info_ni debug_info_ni;
+            }.toOptional(),
+        },
+    });
+}
+
+pub fn updateConst(dwarf: *Dwarf, cpi: link.ConstPool.Index, val: InternPool.Index) void {
+    _ = dwarf;
+    _ = cpi;
+    _ = val;
+}
+
+pub fn updateConstIncomplete(
+    dwarf: *Dwarf,
+    di_nw: *MappedFile.Node.Writer,
+    val: InternPool.Index,
+) link.Error!void {
+    dwarf.updateConstIncompleteInner(di_nw, val) catch |err| switch (err) {
+        else => |e| return e,
+        error.WriteFailed => return dwarf.reportWriteError(di_nw),
+    };
+}
+fn updateConstIncompleteInner(
+    dwarf: *Dwarf,
+    di_nw: *MappedFile.Node.Writer,
+    val: InternPool.Index,
+) link.EmitError!void {
+    const comp = dwarf.lf.comp;
+    const zcu = comp.zcu.?;
+    const ip = &zcu.intern_pool;
+    const diw = &di_nw.interface;
+    emit: switch (ip.indexToKey(val)) {
+        .struct_type => {
+            const loaded_struct = ip.loadStructType(val);
+            if (loaded_struct.zir_index.resolveFull(ip)) |src_inst| switch (src_inst.inst) {
+                .main_struct_inst => {
+                    const ui = dwarf.getUnit(comp.zcu.?.fileByIndex(src_inst.file).mod.?);
+                    _, const fi = try ui.get(dwarf).getFile(comp.gpa, ui, src_inst.file);
+                    try diw.writeUleb128(try dwarf.refAbbrevCode(.empty_file));
+                    try diw.writeUleb128(@backingInt(fi));
+                    try dwarf.strp(&dwarf.debug_str, di_nw, loaded_struct.name.toSlice(ip));
+                    break :emit;
+                },
+                else => return,
+            };
+            return;
+        },
+        else => return,
+    }
+    try dwarf.genDebugInfoPadding(diw, diw.unusedCapacityLen());
 }
 
 pub fn updateLineNumber(
@@ -2221,7 +2418,7 @@ pub const AbbrevCode = enum {
         DeclValEnum(DW.FORM),
     };
     const decl_attrs = &[_]Attr{
-        //.{ .ZIG_parent, .ref_addr },
+        .{ .ZIG_parent, .ref_addr },
         .{ .decl_line, .data4 },
         .{ .decl_column, .udata },
         .{ .accessibility, .data1 },
@@ -2233,7 +2430,7 @@ pub const AbbrevCode = enum {
     };
 
     const decl_instance_attrs = &[_]Attr{
-        //.{ .ZIG_parent, .ref_addr },
+        .{ .ZIG_parent, .ref_addr },
         .{ .specification, .ref_addr },
     };
 
@@ -2387,14 +2584,16 @@ pub const AbbrevCode = enum {
         .decl_nullary_func_generic = .{
             .tag = .subprogram,
             .attrs = decl_attrs ++ .{
-                .{ .type, .ref_addr },
+                //.{ .type, .ref_addr },
+                //.{ .noreturn, .flag },
             },
         },
         .decl_func_generic = .{
             .tag = .subprogram,
             .children = true,
             .attrs = decl_attrs ++ .{
-                .{ .type, .ref_addr },
+                //.{ .type, .ref_addr },
+                //.{ .noreturn, .flag },
             },
         },
         .decl_extern_nullary_func = .{
@@ -3304,7 +3503,7 @@ const link = @import("../link.zig");
 const MappedFile = @import("MappedFile.zig");
 const Module = @import("../Module.zig");
 const std = @import("std");
-const ZigType = @import("../Type.zig");
-const ZigValue = @import("../Value.zig");
+const Type = @import("../Type.zig");
+const Value = @import("../Value.zig");
 const Writer = std.Io.Writer;
 const Zcu = @import("../Zcu.zig");

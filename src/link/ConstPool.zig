@@ -59,7 +59,7 @@ pub const User = union(enum) {
         pt: Zcu.PerThread,
         index: Index,
         val: InternPool.Index,
-    ) Allocator.Error!void {
+    ) link.Error!void {
         switch (user) {
             inline else => |impl| return impl.addConst(pt, index, val),
         }
@@ -144,7 +144,7 @@ pub fn updateContainerType(
 
 /// After this is called, there may be a constant for which debug information (complete or not) has
 /// not yet been emitted, so the user must call `flushPending` at some point after this call.
-pub fn get(pool: *ConstPool, pt: Zcu.PerThread, user: User, val: InternPool.Index) Allocator.Error!ConstPool.Index {
+pub fn get(pool: *ConstPool, pt: Zcu.PerThread, user: User, val: InternPool.Index) link.Error!ConstPool.Index {
     const zcu = pt.zcu;
     const ip = &zcu.intern_pool;
     const gpa = zcu.comp.gpa;

@@ -3710,8 +3710,15 @@ pub fn saveState(comp: *Compilation) !void {
 
     // linker state
     switch (lf.tag) {
+        .elf => {},
+        .elf2 => {
+            const elf = lf.cast(.elf2).?;
+            try bufs.ensureUnusedCapacity(3);
+            addBuf(&bufs, @ptrCast(elf.mf.nodes.items));
+            addBuf(&bufs, @ptrCast(&elf.mf.free_ni));
+            addBuf(&bufs, @ptrCast(elf.mf.large.items));
+        },
         .wasm => {
-            dev.check(link.File.Tag.wasm.devFeature());
             const wasm = lf.cast(.wasm).?;
             const is_obj = comp.config.output_mode == .Obj;
             try bufs.ensureUnusedCapacity(85);
