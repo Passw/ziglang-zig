@@ -3558,48 +3558,55 @@ fn initHeaders(
             .EXEC, .DYN => {},
         }
         var phnum: u32 = 0;
-        break :ph .{ .{
-            .phdr = phndx: {
-                defer phnum += 1;
-                break :phndx phnum;
+        break :ph .{
+            .{
+                .phdr = phndx: {
+                    defer phnum += 1;
+                    break :phndx phnum;
+                },
+                .interp = if (maybe_interp) |_| phndx: {
+                    defer phnum += 1;
+                    break :phndx phnum;
+                } else undefined,
+                .rodata = phndx: {
+                    defer phnum += 1;
+                    break :phndx phnum;
+                },
+                .text = phndx: {
+                    defer phnum += 1;
+                    break :phndx phnum;
+                },
+                .plt = if (plt.got_plt == null) phndx: {
+                    defer phnum += 1;
+                    break :phndx phnum;
+                } else undefined,
+                // `data` must be assigned after all other loadable segments so that it has the greatest
+                // phndx of any loadable segment. This is so that `targetSegmentLoadAddressRestrictions`
+                // can be obeyed (specifically, the `.data_last` restriction, needed on SPARC).
+                .data = phndx: {
+                    defer phnum += 1;
+                    break :phndx phnum;
+                },
+                .tls = if (comp.config.any_non_single_threaded) phndx: {
+                    defer phnum += 1;
+                    break :phndx phnum;
+                } else undefined,
+                .dynamic = if (have_dynamic_section) phndx: {
+                    defer phnum += 1;
+                    break :phndx phnum;
+                } else undefined,
+                .relro = phndx: {
+                    defer phnum += 1;
+                    break :phndx phnum;
+                },
+                .gnu_stack = phndx: {
+                    defer phnum += 1;
+                    break :phndx phnum;
+                },
             },
-            .interp = if (maybe_interp) |_| phndx: {
-                defer phnum += 1;
-                break :phndx phnum;
-            } else undefined,
-            .rodata = phndx: {
-                defer phnum += 1;
-                break :phndx phnum;
-            },
-            .text = phndx: {
-                defer phnum += 1;
-                break :phndx phnum;
-            },
-            .data = phndx: {
-                defer phnum += 1;
-                break :phndx phnum;
-            },
-            .plt = if (plt.got_plt == null) phndx: {
-                defer phnum += 1;
-                break :phndx phnum;
-            } else undefined,
-            .tls = if (comp.config.any_non_single_threaded) phndx: {
-                defer phnum += 1;
-                break :phndx phnum;
-            } else undefined,
-            .dynamic = if (have_dynamic_section) phndx: {
-                defer phnum += 1;
-                break :phndx phnum;
-            } else undefined,
-            .relro = phndx: {
-                defer phnum += 1;
-                break :phndx phnum;
-            },
-            .gnu_stack = phndx: {
-                defer phnum += 1;
-                break :phndx phnum;
-            },
-        }, phnum };
+            // (I don't actually want the trailing comma below, but a `zig fmt` bug forces it.)
+            phnum,
+        };
     };
 
     const expected_nodes_len = @as(usize, if (is_archive) 3 else 0) + // .archive, .archive_header, .archive_elf_footer
@@ -4539,6 +4546,22 @@ fn initHeaders(
             break :str try elf.string(.dynstr, slice);
         },
     };
+
+    if (@"type" != .REL) switch (elf.targetSegmentLoadAddressRestrictions()) {
+        .none => {},
+        .data_last => switch (elf.phdrSlice()) {
+            inline else => |phdr| {
+                // Ensure that the segment after `.data` (if any) is not a loadable segment.
+                const next_phndx = phndx.data + 1;
+                if (next_phndx < phdr.len) {
+                    switch (elf.targetLoad(&phdr[next_phndx].type)) {
+                        .NULL, .LOAD => unreachable, // data segment should be the last loadable segment
+                        else => {},
+                    }
+                }
+            },
+        },
+    };
 }
 
 pub fn startProgress(elf: *Elf, prog_node: std.Progress.Node) void {
@@ -4888,7 +4911,31 @@ fn targetDynsymHashInfo(elf: *const Elf) DynsymHashInfo {
         // TODO: Alpha and S390x will need to use either `."@4"` or `.@"8"` depending on `elf.identClass()`.
     };
 }
-pub fn targetLoad(elf: *const Elf, ptr: anytype) @typeInfo(@TypeOf(ptr)).pointer.child {
+/// Specifies any restrictions the current target has regarding how segments are ordered in the
+/// virtual address space. Most targets do not have any such restrictions.
+fn targetSegmentLoadAddressRestrictions(elf: *const Elf) enum {
+    none,
+    /// The "mutable data" segment must be the last loadable segment in the virtual address space.
+    data_last,
+} {
+    return switch (elf.ehdrMachine()) {
+        .AARCH64,
+        .PPC64,
+        .RISCV,
+        .X86_64,
+        .LOONGARCH,
+        => .none,
+
+        // SPARC uses `R_SPARC_PC{10,22}` relocations to construct pointers to the GOT, but these
+        // relocations write an *unsigned* PC-relative offset. This cannot even be worked around by
+        // using a larger code model, because the crt `_start` assembly always uses these specific
+        // relocations. Therefore, to avoid relocation errors, all code must appear before the GOT
+        // in the virtual address space. The easiest way for us to do that is to ensure that the
+        // "mutable data" segment, containing the GOT, is the last segment in the address space.
+        .SPARCV9 => .data_last,
+    };
+}
+fn targetLoad(elf: *const Elf, ptr: anytype) @typeInfo(@TypeOf(ptr)).pointer.child {
     const pointer_ty = @typeInfo(@TypeOf(ptr)).pointer;
     const Child = pointer_ty.child;
     const alignment = pointer_ty.attrs.@"align" orelse @alignOf(Child);
@@ -8114,6 +8161,18 @@ fn allocateSegmentLoadAddress(elf: *Elf, orig_phndx: u32) std.mem.Allocator.Erro
     const page_align = elf.targetPageAlign();
     const node_align = segment_ni.alignment(&elf.mf);
     const ph_align = page_align.max(node_align);
+
+    // If we determine that the segment's virtual address needs to move, then it's a good idea to
+    // make it less likely that it needs to move *again* in the future, because it is expensive to
+    // change a segment's load address (a lot of re-flushing is necessary). To do that, we reserve
+    // more virtual address space than we need (multiplying the actual size by this value). That
+    // way, there will usually be padding between segments which they can grow into.
+    //
+    // TODO: we might want to decrease this multiplier, or even omit it entirely, in cases where
+    // virtual address space is constrained. For instance, 32-bit targets, or targets where short
+    // PC-relative relocations between segments are common.
+    const reserve_size_multiplier = 4;
+
     switch (elf.phdrSlice()) {
         inline else => |phdr| {
             const offset = elf.targetLoad(&phdr[orig_phndx].offset);
@@ -8172,15 +8231,46 @@ fn allocateSegmentLoadAddress(elf: *Elf, orig_phndx: u32) std.mem.Allocator.Erro
                 // backwards to the start of the page.
                 const next_page_vaddr = std.mem.alignBackward(u64, next_vaddr, page_align.toByteUnits());
 
-                // If we're at the same vaddr we started at, then all we're worried about is the
-                // segment fitting here. However, if we've already changed our virtual address, then
-                // we might as well try to reserve a bit *more* virtual address space while we're at
-                // it, because changing virtual address is quite disruptive (we need to re-flush a
-                // lot of stuff!) and giving ourselves more space will make it less likely to happen
-                // again.
-                const target_size = if (vaddr == orig_vaddr) size else size * 4;
-                if (vaddr + target_size <= next_page_vaddr) {
-                    break; // hooray, we fit here!
+                // Check if the segment fits here. We apply `reserve_size_multiplier`, but only if
+                // the segment is already known to be moving---making it easier to grow in-place is
+                // the whole point of the multiplier!
+                {
+                    const target_size = if (vaddr == orig_vaddr) size else size * reserve_size_multiplier;
+                    if (vaddr + target_size <= next_page_vaddr) {
+                        break; // hooray, we fit here!
+                    }
+                }
+
+                const next_ni = elf.phdrs.items[next_phndx].unwrap().?;
+
+                // This segment don't fit here, but before deciding how to proceed, we need to
+                // consider any target-specific restrictions we are subject to.
+                switch (elf.targetSegmentLoadAddressRestrictions()) {
+                    .none => {},
+                    .data_last => if (next_ni == elf.ni.data) {
+                        // We can't leapfrog over the data segment. Instead, that segment just needs
+                        // to be shifted forwards to make space for us, and we'll then `break` with
+                        // our current vaddr.
+
+                        if (next_phndx + 1 < phdr.len) switch (elf.targetLoad(&phdr[next_phndx + 1].type)) {
+                            .NULL, .LOAD => unreachable, // data segment should be the last loadable segment
+                            else => {},
+                        };
+
+                        const free_vaddr = vaddr + size * reserve_size_multiplier;
+
+                        const next_align = page_align.max(next_ni.alignment(&elf.mf));
+                        const next_offset = elf.targetLoad(&next_ph.offset);
+                        const next_new_vaddr = next_align.forward(free_vaddr) + next_offset % next_align.toByteUnits();
+
+                        // This logic for updating the data segment's vaddr is identical to how we
+                        // will update the vaddr of `phndx` when we break from the loop.
+                        elf.targetStore(&next_ph.vaddr, @intCast(next_new_vaddr));
+                        elf.targetStore(&next_ph.paddr, @intCast(next_new_vaddr));
+                        try next_ni.childrenMoved(elf.base.comp.gpa, &elf.mf);
+
+                        break;
+                    },
                 }
 
                 // We don't fit here, so shift ourselves forward (i.e. swap with `next_phndx`). But
@@ -8192,8 +8282,7 @@ fn allocateSegmentLoadAddress(elf: *Elf, orig_phndx: u32) std.mem.Allocator.Erro
 
                 // Now just swap the phdrs and update our `phndx`.
                 std.mem.swap(@TypeOf(next_ph.*), &phdr[phndx], next_ph);
-                const next_ni = elf.phdrs.items[next_phndx];
-                elf.phdrs.items[phndx] = next_ni;
+                elf.phdrs.items[phndx] = .wrap(next_ni);
                 elf.nodes.items(.data)[@backingInt(next_ni)] = .{ .segment = phndx };
                 elf.phdrs.items[next_phndx] = .wrap(segment_ni);
                 elf.nodes.items(.data)[@backingInt(segment_ni)] = .{ .segment = @intCast(next_phndx) };
