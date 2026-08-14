@@ -39,16 +39,14 @@ pub fn write(b: *std.Build, wc: *Configuration.Wip, writer: *std.Io.Writer) !voi
     // instance. Otherwise, addModule may access a package instance that hasn't
     // been created yet with packageInstanceFromBuilder.
 
-    {
-        s.package_instance_map.putAssumeCapacityNoClobber(b, {});
-        var it = b.graph.dependency_cache.valueIterator();
-        while (it.next()) |dep| s.package_instance_map.putAssumeCapacityNoClobber(dep.*.builder, {});
+    s.package_instance_map.putAssumeCapacityNoClobber(b, {});
+    for (b.graph.dependency_cache.values()) |dep| {
+        s.package_instance_map.putAssumeCapacityNoClobber(dep.builder, {});
     }
 
-    {
-        try s.addPackageInstance(b);
-        var it = b.graph.dependency_cache.valueIterator();
-        while (it.next()) |dep| try s.addPackageInstance(dep.*.builder);
+    try s.addPackageInstance(b);
+    for (b.graph.dependency_cache.values()) |dep| {
+        try s.addPackageInstance(dep.builder);
     }
 
     try wc.path_deps.ensureTotalCapacityPrecise(gpa, graph.configure_dependencies.items.len);
@@ -818,26 +816,6 @@ fn addPackageInstance(s: *Serialize, b: *std.Build) Allocator.Error!void {
 
     const index = s.package_instance_map.getIndex(b).?;
 
-    const options = try arena.alloc(
-        Configuration.Package.Instance.UserInputOption.Index,
-        b.user_input_options.count(),
-    );
-
-    {
-        var i: usize = 0;
-        var iter = b.user_input_options.valueIterator();
-        while (iter.next()) |option| : (i += 1) {
-            options[i] = try wc.addExtra(Configuration.Package.Instance.UserInputOption, .{
-                .flags = .{
-                    .tag = .init(option.value),
-                    .used = option.used,
-                },
-                .name = try wc.addString(option.name),
-                .value = .{ .u = try s.makeUserValue(&option.value) },
-            });
-        }
-    }
-
     const modules_values = try arena.alloc(Configuration.Module.Index, b.modules.count());
     for (modules_values, b.modules.values()) |*dest_value, value| {
         dest_value.* = try s.addModule(value);
@@ -845,9 +823,6 @@ fn addPackageInstance(s: *Serialize, b: *std.Build) Allocator.Error!void {
 
     wc.package_instances.items[index] = .{
         .package = s.packageFromHash(b.pkg_hash),
-        .user_input_options = try wc.addDeduped(Configuration.Package.Instance.UserInputOption.List, .{
-            .options = .{ .slice = options },
-        }),
         .modules = .{
             .keys = try wc.addStringList(b.modules.keys()),
             .values = try wc.addDeduped(Configuration.Module.List, .{
