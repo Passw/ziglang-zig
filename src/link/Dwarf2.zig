@@ -1847,7 +1847,8 @@ pub fn genDebugLineHeader(
     for (unit.files.keys()) |zfi| {
         const zf = zcu.fileByIndex(zfi);
         try dwarf.strp(&dwarf.debug_line_str, dlh_nw, zf.sub_file_path);
-        const di = unit.dirs.getIndex(dwarf.getUnit(zf.mod.?)).?;
+        const di =
+            if (zcu.alive_files.contains(zfi)) unit.dirs.getIndex(dwarf.getUnit(zf.mod.?)).? else 0;
         switch (directory_index_form) {
             else => unreachable,
             .data1 => try dlhw.writeByte(@intCast(di)),
