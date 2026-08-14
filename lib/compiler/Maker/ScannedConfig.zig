@@ -119,7 +119,7 @@ pub fn print(sc: *const ScannedConfig, w: *Writer) Writer.Error!void {
             var otf = try sf.beginTupleField("user_input_options", .{});
             for (inst.user_input_options.slice(c)) |option| {
                 var osf = try otf.beginStructField(.{});
-                try sc.printStruct(&osf, Configuration.PackageInstance.UserInputOption, option.get(c));
+                try sc.printStruct(&osf, Configuration.Package.Instance.UserInputOption, option.get(c));
                 try osf.end();
             }
             try otf.end();
