@@ -185,13 +185,16 @@ uavs: std.array_hash_map.Auto(InternPool.Index, struct {
     first_symbol_reloc: SymbolReloc.Index,
     // No `first_got_reloc` field because a UAV never contains GOT relocations.
 }),
-lazy: std.EnumArray(link.File.LazySymbol.Kind, std.array_hash_map.Auto(link.ConstPool.Index, struct {
-    lsi: Symbol.LocalIndex,
-    /// The start index of the contiguous sequence of symbol relocations in this lazy code/data.
-    first_symbol_reloc: SymbolReloc.Index,
-    /// The start index of the contiguous sequence of GOT relocations in this lazy code/data.
-    first_got_reloc: GotReloc.Index,
-})),
+lazy: std.EnumArray(link.File.LazySymbol.Kind, struct {
+    map: std.array_hash_map.Auto(InternPool.Index, struct {
+        lsi: Symbol.LocalIndex,
+        /// The start index of the contiguous sequence of symbol relocations in this lazy code/data.
+        first_symbol_reloc: SymbolReloc.Index,
+        /// The start index of the contiguous sequence of GOT relocations in this lazy code/data.
+        first_got_reloc: GotReloc.Index,
+    }),
+    pending_index: u32,
+}),
 pending_uavs: std.ArrayList(Node.UavMapIndex),
 symbol_relocs: std.ArrayList(SymbolReloc),
 node_relocs: std.ArrayList(NodeReloc),
@@ -391,23 +394,20 @@ const Node = union(enum) {
                 }
 
                 fn firstSymbolReloc(lmi: @This(), elf: *const Elf) SymbolReloc.Index {
-                    return elf.lazy.getPtrConst(kind).values()[@backingInt(lmi)].first_symbol_reloc;
+                    return elf.lazy.getPtrConst(kind).map.values()[@backingInt(lmi)].first_symbol_reloc;
                 }
                 fn firstGotReloc(lmi: @This(), elf: *const Elf) GotReloc.Index {
-                    return elf.lazy.getPtrConst(kind).values()[@backingInt(lmi)].first_got_reloc;
+                    return elf.lazy.getPtrConst(kind).map.values()[@backingInt(lmi)].first_got_reloc;
                 }
             };
         }
 
         pub fn lazySymbol(lmr: LazyMapRef, elf: *const Elf) link.File.LazySymbol {
-            return .{
-                .kind = lmr.kind,
-                .ty = elf.lazy.getPtrConst(lmr.kind).keys()[lmr.index].val(&elf.dwarf.const_pool),
-            };
+            return .{ .kind = lmr.kind, .ty = elf.lazy.getPtrConst(lmr.kind).map.keys()[lmr.index] };
         }
 
         pub fn symbol(lmr: LazyMapRef, elf: *const Elf) Symbol.LocalIndex {
-            return elf.lazy.getPtrConst(lmr.kind).values()[lmr.index].lsi;
+            return elf.lazy.getPtrConst(lmr.kind).map.values()[lmr.index].lsi;
         }
     };
 
@@ -3340,26 +3340,20 @@ pub fn symbolForAtom(elf: *Elf, atom: link.File.AtomId) link.File.SymbolId {
     const s: Symbol.Id = .local(lsi);
     return s.toTypeErased();
 }
-pub fn lazySymbol(
-    elf: *Elf,
-    pt: Zcu.PerThread,
-    lazy: link.File.LazySymbol,
-) link.Error!link.File.SymbolId {
-    const diags = &elf.base.comp.link_diags;
-    return elf.lazySymbolInner(pt, lazy) catch |err| switch (err) {
+pub fn lazySymbol(elf: *Elf, lazy: link.File.LazySymbol) link.Error!link.File.SymbolId {
+    return elf.lazySymbolInner(lazy) catch |err| switch (err) {
         else => |e| return e,
-        error.MappedFileIo => return diags.fail("failed to write output file: {t}", .{elf.mf.io_err.?}),
+        error.MappedFileIo => return elf.base.comp.link_diags.fail("failed to write output file: {t}", .{elf.mf.io_err.?}),
     };
 }
-fn lazySymbolInner(elf: *Elf, pt: Zcu.PerThread, lazy: link.File.LazySymbol) Error!link.File.SymbolId {
+fn lazySymbolInner(elf: *Elf, lazy: link.File.LazySymbol) Error!link.File.SymbolId {
     const gpa = elf.base.comp.gpa;
 
     try elf.ensureUnusedSymbolCapacity(1, .all_local);
     try elf.nodes.ensureUnusedCapacity(gpa, 1);
-    try elf.lazy.getPtr(lazy.kind).ensureUnusedCapacity(gpa, 1);
+    try elf.lazy.getPtr(lazy.kind).map.ensureUnusedCapacity(gpa, 1);
 
-    const cpi = try elf.dwarf.const_pool.get(pt, .{ .elf2 = elf }, lazy.ty);
-    const gop = elf.lazy.getPtr(lazy.kind).getOrPutAssumeCapacity(cpi);
+    const gop = elf.lazy.getPtr(lazy.kind).map.getOrPutAssumeCapacity(lazy.ty);
     if (!gop.found_existing) {
         const shndx: Section.Index, const sym_type: std.elf.STT = switch (lazy.kind) {
             .code => .{ .text, .FUNC },
@@ -3819,7 +3813,10 @@ fn create(
         .one_shot_fixups = .empty,
         .navs = .empty,
         .uavs = .empty,
-        .lazy = comptime .initFill(.empty),
+        .lazy = comptime .initFill(.{
+            .map = .empty,
+            .pending_index = 0,
+        }),
         .pending_uavs = .empty,
         .symbol_relocs = .empty,
         .node_relocs = .empty,
@@ -3881,7 +3878,7 @@ pub fn deinit(elf: *Elf) void {
     elf.one_shot_fixups.deinit(gpa);
     elf.navs.deinit(gpa);
     elf.uavs.deinit(gpa);
-    for (&elf.lazy.values) |*lazy| lazy.deinit(gpa);
+    for (&elf.lazy.values) |*lazy| lazy.map.deinit(gpa);
     elf.pending_uavs.deinit(gpa);
     elf.symbol_relocs.deinit(gpa);
     elf.node_relocs.deinit(gpa);
@@ -5361,8 +5358,8 @@ fn resetNodeRelocs(elf: *Elf, ni: MappedFile.Node.Index) void {
             .first_symbol_reloc = &elf.uavs.values()[@backingInt(umi)].first_symbol_reloc,
         },
         inline .lazy_code, .lazy_const_data => |lmi| .{
-            .first_symbol_reloc = &elf.lazy.getPtr(lmi.ref().kind).values()[lmi.ref().index].first_symbol_reloc,
-            .first_got_reloc = &elf.lazy.getPtr(lmi.ref().kind).values()[lmi.ref().index].first_got_reloc,
+            .first_symbol_reloc = &elf.lazy.getPtr(lmi.ref().kind).map.values()[lmi.ref().index].first_symbol_reloc,
+            .first_got_reloc = &elf.lazy.getPtr(lmi.ref().kind).map.values()[lmi.ref().index].first_got_reloc,
         },
         .unit_debug_info_header => |ui| .{
             .first_node_reloc = &elf.dwarf_units[@backingInt(ui)].debug_info_header_first_node_reloc,
@@ -7137,24 +7134,38 @@ fn prelinkInner(elf: *Elf) Error!void {
         };
         elf.input_pending_index += 1;
 
-        try elf.nodes.ensureUnusedCapacity(gpa, 4 + 5);
+        try elf.nodes.ensureUnusedCapacity(gpa, 5 + 4);
 
-        elf.dwarf.debug_abbrev.ni = .wrap(elf.addNodeAssumeCapacity(
-            try elf.shndx.debug_abbrev.get(elf).ni.addFloatingChild(gpa, &elf.mf, .{}),
-            .{ .debug_shared = .debug_abbrev },
-        ));
-        elf.dwarf.debug_line_str.ni = .wrap(elf.addNodeAssumeCapacity(
-            try elf.shndx.debug_line_str.get(elf).ni.addFloatingChild(gpa, &elf.mf, .{}),
-            .{ .debug_shared = .debug_line_str },
-        ));
-        elf.dwarf.debug_str.ni = .wrap(elf.addNodeAssumeCapacity(
-            try elf.shndx.debug_str.get(elf).ni.addFloatingChild(gpa, &elf.mf, .{}),
-            .{ .debug_shared = .debug_str },
-        ));
-        elf.dwarf.debug_str_offsets.ni = .wrap(elf.addNodeAssumeCapacity(
-            try elf.shndx.debug_str_offsets.get(elf).ni.addFloatingChild(gpa, &elf.mf, .{}),
-            .{ .debug_shared = .debug_str_offsets },
-        ));
+        switch (elf.shndx.debug_abbrev) {
+            .UNDEF => {},
+            else => |debug_abbrev_shndx| elf.dwarf.debug_abbrev.ni = .wrap(elf.addNodeAssumeCapacity(
+                try debug_abbrev_shndx.get(elf).ni.addFloatingChild(gpa, &elf.mf, .{}),
+                .{ .debug_shared = .debug_abbrev },
+            )),
+        }
+        switch (elf.shndx.debug_line_str) {
+            .UNDEF => {},
+            else => |debug_line_str_shndx| elf.dwarf.debug_line_str.ni =
+                .wrap(elf.addNodeAssumeCapacity(
+                    try debug_line_str_shndx.get(elf).ni.addFloatingChild(gpa, &elf.mf, .{}),
+                    .{ .debug_shared = .debug_line_str },
+                )),
+        }
+        switch (elf.shndx.debug_str) {
+            .UNDEF => {},
+            else => |debug_str_shndx| elf.dwarf.debug_str.ni = .wrap(elf.addNodeAssumeCapacity(
+                try debug_str_shndx.get(elf).ni.addFloatingChild(gpa, &elf.mf, .{}),
+                .{ .debug_shared = .debug_str },
+            )),
+        }
+        switch (elf.shndx.debug_str_offsets) {
+            .UNDEF => {},
+            else => |debug_str_offsets_shndx| elf.dwarf.debug_str_offsets.ni =
+                .wrap(elf.addNodeAssumeCapacity(
+                    try debug_str_offsets_shndx.get(elf).ni.addFloatingChild(gpa, &elf.mf, .{}),
+                    .{ .debug_shared = .debug_str_offsets },
+                )),
+        }
 
         for ([5]Section.Index{
             elf.shndx.eh_frame,
@@ -8541,8 +8552,11 @@ fn updateNavInner(elf: *Elf, pt: Zcu.PerThread, nav_index: InternPool.Nav.Index)
 
     const nav = ip.getNav(nav_index);
     if (ip.indexToKey(nav.resolved.?.value) == .@"extern") return;
-    if (!Type.fromInterned(nav.resolved.?.type).hasRuntimeBits(zcu))
-        return elf.dwarf.updateComptimeNav(pt, nav_index);
+    if (!Type.fromInterned(nav.resolved.?.type).hasRuntimeBits(zcu)) {
+        if (elf.ehdrMachine() != .X86_64) return;
+        const mod = zcu.fileByIndex(nav.srcInst(ip).resolveFile(ip)).mod.?;
+        return if (!mod.strip) elf.dwarf.updateComptimeNav(pt, nav_index);
+    }
 
     const nmi = try elf.navMapIndex(zcu, nav_index);
     const ni = nmi.symbol(elf).index().ptr(elf).node.unwrap().?;
@@ -8581,7 +8595,32 @@ pub fn updateContainerType(
     ty: InternPool.Index,
     success: bool,
 ) link.Error!void {
-    try elf.dwarf.const_pool.updateContainerType(pt, .{ .elf2 = elf }, ty, success);
+    elf.updateContainerTypeInner(pt, ty, success) catch |err| switch (err) {
+        else => |e| return e,
+        error.MappedFileIo => return elf.base.comp.link_diags.fail(
+            "failed to write output file: {t}",
+            .{elf.mf.io_err.?},
+        ),
+    };
+}
+pub fn updateContainerTypeInner(
+    elf: *Elf,
+    pt: Zcu.PerThread,
+    ty: InternPool.Index,
+    success: bool,
+) Error!void {
+    switch (elf.base.comp.config.debug_format) {
+        .strip => {},
+        .dwarf => try elf.dwarf.const_pool.updateContainerType(pt, .{ .elf2 = elf }, ty, success),
+        .code_view => unreachable,
+    }
+    if (!success) return;
+    var lazy_it = elf.lazy.iterator();
+    while (lazy_it.next()) |lazy| if (lazy.value.map.getIndex(ty)) |lmi| {
+        if (lazy.value.pending_index <= lmi) continue;
+        // This type has changed on this incremental update, so update the lazy code/data.
+        try elf.genLazy(pt, .{ .kind = lazy.key, .index = @intCast(lmi) });
+    };
 }
 
 pub fn addConst(
@@ -8590,47 +8629,24 @@ pub fn addConst(
     index: link.ConstPool.Index,
     val: InternPool.Index,
 ) link.Error!void {
-    try elf.dwarf.addConst(index, val);
+    switch (elf.base.comp.config.debug_format) {
+        .strip => {},
+        .dwarf => try elf.dwarf.addConst(index, val),
+        .code_view => unreachable,
+    }
 }
 
 pub fn updateConst(
     elf: *Elf,
-    pt: Zcu.PerThread,
+    _: Zcu.PerThread,
     cpi: link.ConstPool.Index,
     val: InternPool.Index,
 ) link.Error!void {
-    if (val == .anyerror_type) return;
-    try elf.updateConstInner(pt, cpi, val);
-}
-fn updateConstInner(
-    elf: *Elf,
-    pt: Zcu.PerThread,
-    cpi: link.ConstPool.Index,
-    val: InternPool.Index,
-) link.Error!void {
-    var lazy_it = elf.lazy.iterator();
-    while (lazy_it.next()) |lazy| if (lazy.value.getIndex(cpi)) |li| {
-        const lazy_ty: Type = .fromInterned(val);
-        var prog_name_buf: [std.Progress.Node.max_name_len]u8 = undefined;
-        const prog_name: []const u8 = switch (lazy_ty.zigTypeTag(pt.zcu)) {
-            .@"enum" => std.mem.print(&prog_name_buf, "@tagName({f})", .{lazy_ty.fmt(pt)}) catch &prog_name_buf,
-            .error_set => switch (lazy.key) {
-                .code => std.mem.print(&prog_name_buf, "@errorCast({f})", .{lazy_ty.fmt(pt)}) catch &prog_name_buf,
-                .const_data => "@errorName(anyerror)",
-            },
-            else => unreachable,
-        };
-        const prog_node = elf.base.comp.link_prog_node.start(prog_name, 0);
-        defer prog_node.end();
-        elf.genLazy(pt, .{ .kind = lazy.key, .index = @intCast(li) }) catch |err| switch (err) {
-            else => |e| return e,
-            error.MappedFileIo => return elf.base.comp.link_diags.fail(
-                "failed to write output file: {t}",
-                .{elf.mf.io_err.?},
-            ),
-        };
-    };
-    elf.dwarf.updateConst(cpi, val);
+    switch (elf.base.comp.config.debug_format) {
+        .strip => {},
+        .dwarf => elf.dwarf.updateConst(cpi, val),
+        .code_view => unreachable,
+    }
 }
 
 pub fn updateConstIncomplete(
@@ -8639,11 +8655,17 @@ pub fn updateConstIncomplete(
     cpi: link.ConstPool.Index,
     val: InternPool.Index,
 ) link.Error!void {
-    const debug_info_ni = Dwarf.Const.get(cpi, &elf.dwarf).debug_info_ni.unwrap().?;
-    var di_nw: MappedFile.Node.Writer = undefined;
-    debug_info_ni.writer(elf.base.comp.gpa, &elf.mf, &di_nw);
-    defer di_nw.deinit();
-    try elf.dwarf.updateConstIncomplete(pt, &di_nw, val);
+    switch (elf.base.comp.config.debug_format) {
+        .strip => {},
+        .dwarf => {
+            const debug_info_ni = Dwarf.Const.get(cpi, &elf.dwarf).debug_info_ni.unwrap().?;
+            var di_nw: MappedFile.Node.Writer = undefined;
+            debug_info_ni.writer(elf.base.comp.gpa, &elf.mf, &di_nw);
+            defer di_nw.deinit();
+            try elf.dwarf.updateConstIncomplete(pt, &di_nw, val);
+        },
+        .code_view => unreachable,
+    }
 }
 
 pub fn updateFunc(
@@ -8930,11 +8952,16 @@ pub fn lostTracking(
 }
 
 pub fn updateErrorData(elf: *Elf, pt: Zcu.PerThread) link.Error!void {
-    try elf.updateConstInner(
-        pt,
-        elf.dwarf.const_pool.getIfExists(.anyerror_type) orelse return,
-        .anyerror_type,
-    );
+    elf.genLazyInner(pt, .{
+        .kind = .const_data,
+        .index = @intCast(elf.lazy.getPtr(.const_data).map.getIndex(.anyerror_type) orelse return),
+    }) catch |err| switch (err) {
+        else => |e| return e,
+        error.MappedFileIo => return elf.base.comp.link_diags.fail(
+            "failed to write output file: {t}",
+            .{elf.mf.io_err.?},
+        ),
+    };
 }
 
 pub fn flush(
@@ -9266,7 +9293,16 @@ fn genPending(elf: *Elf, pt: Zcu.PerThread) Error!void {
         defer prog_node.end();
         try elf.genUav(pt, umi);
     }
-    try elf.dwarf.const_pool.flushPending(pt, .{ .elf2 = elf });
+    var lazy_it = elf.lazy.iterator();
+    while (lazy_it.next()) |lazy| while (lazy.value.pending_index < lazy.value.map.count()) {
+        try elf.genLazy(pt, .{ .kind = lazy.key, .index = lazy.value.pending_index });
+        lazy.value.pending_index += 1;
+    };
+    switch (elf.base.comp.config.debug_format) {
+        .strip => {},
+        .dwarf => try elf.dwarf.const_pool.flushPending(pt, .{ .elf2 = elf }),
+        .code_view => unreachable,
+    }
 }
 
 fn genUav(
@@ -9302,6 +9338,23 @@ fn genUav(
 }
 
 fn genLazy(elf: *Elf, pt: Zcu.PerThread, lmr: Node.LazyMapRef) Error!void {
+    const lazy = lmr.lazySymbol(elf);
+    if (lazy.ty == .anyerror_type) return;
+    const lazy_ty: Type = .fromInterned(lazy.ty);
+    var prog_name_buf: [std.Progress.Node.max_name_len]u8 = undefined;
+    const prog_name: []const u8 = switch (lazy_ty.zigTypeTag(pt.zcu)) {
+        .@"enum" => std.mem.print(&prog_name_buf, "@tagName({f})", .{lazy_ty.fmt(pt)}) catch &prog_name_buf,
+        .error_set => switch (lmr.kind) {
+            .code => std.mem.print(&prog_name_buf, "@errorCast({f})", .{lazy_ty.fmt(pt)}) catch &prog_name_buf,
+            .const_data => "@errorName(anyerror)",
+        },
+        else => unreachable,
+    };
+    const prog_node = elf.base.comp.link_prog_node.start(prog_name, 0);
+    defer prog_node.end();
+    try elf.genLazyInner(pt, lmr);
+}
+fn genLazyInner(elf: *Elf, pt: Zcu.PerThread, lmr: Node.LazyMapRef) Error!void {
     const zcu = pt.zcu;
     const gpa = zcu.gpa;
 

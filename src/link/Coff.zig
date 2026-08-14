@@ -5504,27 +5504,7 @@ pub fn updateContainerType(
     while (lazy_it.next()) |lazy| if (lazy.value.map.getIndex(ty)) |lmi| {
         if (lazy.value.pending_index <= lmi) continue;
         // This type has changed on this incremental update, so update the lazy code/data.
-        const lmr: Node.LazyMapRef = .{ .kind = lazy.key, .index = @intCast(lmi) };
-        const kind = switch (lmr.kind) {
-            .code => "code",
-            .const_data => "data",
-        };
-        var name: [std.Progress.Node.max_name_len]u8 = undefined;
-        const sub_prog_node = coff.synth_prog_node.start(
-            std.mem.print(&name, "lazy {s} for {f}", .{
-                kind,
-                Type.fromInterned(ty).fmt(pt),
-            }) catch &name,
-            0,
-        );
-        defer sub_prog_node.end();
-        coff.genLazy(pt, lmr) catch |err| switch (err) {
-            else => |e| return e,
-            error.MappedFileIo => return coff.base.comp.link_diags.fail(
-                "linker failed to lower lazy {s}: {t}",
-                .{ kind, coff.mf.io_err.? },
-            ),
-        };
+        try coff.genLazy(pt, .{ .kind = lazy.key, .index = @intCast(lmi) });
     };
 }
 
@@ -5647,7 +5627,7 @@ fn updateFuncInner(
 }
 
 pub fn updateErrorData(coff: *Coff, pt: Zcu.PerThread) !void {
-    coff.genLazy(pt, .{
+    coff.genLazyInner(pt, .{
         .kind = .const_data,
         .index = @intCast(coff.lazy.getPtr(.const_data).map.getIndex(.anyerror_type) orelse return),
     }) catch |err| switch (err) {
@@ -6163,29 +6143,9 @@ fn genPending(coff: *Coff, pt: Zcu.PerThread) Error!void {
         };
     }
     var lazy_it = coff.lazy.iterator();
-    while (lazy_it.next()) |lazy| if (lazy.value.pending_index < lazy.value.map.count()) {
-        const lmr: Node.LazyMapRef = .{ .kind = lazy.key, .index = lazy.value.pending_index };
+    while (lazy_it.next()) |lazy| while (lazy.value.pending_index < lazy.value.map.count()) {
+        try coff.genLazy(pt, .{ .kind = lazy.key, .index = lazy.value.pending_index });
         lazy.value.pending_index += 1;
-        const kind = switch (lmr.kind) {
-            .code => "code",
-            .const_data => "data",
-        };
-        var name: [std.Progress.Node.max_name_len]u8 = undefined;
-        const sub_prog_node = coff.synth_prog_node.start(
-            std.mem.print(&name, "lazy {s} for {f}", .{
-                kind,
-                Type.fromInterned(lmr.lazySymbol(coff).ty).fmt(pt),
-            }) catch &name,
-            0,
-        );
-        defer sub_prog_node.end();
-        coff.genLazy(pt, lmr) catch |err| switch (err) {
-            else => |e| return e,
-            error.MappedFileIo => return comp.link_diags.fail(
-                "linker failed to lower lazy {s}: {t}",
-                .{ kind, coff.mf.io_err.? },
-            ),
-        };
     };
 }
 
@@ -6810,6 +6770,30 @@ fn flushSpecialSymbol(coff: *Coff, pending: SpecialSymbol) !SpecialSymbol {
 }
 
 fn genLazy(coff: *Coff, pt: Zcu.PerThread, lmr: Node.LazyMapRef) !void {
+    const lazy = lmr.lazySymbol(coff);
+    if (lazy.ty == .anyerror_type) return;
+    const kind = switch (lmr.kind) {
+        .code => "code",
+        .const_data => "data",
+    };
+    var name: [std.Progress.Node.max_name_len]u8 = undefined;
+    const sub_prog_node = coff.synth_prog_node.start(
+        std.mem.print(&name, "lazy {s} for {f}", .{
+            kind,
+            Type.fromInterned(lazy.ty).fmt(pt),
+        }) catch &name,
+        0,
+    );
+    defer sub_prog_node.end();
+    coff.genLazyInner(pt, lmr) catch |err| switch (err) {
+        else => |e| return e,
+        error.MappedFileIo => return coff.base.comp.link_diags.fail(
+            "linker failed to lower lazy {s}: {t}",
+            .{ kind, coff.mf.io_err.? },
+        ),
+    };
+}
+fn genLazyInner(coff: *Coff, pt: Zcu.PerThread, lmr: Node.LazyMapRef) !void {
     const zcu = pt.zcu;
     const gpa = zcu.gpa;
 

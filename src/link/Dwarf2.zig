@@ -1487,28 +1487,29 @@ pub fn getGlobal(dwarf: *Dwarf, nav: InternPool.Nav.Index) link.Error!Global.Ind
         .debug_info_ni = .none,
     };
     const gi: Global.Index = @fromBackingInt(@intCast(global_gop.index));
-    if (global_gop.value_ptr.debug_info_ni == .none) {
-        const elf = dwarf.lf.cast(.elf2).?;
-        try elf.nodes.ensureUnusedCapacity(gpa, 1);
-        try elf.dwarf_globals.ensureUnusedCapacity(gpa, 1);
-        const unit = dwarf.getUnit(comp.zcu.?.navFileScope(nav).mod.?).get(dwarf);
-        global_gop.value_ptr.debug_info_ni = .wrap(elf.addNodeAssumeCapacity(
-            unit.debug_info_ni.unwrap().?.addFloatingChild(gpa, &elf.mf, .{
-                .enable_next_moved = true,
-            }) catch |err| switch (err) {
-                else => |e| return e,
-                error.MappedFileIo => return comp.link_diags.fail("failed to write output file: {t}", .{
-                    elf.mf.io_err.?,
-                }),
-            },
-            .{ .global_debug_info = gi },
-        ));
-        elf.dwarf_globals.addOneAssumeCapacity().* = .{
-            .debug_info_first_target_reloc = .none,
-            .debug_info_first_node_reloc = .none,
-            .debug_info_first_symbol_reloc = .none,
-        };
-    }
+    if (global_gop.value_ptr.debug_info_ni != .none) return gi;
+    const mod = comp.zcu.?.navFileScope(nav).mod.?;
+    assert(!mod.strip);
+    const elf = dwarf.lf.cast(.elf2).?;
+    try elf.nodes.ensureUnusedCapacity(gpa, 1);
+    try elf.dwarf_globals.ensureUnusedCapacity(gpa, 1);
+    const unit = dwarf.getUnit(mod).get(dwarf);
+    global_gop.value_ptr.debug_info_ni = .wrap(elf.addNodeAssumeCapacity(
+        unit.debug_info_ni.unwrap().?.addFloatingChild(gpa, &elf.mf, .{
+            .enable_next_moved = true,
+        }) catch |err| switch (err) {
+            else => |e| return e,
+            error.MappedFileIo => return comp.link_diags.fail("failed to write output file: {t}", .{
+                elf.mf.io_err.?,
+            }),
+        },
+        .{ .global_debug_info = gi },
+    ));
+    elf.dwarf_globals.addOneAssumeCapacity().* = .{
+        .debug_info_first_target_reloc = .none,
+        .debug_info_first_node_reloc = .none,
+        .debug_info_first_symbol_reloc = .none,
+    };
     return gi;
 }
 pub fn getGlobalIfExists(dwarf: *Dwarf, nav: InternPool.Nav.Index) ?Global.Index {
@@ -1525,32 +1526,33 @@ pub fn getFunc(dwarf: *Dwarf, nav: InternPool.Nav.Index) link.Error!Func.Index {
         .debug_line_ni = .none,
     };
     const fi: Func.Index = @fromBackingInt(@intCast(func_gop.index));
-    if (func_gop.value_ptr.debug_info_ni == .none) {
-        const elf = dwarf.lf.cast(.elf2).?;
-        try elf.nodes.ensureUnusedCapacity(gpa, 1);
-        try elf.dwarf_funcs.ensureUnusedCapacity(gpa, 1);
-        const unit = dwarf.getUnit(comp.zcu.?.navFileScope(nav).mod.?).get(dwarf);
-        func_gop.value_ptr.debug_info_ni = .wrap(elf.addNodeAssumeCapacity(
-            unit.debug_info_ni.unwrap().?.addFloatingChild(gpa, &elf.mf, .{
-                .enable_next_moved = true,
-            }) catch |err| switch (err) {
-                else => |e| return e,
-                error.MappedFileIo => return comp.link_diags.fail("failed to write output file: {t}", .{
-                    elf.mf.io_err.?,
-                }),
-            },
-            .{ .func_debug_info = fi },
-        ));
-        elf.dwarf_funcs.addOneAssumeCapacity().* = .{
-            .frame_fde_first_symbol_reloc = .none,
-            .frame_fde_first_node_reloc = .none,
-            .debug_info_first_target_reloc = .none,
-            .debug_info_first_symbol_reloc = .none,
-            .debug_info_first_node_reloc = .none,
-            .debug_line_first_symbol_reloc = .none,
-            .debug_line_first_node_reloc = .none,
-        };
-    }
+    if (func_gop.value_ptr.debug_info_ni != .none) return fi;
+    const mod = comp.zcu.?.navFileScope(nav).mod.?;
+    const elf = dwarf.lf.cast(.elf2).?;
+    try elf.dwarf_funcs.ensureUnusedCapacity(gpa, 1);
+    try elf.nodes.ensureUnusedCapacity(gpa, 1);
+    elf.dwarf_funcs.addOneAssumeCapacity().* = .{
+        .frame_fde_first_symbol_reloc = .none,
+        .frame_fde_first_node_reloc = .none,
+        .debug_info_first_target_reloc = .none,
+        .debug_info_first_symbol_reloc = .none,
+        .debug_info_first_node_reloc = .none,
+        .debug_line_first_symbol_reloc = .none,
+        .debug_line_first_node_reloc = .none,
+    };
+    if (mod.strip) return fi;
+    const unit = dwarf.getUnit(mod).get(dwarf);
+    func_gop.value_ptr.debug_info_ni = .wrap(elf.addNodeAssumeCapacity(
+        unit.debug_info_ni.unwrap().?.addFloatingChild(gpa, &elf.mf, .{
+            .enable_next_moved = true,
+        }) catch |err| switch (err) {
+            else => |e| return e,
+            error.MappedFileIo => return comp.link_diags.fail("failed to write output file: {t}", .{
+                elf.mf.io_err.?,
+            }),
+        },
+        .{ .func_debug_info = fi },
+    ));
     return fi;
 }
 pub fn getFuncIfExists(dwarf: *Dwarf, nav: InternPool.Nav.Index) ?Func.Index {

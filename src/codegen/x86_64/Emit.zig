@@ -138,7 +138,7 @@ pub fn emitMir(emit: *Emit) Error!void {
                                     return emit.fail("{s} creating lazy symbol", .{@errorName(err)}),
                             ))
                         else if (emit.bin_file.cast(.elf2)) |elf|
-                            try elf.lazySymbol(emit.pt, lazy_sym)
+                            try elf.lazySymbol(lazy_sym)
                         else if (emit.bin_file.cast(.macho)) |macho_file|
                             @fromBackingInt(@intCast(macho_file.getZigObject().?.getOrCreateMetadataForLazySymbol(macho_file, emit.pt, lazy_sym) catch |err|
                                 return emit.fail("{s} creating lazy symbol", .{@errorName(err)})))
