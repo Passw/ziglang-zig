@@ -838,22 +838,9 @@ fn addPackageInstance(s: *Serialize, b: *std.Build) Allocator.Error!void {
         }
     }
 
-    const modules_keys = try arena.alloc(
-        []const u8,
-        b.modules.count(),
-    );
-    const modules_values = try arena.alloc(
-        Configuration.Module.Index,
-        b.modules.count(),
-    );
-
-    {
-        var i: usize = 0;
-        var iter = b.modules.iterator();
-        while (iter.next()) |entry| : (i += 1) {
-            modules_keys[i] = entry.key_ptr.*;
-            modules_values[i] = try s.addModule(entry.value_ptr.*);
-        }
+    const modules_values = try arena.alloc(Configuration.Module.Index, b.modules.count());
+    for (modules_values, b.modules.values()) |*dest_value, value| {
+        dest_value.* = try s.addModule(value);
     }
 
     wc.package_instances.items[index] = .{
@@ -862,7 +849,7 @@ fn addPackageInstance(s: *Serialize, b: *std.Build) Allocator.Error!void {
             .options = .{ .slice = options },
         }),
         .modules = .{
-            .keys = try wc.addStringList(modules_keys),
+            .keys = try wc.addStringList(b.modules.keys()),
             .values = try wc.addDeduped(Configuration.Module.List, .{
                 .modules = .{ .slice = modules_values },
             }),
