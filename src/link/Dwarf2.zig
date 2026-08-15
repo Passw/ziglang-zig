@@ -2188,25 +2188,26 @@ fn updateConstIncompleteInner(
                 },
             },
         };
+        const src_inst = zir_index.resolveFull(ip) orelse {
+            try diw.writeUleb128(try dwarf.refAbbrevCode(.decl_lost));
+            break :done;
+        };
         if (maybe_name_nav.unwrap()) |name_nav| {
-            const src_inst = ip.getNav(name_nav).srcInst(ip).resolveFull(ip).?;
-            const decl = zcu.fileByIndex(src_inst.file).zir.?.getDeclaration(src_inst.inst);
+            const name_src_inst = ip.getNav(name_nav).srcInst(ip).resolve(ip).?;
+            const decl = zcu.fileByIndex(src_inst.file).zir.?.getDeclaration(name_src_inst);
             const parent_cpi = try dwarf.getConst(pt, .fromInterned(zcu.fileRootType(src_inst.file)));
-            try diw.writeUleb128(try dwarf.refAbbrevCode(.decl_func_generic));
+            try diw.writeUleb128(try dwarf.refAbbrevCode(.decl_namespace_struct));
             try dwarf.sectionOffset(di_nw, Const.get(parent_cpi, dwarf).debug_info_ni.unwrap().?, 0);
             try diw.writeInt(u32, decl.src_line + 1, dwarf.endian);
             try diw.writeUleb128(decl.src_column + 1);
             try diw.writeByte(if (decl.is_pub) DW.ACCESS.public else DW.ACCESS.private);
-            try dwarf.strp(&dwarf.debug_str, di_nw, name.toSlice(ip));
-            try diw.writeUleb128(@backingInt(AbbrevCode.null));
         } else {
-            const zfi = zir_index.resolveFile(ip);
-            const ui = dwarf.getUnit(zcu.fileByIndex(zfi).mod.?);
-            _, const fi = try ui.get(dwarf).getFile(comp.gpa, ui, zfi);
+            const ui = dwarf.getUnit(zcu.fileByIndex(src_inst.file).mod.?);
+            _, const fi = try ui.get(dwarf).getFile(comp.gpa, ui, src_inst.file);
             try diw.writeUleb128(try dwarf.refAbbrevCode(.empty_struct_type));
             try diw.writeUleb128(@backingInt(fi));
-            try dwarf.strp(&dwarf.debug_str, di_nw, name.toSlice(ip));
         }
+        try dwarf.strp(&dwarf.debug_str, di_nw, name.toSlice(ip));
         try diw.writeByte(@intFromBool(true));
     }
     try dwarf.genDebugInfoPadding(diw, diw.unusedCapacityLen());
