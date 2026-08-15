@@ -5064,7 +5064,9 @@ fn loadArchive(coff: *Coff, path: std.Build.Cache.Path, fr: *Io.File.Reader) Loa
         offset: u32,
         iami: ?InputArchive.Member.Index,
     }) = .empty;
+    defer members.deinit(gpa);
     var symbol_member_indices: std.ArrayList(u32) = .empty;
+    defer symbol_member_indices.deinit(gpa);
 
     const iai: InputArchive.Index = @fromBackingInt(@intCast(coff.input_archives.items.len));
     (try coff.input_archives.addOne(gpa)).* = .{
@@ -7400,6 +7402,8 @@ fn updateExportInner(
             exported_si,
         }),
     }
+
+    try coff.genPending(pt);
     while (try coff.resolve(pt.tid)) {}
     while (try coff.idle(pt.tid)) {}
 
