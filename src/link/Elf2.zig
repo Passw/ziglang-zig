@@ -8727,31 +8727,31 @@ fn updateExportInner(
         }),
     }
     try elf.ensureUnusedSymbolCapacity(1, .maybe_global);
-    const exported_lsi: Symbol.LocalIndex, const @"type": std.elf.STT = switch (@"export".exported) {
-        .nav => |nav| .{
-            (try elf.navMapIndex(zcu, nav)).symbol(elf),
-            elf.navType(ip.getNav(nav).resolved.?),
-        },
-        .uav => |uav| .{ (try elf.uavMapIndex(uav, .none)).symbol(elf), .OBJECT },
+    const exported_lsi: Symbol.LocalIndex = switch (@"export".exported) {
+        .nav => |nav| (try elf.navMapIndex(zcu, nav)).symbol(elf),
+        .uav => |uav| (try elf.uavMapIndex(uav, .none)).symbol(elf),
     };
 
     try elf.ensureElfNodeSize();
-    while (try elf.idle(pt.tid)) {}
 
-    const value: u64 = Symbol.Id.local(exported_lsi).value(elf);
-    const size: u64, const shndx: Section.Index = switch (elf.symPtr(exported_lsi.index())) {
+    // Initialize the global symbol with the same values that the local one currently has. If the
+    // NAV/UAV is updated, then `updateNavInner` or `genUav` will update the global symbol sizes,
+    // and `flushMoved` will update their values.
+    const cur_value: u64, const cur_size: u64, const @"type": std.elf.STT, const shndx: Section.Index = switch (elf.symPtr(exported_lsi.index())) {
         inline else => |exported_sym| .{
+            elf.targetLoad(&exported_sym.value),
             elf.targetLoad(&exported_sym.size),
+            elf.targetLoad(&exported_sym.info).type,
             .fromSection(elf.targetLoad(&exported_sym.shndx)),
         },
     };
 
     const name = @"export".opts.name.toSlice(ip);
     _ = elf.addGlobalSymbolAssumeCapacity(.{
-        .node = .none,
+        .node = exported_lsi.index().ptr(elf).node,
         .name = try .string(elf, name),
-        .value = value,
-        .size = @intCast(size),
+        .value = cur_value,
+        .size = cur_size,
         .type = @"type",
         .bind = switch (@"export".opts.linkage) {
             .strong => .strong,
