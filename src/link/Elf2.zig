@@ -1831,8 +1831,8 @@ fn ensureDynsymHashCapacity(elf: *Elf, max_dynsym_count: u32) Error!void {
             if (elf.targetEndian() != std.lang.Endian.native) {
                 std.mem.byteSwapAllFields(info.Header(), header);
             }
-            const buckets: []info.Int() = trailing[0..elf.targetLoad(&header.nbucket)];
-            const chains: []info.Int() = trailing[elf.targetLoad(&header.nbucket)..][0..elf.targetLoad(&header.nchain)];
+            const buckets: []info.Int() = trailing[0..@intCast(elf.targetLoad(&header.nbucket))];
+            const chains: []info.Int() = trailing[@intCast(elf.targetLoad(&header.nbucket))..][0..@intCast(elf.targetLoad(&header.nchain))];
 
             @memset(buckets, 0);
             chains[0] = 0;
@@ -1878,8 +1878,8 @@ fn populateDynsymHashEntry(elf: *Elf, dynsym_index: u32) void {
             const header: *info.Header() = @ptrCast(section_slice[0..@sizeOf(info.Header())]);
             const trailing: []info.Int() = @ptrCast(section_slice[@sizeOf(info.Header())..]);
 
-            const buckets: []info.Int() = trailing[0..elf.targetLoad(&header.nbucket)];
-            const chains: []info.Int() = trailing[elf.targetLoad(&header.nbucket)..][0..elf.targetLoad(&header.nchain)];
+            const buckets: []info.Int() = trailing[0..@intCast(elf.targetLoad(&header.nbucket))];
+            const chains: []info.Int() = trailing[@intCast(elf.targetLoad(&header.nbucket))..][0..@intCast(elf.targetLoad(&header.nchain))];
 
             const sym_name: String(.dynstr) = switch (elf.dynsymPtr(dynsym_index)) {
                 inline else => |sym| @fromBackingInt(elf.targetLoad(&sym.name)),
@@ -1919,8 +1919,8 @@ fn clearDynsymHashEntry(elf: *Elf, dynsym_index: u32) void {
             const header: *info.Header() = @ptrCast(section_slice[0..@sizeOf(info.Header())]);
             const trailing: []info.Int() = @ptrCast(section_slice[@sizeOf(info.Header())..]);
 
-            const buckets: []info.Int() = trailing[0..elf.targetLoad(&header.nbucket)];
-            const chains: []info.Int() = trailing[elf.targetLoad(&header.nbucket)..][0..elf.targetLoad(&header.nchain)];
+            const buckets: []info.Int() = trailing[0..@intCast(elf.targetLoad(&header.nbucket))];
+            const chains: []info.Int() = trailing[@intCast(elf.targetLoad(&header.nbucket))..][0..@intCast(elf.targetLoad(&header.nchain))];
 
             const sym_name: String(.dynstr) = switch (elf.dynsymPtr(dynsym_index)) {
                 inline else => |sym| @fromBackingInt(elf.targetLoad(&sym.name)),
@@ -1935,11 +1935,11 @@ fn clearDynsymHashEntry(elf: *Elf, dynsym_index: u32) void {
             if (elf.targetLoad(&buckets[b]) == dynsym_index) {
                 elf.targetStore(&buckets[b], next_dynsym_index);
             } else {
-                var cur = elf.targetLoad(&buckets[b]);
+                var cur: usize = @intCast(elf.targetLoad(&buckets[b]));
                 while (true) {
                     assert(cur != 0); // `dynsym_index` is definitely somewhere in the chain
                     if (elf.targetLoad(&chains[cur]) == dynsym_index) break;
-                    cur = elf.targetLoad(&chains[cur]);
+                    cur = @intCast(elf.targetLoad(&chains[cur]));
                 }
                 // We found `dynsym_index`; replace it with `next_dynsym_index`.
                 elf.targetStore(&chains[cur], next_dynsym_index);
@@ -7545,7 +7545,7 @@ pub fn idle(elf: *Elf, tid: Zcu.PerThread.Id) link.Error!bool {
             // introduced if we only did one per `idle` call. Also, there is no risk of this work
             // being invalidated. So let's just flush the entire queue at once.
             for (elf.one_shot_fixups.items) |isw| {
-                const dest_slice = isw.node.slice(&elf.mf)[isw.offset..][0..4];
+                const dest_slice = isw.node.slice(&elf.mf)[@intCast(isw.offset)..][0..4];
                 const old: u32 = std.mem.readInt(u32, dest_slice, elf.targetEndian());
                 const new: u32 = switch (isw.action) {
                     // zig fmt: off
@@ -8155,7 +8155,7 @@ fn allocateSegmentLoadAddress(elf: *Elf, orig_phndx: u32) std.mem.Allocator.Erro
                 const next_size = elf.targetLoad(&next_ph.memsz);
                 // Instead of putting ourselves right after `next_ph`, we'll go a bit later in the
                 // address space so that `next_ph` has address space to grow into (like above).
-                vaddr = ph_align.forward(next_vaddr + next_size * 4) + offset % ph_align.toByteUnits();
+                vaddr = ph_align.forward(@intCast(next_vaddr + next_size * 4)) + offset % ph_align.toByteUnits();
 
                 // Now just swap the phdrs and update our `phndx`.
                 std.mem.swap(@TypeOf(next_ph.*), &phdr[phndx], next_ph);
@@ -8934,7 +8934,7 @@ fn ensureSegmentAligned(elf: *Elf, start_phndx: u32, min_align: std.mem.Alignmen
                     // just above, but it is possible that it was not moved *but* still has an
                     // unaligned virtual address. In that case, we need to ensure the segment's
                     // virtual address range will be recomputed.
-                    if (!min_align.check(elf.targetLoad(&phdr[phndx].vaddr))) {
+                    if (!min_align.check(@intCast(elf.targetLoad(&phdr[phndx].vaddr)))) {
                         try seg_ni.moved(gpa, &elf.mf);
                     }
                 },
