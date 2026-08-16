@@ -76,7 +76,13 @@ pub fn detectNativeCpuAndFeatures(arch: Target.Cpu.Arch, os: Target.Os, query: T
             0x756e6547 => detectIntelProcessor(&cpu, family, model, brand_id),
             0x68747541 => detectAmdProcessor(&cpu, family, model),
             else => null,
-        }) |m| {
+        }) |m| b: {
+            // Some hypervisors are evil liars and will operate in long mode while identifying as a
+            // CPU model that never had long mode in reality. We've seen this in practice with
+            // athlon_xp (AMD K7). Catch this contradiction and fall back to using a generic CPU
+            // model with the features we detected earlier.
+            if (cpu.has(.x86, .@"64bit") and !Target.x86.featureSetHas(m.features, .@"64bit")) break :b;
+
             cpu.model = m;
         }
     }
