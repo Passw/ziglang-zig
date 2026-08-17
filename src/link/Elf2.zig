@@ -5954,15 +5954,11 @@ fn navMapIndex(elf: *Elf, zcu: *Zcu, nav_index: InternPool.Nav.Index) Error!Node
             .@"fn" => a: {
                 const mod = zcu.navFileScope(nav_index).mod.?;
                 const target = &mod.resolved_target.result;
-                const min = target_util.minFunctionAlignment(target);
                 break :a .fromIp(switch (nav.resolved.?.@"align") {
-                    else => |a| a.maxStrict(min),
+                    else => |a| a.maxStrict(target_util.minFunctionAlignment(target)),
                     .none => switch (mod.optimize_mode) {
-                        .debug,
-                        .safe,
-                        .fast,
-                        => target_util.defaultFunctionAlignment(target),
-                        .small => min,
+                        .debug, .safe, .fast => target_util.defaultFunctionAlignment(target),
+                        .small => target_util.minFunctionAlignment(target),
                     }.maxStrict(Type.fromInterned(nav.resolved.?.type).abiAlignment(zcu)),
                 });
             },
@@ -8626,25 +8622,71 @@ pub fn updateContainerTypeInner(
 pub fn addConst(
     elf: *Elf,
     _: Zcu.PerThread,
-    index: link.ConstPool.Index,
-    val: InternPool.Index,
-) link.Error!void {
-    switch (elf.base.comp.config.debug_format) {
-        .strip => {},
-        .dwarf => try elf.dwarf.addConst(index, val),
-        .code_view => unreachable,
-    }
-}
-
-pub fn updateConst(
-    elf: *Elf,
-    _: Zcu.PerThread,
     cpi: link.ConstPool.Index,
     val: InternPool.Index,
 ) link.Error!void {
     switch (elf.base.comp.config.debug_format) {
         .strip => {},
-        .dwarf => elf.dwarf.updateConst(cpi, val),
+        .dwarf => {
+            const gpa = elf.base.comp.gpa;
+            try elf.nodes.ensureUnusedCapacity(gpa, 1);
+            try elf.dwarf_consts.ensureUnusedCapacity(gpa, 1);
+            try elf.dwarf.addConst(cpi, val, &addConstNode);
+            elf.dwarf_consts.putAssumeCapacity(cpi, .{
+                .debug_info_first_target_reloc = .none,
+                .debug_info_first_symbol_reloc = .none,
+                .debug_info_first_node_reloc = .none,
+            });
+        },
+        .code_view => unreachable,
+    }
+}
+fn addConstNode(lf: *link.File, ui: Dwarf.Unit.Index, cpi: link.ConstPool.Index) link.Error!MappedFile.Node.Index {
+    const elf = lf.cast(.elf2).?;
+    const unit = ui.get(&elf.dwarf);
+    return elf.addNodeAssumeCapacity(
+        unit.debug_info_ni.unwrap().?.addFloatingChild(lf.comp.gpa, &elf.mf, .{
+            .enable_next_moved = true,
+        }) catch |err| switch (err) {
+            else => |e| return e,
+            error.MappedFileIo => return lf.comp.link_diags.fail("failed to write output file: {t}", .{
+                elf.mf.io_err.?,
+            }),
+        },
+        .{ .const_debug_info = cpi },
+    );
+}
+
+pub fn updateConst(
+    elf: *Elf,
+    pt: Zcu.PerThread,
+    cpi: link.ConstPool.Index,
+    val: InternPool.Index,
+) link.Error!void {
+    switch (val) {
+        .anyerror_type => {}, // handled in `updateErrorData` instead
+        else => try elf.updateConstInner(pt, cpi, val),
+    }
+}
+fn updateConstInner(
+    elf: *Elf,
+    pt: Zcu.PerThread,
+    cpi: link.ConstPool.Index,
+    val: InternPool.Index,
+) link.Error!void {
+    if (val == .anyerror_type) return; // handled in `updateErrorData` instead
+    switch (elf.base.comp.config.debug_format) {
+        .strip => {},
+        .dwarf => {
+            const gpa = elf.base.comp.gpa;
+            const debug_info_ni = Dwarf.Const.get(cpi, &elf.dwarf).debug_info_ni.unwrap().?;
+            try debug_info_ni.moved(gpa, &elf.mf);
+            var di_nw: MappedFile.Node.Writer = undefined;
+            debug_info_ni.writer(gpa, &elf.mf, &di_nw);
+            defer di_nw.deinit();
+            elf.resetNodeRelocs(debug_info_ni);
+            try elf.dwarf.updateConst(pt, &di_nw, val);
+        },
         .code_view => unreachable,
     }
 }
@@ -8658,10 +8700,13 @@ pub fn updateConstIncomplete(
     switch (elf.base.comp.config.debug_format) {
         .strip => {},
         .dwarf => {
+            const gpa = elf.base.comp.gpa;
             const debug_info_ni = Dwarf.Const.get(cpi, &elf.dwarf).debug_info_ni.unwrap().?;
+            try debug_info_ni.moved(gpa, &elf.mf);
             var di_nw: MappedFile.Node.Writer = undefined;
-            debug_info_ni.writer(elf.base.comp.gpa, &elf.mf, &di_nw);
+            debug_info_ni.writer(gpa, &elf.mf, &di_nw);
             defer di_nw.deinit();
+            elf.resetNodeRelocs(debug_info_ni);
             try elf.dwarf.updateConstIncomplete(pt, &di_nw, val);
         },
         .code_view => unreachable,
@@ -8952,16 +8997,19 @@ pub fn lostTracking(
 }
 
 pub fn updateErrorData(elf: *Elf, pt: Zcu.PerThread) link.Error!void {
-    elf.genLazyInner(pt, .{
+    const comp = elf.base.comp;
+    if (elf.lazy.getPtr(.const_data).map.getIndex(.anyerror_type)) |lmi| elf.genLazyInner(pt, .{
         .kind = .const_data,
-        .index = @intCast(elf.lazy.getPtr(.const_data).map.getIndex(.anyerror_type) orelse return),
+        .index = @intCast(lmi),
     }) catch |err| switch (err) {
         else => |e| return e,
-        error.MappedFileIo => return elf.base.comp.link_diags.fail(
+        error.MappedFileIo => return comp.link_diags.fail(
             "failed to write output file: {t}",
             .{elf.mf.io_err.?},
         ),
     };
+    if (elf.dwarf.const_pool.getIfExists(.anyerror_type)) |cpi|
+        try elf.updateConstInner(pt, cpi, .anyerror_type);
 }
 
 pub fn flush(
@@ -9258,10 +9306,12 @@ fn idleProgNode(
             },
             ui.mod(&elf.dwarf).fully_qualified_name,
         }) catch &name,
-        .const_debug_info => |cpi| std.mem.print(&name, "debug info for {f}", .{
-            Value.fromInterned(cpi.val(&elf.dwarf.const_pool))
-                .fmtValue(.{ .zcu = elf.base.comp.zcu.?, .tid = tid }),
-        }) catch &name,
+        .const_debug_info => |cpi| switch (cpi.val(&elf.dwarf.const_pool)) {
+            .generic_poison_type => "anytype",
+            else => |val| std.mem.print(&name, "debug info for {f}", .{
+                Value.fromInterned(val).fmtValue(.{ .zcu = elf.base.comp.zcu.?, .tid = tid }),
+            }) catch &name,
+        },
         .global_debug_info => |gi| {
             const ip = &elf.base.comp.zcu.?.intern_pool;
             break :name std.mem.print(&name, "debug info for {f}", .{
@@ -10790,12 +10840,12 @@ pub fn printNode(
         .unit_debug_line_header,
         .unit_debug_rnglists,
         => |ui| try w.print("({s})", .{ui.mod(&elf.dwarf).fully_qualified_name}),
-        .const_debug_info => |cpi| try w.print("({f})", .{
-            Value.fromInterned(cpi.val(&elf.dwarf.const_pool)).fmtValue(.{
-                .zcu = elf.base.comp.zcu.?,
-                .tid = tid,
+        .const_debug_info => |cpi| switch (cpi.val(&elf.dwarf.const_pool)) {
+            .generic_poison_type => try w.writeAll("(anytype)"),
+            else => |val| try w.print("({f})", .{
+                Value.fromInterned(val).fmtValue(.{ .zcu = elf.base.comp.zcu.?, .tid = tid }),
             }),
-        }),
+        },
         .global_debug_info => |gi| {
             const zcu = elf.base.comp.zcu.?;
             const ip = &zcu.intern_pool;
@@ -10839,26 +10889,30 @@ pub fn printNode(
         }
         return;
     }
-    const file_loc = ni.fileLocation(&elf.mf, false);
-    var address = file_loc.offset;
-    if (file_loc.size == 0) {
-        try w.splatByteAll(' ', indent + 1);
-        try w.print("{x:0>8}\n", .{address});
-        return;
-    }
+    const start_address: usize, const end_address: usize = file_loc: {
+        const file_loc = ni.fileLocation(&elf.mf, false);
+        break :file_loc .{ @intCast(file_loc.offset), @intCast(file_loc.offset + file_loc.size) };
+    };
+    var address = start_address;
     const line_len = 0x10;
-    var line_it = std.mem.window(
-        u8,
-        elf.mf.memory_map.memory[@intCast(file_loc.offset)..][0..@intCast(file_loc.size)],
-        line_len,
-        line_len,
-    );
-    while (line_it.next()) |line_bytes| : (address += line_len) {
+    while (true) : (address = @min(std.mem.alignForward(usize, address + 1, line_len), end_address)) {
         try w.splatByteAll(' ', indent + 1);
-        try w.print("{x:0>8}  ", .{address});
-        for (line_bytes) |byte| try w.print("{x:0>2} ", .{byte});
-        try w.splatByteAll(' ', 3 * (line_len - line_bytes.len) + 1);
-        for (line_bytes) |byte| try w.writeByte(if (std.ascii.isPrint(byte)) byte else '.');
+        try w.print("{x:0>8}", .{address});
+        if (address == end_address) break try w.writeByte('\n');
+        try w.splatByteAll(' ', 2);
+        const start_byte_address = std.mem.alignBackward(usize, address, line_len);
+        const end_byte_address = start_byte_address + line_len;
+        for (start_byte_address..end_byte_address) |byte_address|
+            if (byte_address < start_address or byte_address >= end_address)
+                try w.splatByteAll(' ', 3)
+            else
+                try w.print("{x:0>2} ", .{elf.mf.memory_map.memory[byte_address]});
+        try w.writeByte(' ');
+        for (start_byte_address..@min(end_address, end_byte_address)) |byte_address|
+            try w.writeByte(if (byte_address < start_address or byte_address >= end_address) ' ' else char: {
+                const byte = elf.mf.memory_map.memory[byte_address];
+                break :char if (std.ascii.isPrint(byte)) byte else '.';
+            });
         try w.writeByte('\n');
     }
 }
