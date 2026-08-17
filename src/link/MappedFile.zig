@@ -13,14 +13,14 @@ const windows = std.os.windows;
 
 io: Io,
 flags: packed struct {
-    block_size: std.mem.Alignment,
+    block_size: Alignment,
     copy_file_range_unsupported: bool,
     fallocate_punch_hole_unsupported: bool,
     fallocate_insert_range_unsupported: bool,
 },
 memory_map: Io.File.MemoryMap,
 nodes: std.ArrayList(Node),
-free_ni: Node.Index,
+free_ni: Node.Index.Optional,
 large: std.ArrayList(u64),
 updates: std.ArrayList(Node.Index),
 /// This progress node's estimated total items is increased once for each node appended to `updates`.
@@ -62,6 +62,94 @@ pub const Error = Allocator.Error || Io.Cancelable || error{
     MappedFileIo,
 };
 
+/// This separate `Alignment` type exists because neither of the other options is really suitable:
+///
+/// * `std.mem.Alignment` is based on `usize`, which---while technically okay since the file is
+///   memory-mapped---is in practice very annoying to work with in linker implementations
+///
+/// * `InternPool.Alignment` is based on `u64`, which is better, but it has the value `.none`, which
+///   is also really annoying to handle, because no alignment is ever nullable in this API
+///
+/// At some point we should probably just change `InternPool.Alignment` to be non-optional, and add
+/// a new `InternPool.Alignment.Optional` type for the case where it can actually be `.none`. At
+/// that point we can transition this code to using `InternPool.Alignment` (although it should
+/// probably be namespaced elsewhere, it has nothing to do with the `InternPool`!).
+pub const Alignment = enum(u6) {
+    @"1" = 0,
+    @"2" = 1,
+    @"4" = 2,
+    @"8" = 3,
+    @"16" = 4,
+    @"32" = 5,
+    @"64" = 6,
+    _,
+
+    pub fn fromIp(a: @import("../InternPool.zig").Alignment) Alignment {
+        assert(a != .none);
+        return @bitCast(a);
+    }
+
+    pub fn toLog2Units(a: Alignment) u6 {
+        return @backingInt(a);
+    }
+
+    pub fn fromLog2Units(a: u6) Alignment {
+        return @fromBackingInt(a);
+    }
+
+    pub fn toByteUnits(a: Alignment) u64 {
+        return @as(u64, 1) << @backingInt(a);
+    }
+
+    pub fn fromByteUnits(n: u64) Alignment {
+        assert(std.math.isPowerOfTwo(n));
+        return @fromBackingInt(@intCast(@ctz(n)));
+    }
+
+    pub fn order(lhs: Alignment, rhs: Alignment) std.math.Order {
+        return std.math.order(@backingInt(lhs), @backingInt(rhs));
+    }
+
+    pub fn compare(lhs: Alignment, op: std.math.CompareOperator, rhs: Alignment) bool {
+        return std.math.compare(@backingInt(lhs), op, @backingInt(rhs));
+    }
+
+    pub fn max(lhs: Alignment, rhs: Alignment) Alignment {
+        return @fromBackingInt(@max(@backingInt(lhs), @backingInt(rhs)));
+    }
+
+    pub fn min(lhs: Alignment, rhs: Alignment) Alignment {
+        return @fromBackingInt(@min(@backingInt(lhs), @backingInt(rhs)));
+    }
+
+    pub inline fn of(comptime T: type) Alignment {
+        return comptime .fromByteUnits(@alignOf(T));
+    }
+
+    /// Given that a base address is known to be aligned to `a`, computes the known alignment of
+    /// that base address plus `off`.
+    pub fn offset(a: Alignment, off: u64) Alignment {
+        return .fromLog2Units(@min(a.toLog2Units(), @ctz(off)));
+    }
+
+    /// Align an address forwards to this alignment.
+    pub fn forward(a: Alignment, addr: u64) u64 {
+        const x = (@as(u64, 1) << @backingInt(a)) - 1;
+        return (addr + x) & ~x;
+    }
+
+    /// Align an address backwards to this alignment.
+    pub fn backward(a: Alignment, addr: u64) u64 {
+        const x = (@as(u64, 1) << @backingInt(a)) - 1;
+        return addr & ~x;
+    }
+
+    /// Check if an address is aligned to this amount.
+    pub fn check(a: Alignment, addr: u64) bool {
+        return @ctz(addr) >= @backingInt(a);
+    }
+};
+
 pub fn init(file: Io.File, gpa: Allocator, io: Io) (Allocator.Error || Io.Cancelable || IoError)!MappedFile {
     var mf: MappedFile = .{
         .io = io,
@@ -101,7 +189,7 @@ pub fn init(file: Io.File, gpa: Allocator, io: Io) (Allocator.Error || Io.Cancel
         .alignment = mf.flags.block_size,
         .fixed = true,
     } });
-    assert(root_ni == Node.Index.root);
+    assert(root_ni == .root);
     try mf.ensureTotalCapacityInner(@intCast(size));
     return mf;
 }
@@ -117,17 +205,17 @@ pub fn deinit(mf: *MappedFile, gpa: Allocator) void {
 }
 
 pub const Node = extern struct {
-    parent: Node.Index,
-    prev: Node.Index,
-    next: Node.Index,
-    first: Node.Index,
-    last: Node.Index,
+    parent: Node.Index.Optional,
+    prev: Node.Index.Optional,
+    next: Node.Index.Optional,
+    first: Node.Index.Optional,
+    last: Node.Index.Optional,
     flags: Flags,
     location_payload: Location.Payload,
 
     pub const Flags = packed struct(u32) {
         location_tag: Location.Tag,
-        alignment: std.mem.Alignment,
+        alignment: Alignment,
         /// Whether this node can be moved.
         fixed: bool,
         /// Whether this node has been moved.
@@ -142,7 +230,7 @@ pub const Node = extern struct {
         bubbles_moved: bool,
         /// Whether `next_moved` events are reported in `updates`.
         enable_next_moved: bool,
-        unused: @Int(.unsigned, 32 - @bitSizeOf(std.mem.Alignment) - 8) = 0,
+        unused: u18 = 0,
     };
 
     pub const Location = union(enum(u1)) {
@@ -180,46 +268,62 @@ pub const Node = extern struct {
     };
 
     pub const Index = enum(u32) {
-        none,
+        root,
         _,
 
-        pub const root: Node.Index = .none;
+        pub const Optional = enum(u32) {
+            none = std.math.maxInt(u32),
+            _,
+
+            pub fn unwrap(oi: Optional) ?Index {
+                return switch (oi) {
+                    _ => @fromBackingInt(@backingInt(oi)),
+                    .none => null,
+                };
+            }
+            pub fn wrap(i: Index) Optional {
+                const oi: Optional = @bitCast(i);
+                assert(oi != .none);
+                return oi;
+            }
+        };
 
         fn get(ni: Node.Index, mf: *const MappedFile) *Node {
             return &mf.nodes.items[@backingInt(ni)];
         }
 
-        pub fn parent(ni: Node.Index, mf: *const MappedFile) Node.Index {
+        /// Alias for `Optional.wrap`, provided for convenience when a result type is not available.
+        pub const toOptional = Optional.wrap;
+
+        pub fn parent(ni: Node.Index, mf: *const MappedFile) Node.Index.Optional {
             return ni.get(mf).parent;
         }
 
-        pub fn next(ni: Node.Index, mf: *const MappedFile) Node.Index {
+        pub fn next(ni: Node.Index, mf: *const MappedFile) Node.Index.Optional {
             return ni.get(mf).next;
         }
         fn setNext(
             prev_ni: Node.Index,
             gpa: Allocator,
-            next_ni: Node.Index,
+            next_ni: Node.Index.Optional,
             mf: *MappedFile,
         ) Allocator.Error!void {
-            assert(prev_ni != .none);
             const prev_next = &prev_ni.get(mf).next;
             if (prev_next.* == next_ni) return;
             prev_next.* = next_ni;
             try prev_ni.nextMoved(gpa, mf);
         }
 
-        pub fn prev(ni: Node.Index, mf: *const MappedFile) Node.Index {
+        pub fn prev(ni: Node.Index, mf: *const MappedFile) Node.Index.Optional {
             return ni.get(mf).prev;
         }
 
         pub fn ChildIterator(comptime direction: enum { prev, next }) type {
             return struct {
                 mf: *const MappedFile,
-                ni: Node.Index,
+                ni: Node.Index.Optional,
                 pub fn next(it: *@This()) ?Node.Index {
-                    const ni = it.ni;
-                    if (ni == .none) return null;
+                    const ni = it.ni.unwrap() orelse return null;
                     it.ni = @field(ni.get(it.mf), @tagName(direction));
                     return ni;
                 }
@@ -233,20 +337,20 @@ pub const Node = extern struct {
         }
 
         pub fn childrenMoved(ni: Node.Index, gpa: Allocator, mf: *MappedFile) Allocator.Error!void {
-            var child_ni = ni.get(mf).last;
-            while (child_ni != .none) {
+            var child_oni = ni.get(mf).last;
+            while (child_oni.unwrap()) |child_ni| {
                 try child_ni.moved(gpa, mf);
-                child_ni = child_ni.get(mf).prev;
+                child_oni = child_ni.get(mf).prev;
             }
         }
 
         pub fn hasMoved(ni: Node.Index, mf: *const MappedFile) bool {
             var parent_ni = ni;
-            while (parent_ni != Node.Index.root) {
+            while (parent_ni != .root) {
                 const parent_node = parent_ni.get(mf);
                 if (!parent_node.flags.bubbles_moved) break;
                 if (parent_node.flags.moved) return true;
-                parent_ni = parent_node.parent;
+                parent_ni = parent_node.parent.unwrap().?;
             }
             return false;
         }
@@ -263,9 +367,8 @@ pub const Node = extern struct {
             if (ni.hasMoved(mf)) return;
             const node = ni.get(mf);
             node.flags.moved = true;
-            switch (node.prev) {
-                .none => {},
-                else => |prev_ni| prev_ni.nextMovedAssumeCapacity(mf),
+            if (node.prev.unwrap()) |prev_ni| {
+                prev_ni.nextMovedAssumeCapacity(mf);
             }
             if (node.flags.resized or node.flags.next_moved) return;
             mf.updates.appendAssumeCapacity(ni);
@@ -314,7 +417,7 @@ pub const Node = extern struct {
             mf.update_prog_node.increaseEstimatedTotalItems(1);
         }
 
-        pub fn alignment(ni: Node.Index, mf: *const MappedFile) std.mem.Alignment {
+        pub fn alignment(ni: Node.Index, mf: *const MappedFile) Alignment {
             return ni.get(mf).flags.alignment;
         }
 
@@ -361,8 +464,11 @@ pub const Node = extern struct {
             while (true) {
                 const parent_node = parent_ni.get(mf);
                 if (set_has_content) parent_node.flags.has_content = true;
-                if (parent_ni == .none) break;
-                parent_ni = parent_node.parent;
+                if (parent_ni == .root) {
+                    assert(parent_node.parent == .none);
+                    break;
+                }
+                parent_ni = parent_node.parent.unwrap().?;
                 const parent_offset, _ = parent_ni.location(mf).resolve(mf);
                 offset += parent_offset;
             }
@@ -402,12 +508,12 @@ pub const Node = extern struct {
         };
 
         /// Moves and expands a node such that its offset and size are aligned to `new_alignment`.
-        /// Asserts that `ni` is not `Node.Index.root`.
+        /// Asserts that `ni` is not `.root`.
         pub fn realign(
             ni: Node.Index,
             mf: *MappedFile,
             gpa: Allocator,
-            new_alignment: std.mem.Alignment,
+            new_alignment: Alignment,
             opts: RealignNodeOptions,
         ) Error!void {
             mf.realignNode(gpa, ni, new_alignment, opts) catch |err| switch (err) {
@@ -590,9 +696,9 @@ pub const Node = extern struct {
 };
 
 fn addNode(mf: *MappedFile, gpa: Allocator, opts: struct {
-    parent: Node.Index = .none,
-    prev: Node.Index = .none,
-    next: Node.Index = .none,
+    parent: Node.Index.Optional = .none,
+    prev: Node.Index.Optional = .none,
+    next: Node.Index.Optional = .none,
     offset: u64 = 0,
     add_node: AddNodeOptions,
 }) (Allocator.Error || Io.Cancelable || IoError)!Node.Index {
@@ -605,22 +711,32 @@ fn addNode(mf: *MappedFile, gpa: Allocator, opts: struct {
         defer mf.large.appendSliceAssumeCapacity(&.{ opts.offset, 0 });
         break :location .{ .large, .{ .large = .{ .index = mf.large.items.len } } };
     };
-    const free_ni: Node.Index, const free_node = free: switch (mf.free_ni) {
-        .none => .{ @fromBackingInt(@intCast(mf.nodes.items.len)), mf.nodes.addOneAssumeCapacity() },
-        else => |free_ni| {
-            const free_node = free_ni.get(mf);
-            mf.free_ni = free_node.next;
-            break :free .{ free_ni, free_node };
-        },
+
+    const free_ni: Node.Index, const free_node: *Node = if (mf.free_ni.unwrap()) |free_ni| free: {
+        const free_node = free_ni.get(mf);
+        mf.free_ni = free_node.next;
+        break :free .{ free_ni, free_node };
+    } else .{
+        @fromBackingInt(@intCast(mf.nodes.items.len)),
+        mf.nodes.addOneAssumeCapacity(),
     };
-    switch (opts.prev) {
-        .none => opts.parent.get(mf).first = free_ni,
-        else => |prev_ni| try prev_ni.setNext(gpa, free_ni, mf),
+
+    if (opts.prev.unwrap()) |prev_ni| {
+        try prev_ni.setNext(gpa, .wrap(free_ni), mf);
+    } else if (opts.parent.unwrap()) |parent_ni| {
+        parent_ni.get(mf).first = .wrap(free_ni);
+    } else {
+        assert(free_ni == .root);
     }
-    switch (opts.next) {
-        .none => opts.parent.get(mf).last = free_ni,
-        else => |next_ni| next_ni.get(mf).prev = free_ni,
+
+    if (opts.next.unwrap()) |next_ni| {
+        next_ni.get(mf).prev = .wrap(free_ni);
+    } else if (opts.parent.unwrap()) |parent_ni| {
+        parent_ni.get(mf).last = .wrap(free_ni);
+    } else {
+        assert(free_ni == .root);
     }
+
     free_node.* = .{
         .parent = opts.parent,
         .prev = opts.prev,
@@ -659,7 +775,7 @@ fn addNode(mf: *MappedFile, gpa: Allocator, opts: struct {
 
 pub const AddNodeOptions = struct {
     size: u64 = 0,
-    alignment: std.mem.Alignment = .@"1",
+    alignment: Alignment = .@"1",
     fixed: bool = false,
     moved: bool = false,
     resized: bool = false,
@@ -678,7 +794,7 @@ pub fn addOnlyChildNode(
     const parent = parent_ni.get(mf);
     assert(parent.first == .none and parent.last == .none);
     return mf.addNode(gpa, .{
-        .parent = parent_ni,
+        .parent = .wrap(parent_ni),
         .add_node = opts,
     }) catch |err| switch (err) {
         error.OutOfMemory,
@@ -700,7 +816,7 @@ pub fn addFirstChildNode(
     try mf.nodes.ensureUnusedCapacity(gpa, 1);
     const parent = parent_ni.get(mf);
     return mf.addNode(gpa, .{
-        .parent = parent_ni,
+        .parent = .wrap(parent_ni),
         .next = parent.first,
         .add_node = opts,
     }) catch |err| switch (err) {
@@ -723,14 +839,12 @@ pub fn addLastChildNode(
     try mf.nodes.ensureUnusedCapacity(gpa, 1);
     const parent = parent_ni.get(mf);
     return mf.addNode(gpa, .{
-        .parent = parent_ni,
+        .parent = .wrap(parent_ni),
         .prev = parent.last,
-        .offset = offset: switch (parent.last) {
-            .none => 0,
-            else => |last_ni| {
-                const last_offset, const last_size = last_ni.location(mf).resolve(mf);
-                break :offset last_offset + last_size;
-            },
+        .offset = offset: {
+            const last_ni = parent.last.unwrap() orelse break :offset 0;
+            const last_offset, const last_size = last_ni.location(mf).resolve(mf);
+            break :offset last_offset + last_size;
         },
         .add_node = opts,
     }) catch |err| switch (err) {
@@ -750,13 +864,12 @@ pub fn addNodeAfter(
     prev_ni: Node.Index,
     opts: AddNodeOptions,
 ) Error!Node.Index {
-    assert(prev_ni != .none);
     try mf.nodes.ensureUnusedCapacity(gpa, 1);
     const prev = prev_ni.get(mf);
     const prev_offset, const prev_size = prev.location().resolve(mf);
     return mf.addNode(gpa, .{
         .parent = prev.parent,
-        .prev = prev_ni,
+        .prev = .wrap(prev_ni),
         .next = prev.next,
         .offset = prev_offset + prev_size,
         .add_node = opts,
@@ -783,10 +896,10 @@ fn shrinkNode(
     const old_offset, _ = node.location().resolve(mf);
 
     // This would require unmapping first
-    assert(ni != Node.Index.root);
+    assert(ni != .root);
 
-    if (node.last != .none) {
-        const last = node.last.get(mf);
+    if (node.last.unwrap()) |last_ni| {
+        const last = last_ni.get(mf);
         const last_offset, const last_size = last.location().resolve(mf);
         assert(last_offset + last_size > size);
     }
@@ -795,15 +908,16 @@ fn shrinkNode(
     try mf.updates.ensureUnusedCapacity(gpa, 4);
 
     ni.setLocationAssumeCapacity(mf, old_offset, size);
-    if (!shift_next or node.next == .none) return;
+    if (!shift_next) return;
+    const next_ni = node.next.unwrap() orelse return;
 
-    const next = node.next.get(mf);
+    const next = next_ni.get(mf);
     const old_next_offset, const next_size = next.location().resolve(mf);
     const padding = old_next_offset - (old_offset + size);
     const new_next_offset = next.flags.alignment.forward(@intCast(old_next_offset - padding));
 
     if (next.flags.has_content and new_next_offset < old_next_offset) {
-        const old_file_offset = node.next.fileLocation(mf, false).offset;
+        const old_file_offset = next_ni.fileLocation(mf, false).offset;
         const new_file_offset = (old_file_offset - old_next_offset) + new_next_offset;
         @memmove(
             mf.memory_map.memory[@intCast(new_file_offset)..][0..@intCast(next_size)],
@@ -812,7 +926,7 @@ fn shrinkNode(
         @memset(mf.memory_map.memory[@intCast(new_file_offset + next_size)..@intCast(old_file_offset + next_size)], 0);
     }
 
-    node.next.setLocationAssumeCapacity(mf, new_next_offset, next_size);
+    next_ni.setLocationAssumeCapacity(mf, new_next_offset, next_size);
 }
 
 fn resizeNode(
@@ -828,7 +942,8 @@ fn resizeNode(
     const new_size = node.flags.alignment.forward(@intCast(requested_size));
 
     // Resize the entire file
-    if (ni == Node.Index.root) {
+    const parent_ni = node.parent.unwrap() orelse {
+        assert(ni == .root);
         try mf.ensureCapacityForSetLocation(gpa);
         mf.memory_map.write(io) catch |err| switch (err) {
             error.WouldBlock => return error.Unexpected, // file was not opened as non-blocking
@@ -839,15 +954,13 @@ fn resizeNode(
         try mf.ensureTotalCapacityInner(@intCast(new_size));
         ni.setLocationAssumeCapacity(mf, old_offset, new_size);
         return;
-    }
-    const parent = node.parent.get(mf);
+    };
+    const parent = parent_ni.get(mf);
     _, var old_parent_size = parent.location().resolve(mf);
-    const trailing_end = trailing_end: switch (node.next) {
-        .none => old_parent_size,
-        else => |next_ni| {
-            const next_offset, _ = next_ni.location(mf).resolve(mf);
-            break :trailing_end next_offset;
-        },
+    const trailing_end = trailing_end: {
+        const next_ni = node.next.unwrap() orelse break :trailing_end old_parent_size;
+        const next_offset, _ = next_ni.location(mf).resolve(mf);
+        break :trailing_end next_offset;
     };
     assert(old_offset + old_size <= trailing_end);
     if (old_offset + new_size <= trailing_end) {
@@ -877,7 +990,7 @@ fn resizeNode(
             else => |e| return e,
         };
         // Ask the filesystem driver to insert extents into the file without copying any data
-        const last_offset, const last_size = parent.last.location(mf).resolve(mf);
+        const last_offset, const last_size = parent.last.unwrap().?.location(mf).resolve(mf);
         const last_end = last_offset + last_size;
         assert(last_end <= old_parent_size);
         _, const file_size = Node.Index.root.location(mf).resolve(mf);
@@ -900,13 +1013,13 @@ fn resizeNode(
                         enclosing.location().resolve(mf);
                     const new_enclosing_size = old_enclosing_size + range_size;
                     enclosing_ni.setLocationAssumeCapacity(mf, enclosing_offset, new_enclosing_size);
-                    if (enclosing_ni == Node.Index.root) {
+                    if (enclosing_ni == .root) {
                         assert(enclosing_offset == 0);
                         try mf.ensureTotalCapacityInner(@intCast(new_enclosing_size));
                         break;
                     }
-                    var after_ni = enclosing.next;
-                    while (after_ni != .none) {
+                    var after_oni = enclosing.next;
+                    while (after_oni.unwrap()) |after_ni| {
                         try mf.ensureCapacityForSetLocation(gpa);
                         const after = after_ni.get(mf);
                         const after_offset, const after_size = after.location().resolve(mf);
@@ -915,9 +1028,9 @@ fn resizeNode(
                             range_size + after_offset,
                             after_size,
                         );
-                        after_ni = after.next;
+                        after_oni = after.next;
                     }
-                    enclosing_ni = enclosing.parent;
+                    enclosing_ni = enclosing.parent.unwrap().?;
                 }
                 return;
             },
@@ -939,32 +1052,33 @@ fn resizeNode(
     if (node.next == .none) {
         // As this is the last node, we simply need more space in the parent
         const new_parent_size = old_offset + new_size;
-        try mf.resizeNode(gpa, node.parent, new_parent_size +| new_parent_size / growth_factor);
+        try mf.resizeNode(gpa, parent_ni, new_parent_size +| new_parent_size / growth_factor);
         try mf.ensureCapacityForSetLocation(gpa);
         ni.setLocationAssumeCapacity(mf, old_offset, new_size);
         return;
     }
     if (!node.flags.fixed) {
         // Make space at the end of the parent for this floating node
-        const last = parent.last.get(mf);
+        const last = parent.last.unwrap().?.get(mf);
         const last_offset, const last_size = last.location().resolve(mf);
         const new_offset = node.flags.alignment.forward(@intCast(last_offset + last_size));
         const new_parent_size = new_offset + new_size;
         if (new_parent_size > old_parent_size)
-            try mf.resizeNode(gpa, node.parent, new_parent_size +| new_parent_size / growth_factor);
+            try mf.resizeNode(gpa, parent_ni, new_parent_size +| new_parent_size / growth_factor);
         try mf.ensureCapacityForSetLocation(gpa);
-        const next_ni = node.next;
+        const next_ni = node.next.unwrap().?;
         next_ni.get(mf).prev = node.prev;
-        switch (node.prev) {
-            .none => parent.first = next_ni,
-            else => |prev_ni| try prev_ni.setNext(gpa, next_ni, mf),
+        if (node.prev.unwrap()) |prev_ni| {
+            try prev_ni.setNext(gpa, .wrap(next_ni), mf);
+        } else {
+            parent.first = .wrap(next_ni);
         }
-        try parent.last.setNext(gpa, ni, mf);
+        try parent.last.unwrap().?.setNext(gpa, .wrap(ni), mf);
         node.prev = parent.last;
         try ni.setNext(gpa, .none, mf);
-        parent.last = ni;
+        parent.last = .wrap(ni);
         if (node.flags.has_content) {
-            const parent_file_offset = node.parent.fileLocation(mf, false).offset;
+            const parent_file_offset = parent_ni.fileLocation(mf, false).offset;
             try mf.moveRange(
                 parent_file_offset + old_offset,
                 parent_file_offset + new_offset,
@@ -976,94 +1090,89 @@ fn resizeNode(
     }
     // Search for the first floating node following this fixed node
     var last_fixed_ni = ni;
-    var first_floating_ni = node.next;
+    var first_floating_oni = node.next;
     var shift = new_size - old_size;
-    var max_shift_align: std.mem.Alignment = .@"1";
+    var max_shift_align: Alignment = .@"1";
     var direction: enum { forward, reverse } = .forward;
     while (true) {
-        assert(last_fixed_ni != .none);
         const last_fixed = last_fixed_ni.get(mf);
         assert(last_fixed.flags.fixed);
         const old_last_fixed_offset, const last_fixed_size = last_fixed.location().resolve(mf);
         const new_last_fixed_offset = old_last_fixed_offset + shift;
-        make_space: switch (first_floating_ni) {
-            else => {
-                const first_floating = first_floating_ni.get(mf);
-                const old_first_floating_offset, const first_floating_size =
-                    first_floating.location().resolve(mf);
-                assert(old_last_fixed_offset + last_fixed_size <= old_first_floating_offset);
-                if (new_last_fixed_offset + last_fixed_size <= old_first_floating_offset)
-                    break :make_space;
-                assert(direction == .forward);
-                max_shift_align = max_shift_align.max(first_floating.flags.alignment.max(last_fixed.flags.alignment));
-                if (first_floating.flags.fixed) {
-                    shift = max_shift_align.forward(@intCast(
-                        @max(shift, first_floating_size),
-                    ));
+        if (first_floating_oni.unwrap()) |first_floating_ni| make_space: {
+            const first_floating = first_floating_ni.get(mf);
+            const old_first_floating_offset, const first_floating_size =
+                first_floating.location().resolve(mf);
+            assert(old_last_fixed_offset + last_fixed_size <= old_first_floating_offset);
+            if (new_last_fixed_offset + last_fixed_size <= old_first_floating_offset)
+                break :make_space;
+            assert(direction == .forward);
+            max_shift_align = max_shift_align.max(first_floating.flags.alignment.max(last_fixed.flags.alignment));
+            if (first_floating.flags.fixed) {
+                shift = max_shift_align.forward(@intCast(
+                    @max(shift, first_floating_size),
+                ));
 
-                    // Not enough space, try the next node
-                    last_fixed_ni = first_floating_ni;
-                    first_floating_ni = first_floating.next;
-                    continue;
-                }
-                // Move the found floating node to make space for preceding fixed nodes
-                const last = parent.last.get(mf);
-                const last_offset, const last_size = last.location().resolve(mf);
-                const new_first_floating_offset = max_shift_align.forward(
-                    @intCast(@max(new_last_fixed_offset + last_fixed_size, last_offset + last_size)),
+                // Not enough space, try the next node
+                last_fixed_ni = first_floating_ni;
+                first_floating_oni = first_floating.next;
+                continue;
+            }
+            // Move the found floating node to make space for preceding fixed nodes
+            const last = parent.last.unwrap().?.get(mf);
+            const last_offset, const last_size = last.location().resolve(mf);
+            const new_first_floating_offset = max_shift_align.forward(
+                @intCast(@max(new_last_fixed_offset + last_fixed_size, last_offset + last_size)),
+            );
+            const new_parent_size = new_first_floating_offset + first_floating_size;
+            if (new_parent_size > old_parent_size) {
+                try mf.resizeNode(
+                    gpa,
+                    parent_ni,
+                    new_parent_size +| new_parent_size / growth_factor,
                 );
-                const new_parent_size = new_first_floating_offset + first_floating_size;
-                if (new_parent_size > old_parent_size) {
-                    try mf.resizeNode(
-                        gpa,
-                        node.parent,
-                        new_parent_size +| new_parent_size / growth_factor,
-                    );
-                    _, old_parent_size = parent.location().resolve(mf);
+                _, old_parent_size = parent.location().resolve(mf);
+            }
+            try mf.ensureCapacityForSetLocation(gpa);
+            if (parent.last.unwrap().? != first_floating_ni) {
+                const old_last = parent.last.unwrap().?;
+                first_floating.prev = .wrap(old_last);
+                parent.last = .wrap(first_floating_ni);
+                try old_last.setNext(gpa, .wrap(first_floating_ni), mf);
+                try last_fixed_ni.setNext(gpa, first_floating.next, mf);
+                if (first_floating.next.unwrap()) |next_ni| {
+                    next_ni.get(mf).prev = .wrap(last_fixed_ni);
                 }
-                try mf.ensureCapacityForSetLocation(gpa);
-                if (parent.last != first_floating_ni) {
-                    const old_last = parent.last;
-                    first_floating.prev = old_last;
-                    parent.last = first_floating_ni;
-                    try old_last.setNext(gpa, first_floating_ni, mf);
-                    try last_fixed_ni.setNext(gpa, first_floating.next, mf);
-                    switch (first_floating.next) {
-                        .none => {},
-                        else => |next_ni| next_ni.get(mf).prev = last_fixed_ni,
-                    }
-                    try first_floating_ni.setNext(gpa, .none, mf);
-                }
-                if (first_floating.flags.has_content) {
-                    const parent_file_offset =
-                        node.parent.fileLocation(mf, false).offset;
-                    try mf.moveRange(
-                        parent_file_offset + old_first_floating_offset,
-                        parent_file_offset + new_first_floating_offset,
-                        first_floating_size,
-                    );
-                }
-                first_floating_ni.setLocationAssumeCapacity(
-                    mf,
-                    new_first_floating_offset,
+                try first_floating_ni.setNext(gpa, .none, mf);
+            }
+            if (first_floating.flags.has_content) {
+                const parent_file_offset =
+                    parent_ni.fileLocation(mf, false).offset;
+                try mf.moveRange(
+                    parent_file_offset + old_first_floating_offset,
+                    parent_file_offset + new_first_floating_offset,
                     first_floating_size,
                 );
-                // Continue the search after the just-moved floating node
-                first_floating_ni = last_fixed.next;
-                continue;
-            },
-            .none => {
-                assert(direction == .forward);
-                const new_parent_size = new_last_fixed_offset + last_fixed_size;
-                if (new_parent_size > old_parent_size) {
-                    try mf.resizeNode(
-                        gpa,
-                        node.parent,
-                        new_parent_size +| new_parent_size / growth_factor,
-                    );
-                    _, old_parent_size = parent.location().resolve(mf);
-                }
-            },
+            }
+            first_floating_ni.setLocationAssumeCapacity(
+                mf,
+                new_first_floating_offset,
+                first_floating_size,
+            );
+            // Continue the search after the just-moved floating node
+            first_floating_oni = last_fixed.next;
+            continue;
+        } else {
+            assert(direction == .forward);
+            const new_parent_size = new_last_fixed_offset + last_fixed_size;
+            if (new_parent_size > old_parent_size) {
+                try mf.resizeNode(
+                    gpa,
+                    parent_ni,
+                    new_parent_size +| new_parent_size / growth_factor,
+                );
+                _, old_parent_size = parent.location().resolve(mf);
+            }
         }
         try mf.ensureCapacityForSetLocation(gpa);
         if (last_fixed_ni == ni) {
@@ -1077,7 +1186,7 @@ fn resizeNode(
         }
         // Move a fixed node into trailing free space
         if (last_fixed.flags.has_content) {
-            const parent_file_offset = node.parent.fileLocation(mf, false).offset;
+            const parent_file_offset = parent_ni.fileLocation(mf, false).offset;
             try mf.moveRange(
                 parent_file_offset + old_last_fixed_offset,
                 parent_file_offset + new_last_fixed_offset,
@@ -1086,8 +1195,8 @@ fn resizeNode(
         }
         last_fixed_ni.setLocationAssumeCapacity(mf, new_last_fixed_offset, last_fixed_size);
         // Retry the previous nodes now that there is enough space
-        first_floating_ni = last_fixed_ni;
-        last_fixed_ni = last_fixed.prev;
+        first_floating_oni = .wrap(last_fixed_ni);
+        last_fixed_ni = last_fixed.prev.unwrap().?;
         direction = .reverse;
     }
 }
@@ -1096,7 +1205,7 @@ fn realignNode(
     mf: *MappedFile,
     gpa: Allocator,
     ni: Node.Index,
-    new_alignment: std.mem.Alignment,
+    new_alignment: Alignment,
     opts: Node.Index.RealignNodeOptions,
 ) (Allocator.Error || Io.Cancelable || IoError)!void {
     mf.nodes_lock.assertUnlocked();
@@ -1109,25 +1218,27 @@ fn realignNode(
     }
 
     const old_offset, const size = node.location().resolve(mf);
-    if (ni == Node.Index.root) return mf.resizeNode(gpa, ni, size);
+    const parent_ni = node.parent.unwrap() orelse {
+        assert(ni == .root);
+        return mf.resizeNode(gpa, ni, size);
+    };
 
     const new_size = new_alignment.forward(@intCast(size));
     if (new_alignment.check(@intCast(old_offset))) return mf.resizeNode(gpa, ni, new_size);
 
-    _, const parent_size = node.parent.location(mf).resolve(mf);
-    const trailing_end = trailing_end: switch (node.next) {
-        .none => parent_size,
-        else => |next_ni| {
-            const next_offset, _ = next_ni.location(mf).resolve(mf);
-            break :trailing_end next_offset;
-        },
+    _, const parent_size = parent_ni.location(mf).resolve(mf);
+    const trailing_end = trailing_end: {
+        const next_ni = node.next.unwrap() orelse break :trailing_end parent_size;
+        const next_offset, _ = next_ni.location(mf).resolve(mf);
+        break :trailing_end next_offset;
     };
 
     if (opts.try_backwards) {
         const backward_offset = new_alignment.backward(@intCast(old_offset));
-        const prev_end = if (node.prev == .none) 0 else prev: {
-            const prev_offset, const prev_size = node.prev.location(mf).resolve(mf);
-            break :prev prev_offset + prev_size;
+        const prev_end = prev_end: {
+            const prev_ni = node.prev.unwrap() orelse break :prev_end 0;
+            const prev_offset, const prev_size = prev_ni.location(mf).resolve(mf);
+            break :prev_end prev_offset + prev_size;
         };
 
         if (backward_offset >= prev_end) {
@@ -1399,7 +1510,7 @@ fn verify(mf: *MappedFile) void {
     assert(root.parent == .none);
     assert(root.prev == .none);
     assert(root.next == .none);
-    mf.verifyNode(Node.Index.root);
+    mf.verifyNode(.root);
 }
 
 fn verifyNode(mf: *MappedFile, parent_ni: Node.Index) void {
@@ -1517,7 +1628,7 @@ test {
         try testVerifyContent(&mf, d, 0xdd, d_init_size);
     }
 
-    const child_init: []const struct { std.mem.Alignment, usize } = &.{
+    const child_init: []const struct { Alignment, usize } = &.{
         .{ .@"16", 16 },
         .{ .@"1", 1 },
         .{ .@"1", 19 },
