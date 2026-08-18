@@ -1291,11 +1291,12 @@ pub const Directories = struct {
     pub fn deinit(dirs: *Directories, io: Io) void {
         // The local and global caches could be the same.
         const close_local = dirs.local_cache.handle.handle != dirs.global_cache.handle.handle;
+        const close_build_root = dirs.build_root.handle.handle != Io.Dir.cwd().handle;
 
         dirs.global_cache.handle.close(io);
         if (close_local) dirs.local_cache.handle.close(io);
         dirs.zig_lib.handle.close(io);
-        if (dirs.build_root.path != null) dirs.build_root.handle.close(io);
+        if (close_build_root) dirs.build_root.handle.close(io);
     }
 
     /// Returns a `Directories` where `local_cache` is replaced with `global_cache`, intended for
@@ -1346,7 +1347,6 @@ pub const Directories = struct {
             };
         };
         const build_root: Cache.Directory = if (options.build_root) |s|
-            // TODO this ends up setting path to null, leaking the fd in deinit
             openUnresolved(arena, io, cwd, s, .@"build root")
         else
             .cwd();
