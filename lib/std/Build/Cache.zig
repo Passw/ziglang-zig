@@ -1032,24 +1032,32 @@ pub const Manifest = struct {
 
     /// Like `addFilePost` but when the file contents have already been loaded from disk.
     pub fn addFilePostContents(
-        self: *Manifest,
+        man: *Manifest,
         file_path: []const u8,
         bytes: []const u8,
         stat: File.Stat,
     ) !void {
-        assert(self.manifest_file != null);
-        const gpa = self.cache.gpa;
+        assert(man.manifest_file != null);
+        const gpa = man.cache.gpa;
+        const prefixed_path = try man.cache.findPrefix(file_path);
+        var keep = false;
+        defer if (!keep) gpa.free(prefixed_path.sub_path);
+        keep = try addPrefixedPathPostContents(man, prefixed_path, bytes, stat);
+    }
 
-        const prefixed_path = try self.cache.findPrefix(file_path);
-        errdefer gpa.free(prefixed_path.sub_path);
+    /// Low level function. `prefixed_path` references cloned memory. Returns
+    /// whether or not `prefixed_path.sub_path` should be kept.
+    pub fn addPrefixedPathPostContents(
+        man: *Manifest,
+        prefixed_path: PrefixedPath,
+        bytes: []const u8,
+        stat: File.Stat,
+    ) !bool {
+        const gpa = man.cache.gpa;
+        const gop = try man.files.getOrPutAdapted(gpa, prefixed_path, FilesAdapter{});
+        errdefer _ = man.files.pop();
 
-        const gop = try self.files.getOrPutAdapted(gpa, prefixed_path, FilesAdapter{});
-        errdefer _ = self.files.pop();
-
-        if (gop.found_existing) {
-            gpa.free(prefixed_path.sub_path);
-            return;
-        }
+        if (gop.found_existing) return false;
 
         const new_file = gop.key_ptr;
 
@@ -1062,7 +1070,7 @@ pub const Manifest = struct {
             .contents = null,
         };
 
-        if (try self.isProblematicTimestamp(new_file.stat.mtime)) {
+        if (try man.isProblematicTimestamp(new_file.stat.mtime)) {
             // The actual file has an unreliable timestamp, force it to be hashed
             new_file.stat.mtime = .zero;
             new_file.stat.inode = 0;
@@ -1074,7 +1082,8 @@ pub const Manifest = struct {
             hasher.final(&new_file.bin_digest);
         }
 
-        self.hash.hasher.update(&new_file.bin_digest);
+        man.hash.hasher.update(&new_file.bin_digest);
+        return true;
     }
 
     pub fn addDepFilePost(self: *Manifest, dir: Io.Dir, dep_file_sub_path: []const u8) !void {

@@ -506,10 +506,11 @@ pub const Path = struct {
         // so that we prefer `.root = .local_cache` over `.root = .zig_lib`. The easiest way to do
         // this is simply to prioritize the longest root path.
         const PathAndRoot = struct { ?[]const u8, Root };
-        var roots: [3]PathAndRoot = .{
+        var roots: [4]PathAndRoot = .{
             .{ dirs.zig_lib.path, .zig_lib },
             .{ dirs.global_cache.path, .global_cache },
             .{ dirs.local_cache.path, .local_cache },
+            .{ dirs.build_root.path, .build_root },
         };
         // This must be a stable sort, because the global and local cache directories may be the same, in
         // which case we need to make a consistent choice.
@@ -660,7 +661,7 @@ pub const Path = struct {
     /// This should not be used for most of the compiler pipeline, but is useful when emitting
     /// paths from the compilation (e.g. in debug info), because they will not depend on the cwd.
     /// The returned path is owned by the caller and allocated into `gpa`.
-    pub fn toAbsolute(p: Path, dirs: std.zig.Directories, gpa: Allocator) Allocator.Error![]u8 {
+    pub fn toAbsolute(p: Path, dirs: *const std.zig.Directories, gpa: Allocator) Allocator.Error![]u8 {
         const root_path: []const u8 = switch (p.root) {
             .zig_lib => dirs.zig_lib.path orelse "",
             .global_cache => dirs.global_cache.path orelse "",
@@ -700,6 +701,66 @@ pub const Path = struct {
             .yes => true,
             .no, .different_roots => false,
         };
+    }
+
+    pub fn addToCacheManifestPostHit(p: Path, man: *Cache.Manifest, dirs: *const std.zig.Directories) !void {
+        comptime assert(0 == @backingInt(std.zig.Server.Message.PathPrefix.cwd));
+        comptime assert(1 == @backingInt(std.zig.Server.Message.PathPrefix.zig_lib));
+        comptime assert(2 == @backingInt(std.zig.Server.Message.PathPrefix.local_cache));
+        comptime assert(3 == @backingInt(std.zig.Server.Message.PathPrefix.global_cache));
+        comptime assert(4 == @backingInt(std.zig.Server.Message.PathPrefix.build_root));
+        comptime assert(@typeInfo(std.zig.Server.Message.PathPrefix).@"enum".field_names.len == 5);
+        const gpa = man.cache.gpa;
+        const prefixed_path: Cache.PrefixedPath = .{
+            .prefix = switch (p.root) {
+                .none => {
+                    const path = try p.toAbsolute(dirs, gpa);
+                    defer gpa.free(path);
+                    return man.addFilePost(path);
+                },
+                .zig_lib => 1,
+                .local_cache => 2,
+                .global_cache => 3,
+                .build_root => 4,
+            },
+            .sub_path = try gpa.dupe(u8, p.sub_path),
+        };
+        var keep = false;
+        defer if (!keep) gpa.free(prefixed_path.sub_path);
+        keep = try man.addPrefixedPathPost(prefixed_path);
+    }
+
+    pub fn addToCacheManifestPostHitContents(
+        p: Path,
+        man: *Cache.Manifest,
+        dirs: *const std.zig.Directories,
+        bytes: []const u8,
+        stat: Cache.File.Stat,
+    ) !void {
+        comptime assert(0 == @backingInt(std.zig.Server.Message.PathPrefix.cwd));
+        comptime assert(1 == @backingInt(std.zig.Server.Message.PathPrefix.zig_lib));
+        comptime assert(2 == @backingInt(std.zig.Server.Message.PathPrefix.local_cache));
+        comptime assert(3 == @backingInt(std.zig.Server.Message.PathPrefix.global_cache));
+        comptime assert(4 == @backingInt(std.zig.Server.Message.PathPrefix.build_root));
+        comptime assert(@typeInfo(std.zig.Server.Message.PathPrefix).@"enum".field_names.len == 5);
+        const gpa = man.cache.gpa;
+        const prefixed_path: Cache.PrefixedPath = .{
+            .prefix = switch (p.root) {
+                .none => {
+                    const path = try p.toAbsolute(dirs, gpa);
+                    defer gpa.free(path);
+                    return man.addFilePostContents(path, bytes, stat);
+                },
+                .zig_lib => 1,
+                .local_cache => 2,
+                .global_cache => 3,
+                .build_root => 4,
+            },
+            .sub_path = try gpa.dupe(u8, p.sub_path),
+        };
+        var keep = false;
+        defer if (!keep) gpa.free(prefixed_path.sub_path);
+        keep = try man.addPrefixedPathPostContents(prefixed_path, bytes, stat);
     }
 };
 
@@ -2776,7 +2837,7 @@ pub fn update(comp: *Compilation, main_progress_node: std.Progress.Node) UpdateE
 
             man = comp.cache_parent.obtain();
             whole.cache_manifest = &man;
-            try addNonIncrementalStuffToCacheManifest(comp, arena, &man);
+            try addNonIncrementalStuffToCacheManifest(comp, &man);
 
             // Under `--time-report`, ignore cache hits; do the work anyway for those juicy numbers.
             const ignore_hit = comp.time_report != null;
@@ -3328,15 +3389,14 @@ fn renameTmpIntoCache(
 /// anything from the link cache manifest.
 pub const link_hash_implementation_version = 14;
 
-fn addNonIncrementalStuffToCacheManifest(
-    comp: *Compilation,
-    arena: Allocator,
-    man: *Cache.Manifest,
-) !void {
+fn addNonIncrementalStuffToCacheManifest(comp: *Compilation, man: *Cache.Manifest) !void {
     comptime assert(link_hash_implementation_version == 14);
 
     if (comp.zcu) |zcu| {
-        try addModuleTableToCacheHash(zcu, arena, &man.hash, .{ .files = man });
+        // No need to call `addModuleTableToCacheHash` here because it is
+        // redundant with the logic in `PerThread.update` which iterates over
+        // `zcu.alive_files` and adds those files discovered via `@import` to
+        // the whole cache manifest.
 
         // Synchronize with other matching comments: ZigOnlyHashStuff
         man.hash.addListOfBytes(comp.test_filters);
