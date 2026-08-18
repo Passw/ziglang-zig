@@ -1678,15 +1678,7 @@ pub const CreateOptions = struct {
     };
 };
 
-fn addModuleTableToCacheHash(
-    zcu: *Zcu,
-    arena: Allocator,
-    hash: *Cache.HashHelper,
-    hash_type: union(enum) { path_bytes, files: *Cache.Manifest },
-) error{
-    OutOfMemory,
-    Unexpected,
-}!void {
+fn addModuleTableToCacheHash(zcu: *Zcu, hash: *Cache.HashHelper) error{ OutOfMemory, Unexpected }!void {
     assert(zcu.module_roots.count() != 0); // module_roots is populated
 
     for (zcu.module_roots.keys(), zcu.module_roots.values()) |mod, opt_mod_root_file| {
@@ -1695,17 +1687,9 @@ fn addModuleTableToCacheHash(
             if (zcu.fileByIndex(mod_root_file).is_builtin) continue; // redundant
         }
         cache_helpers.addModule(hash, mod);
-        switch (hash_type) {
-            .path_bytes => {
-                hash.add(mod.root.root);
-                hash.addBytes(mod.root.sub_path);
-                hash.addBytes(mod.root_src_path);
-            },
-            .files => |man| if (mod.root_src_path.len != 0) {
-                const root_src_path = try mod.root.toCachePath(zcu.comp.dirs).join(arena, mod.root_src_path);
-                _ = try man.addFilePath(root_src_path, null);
-            },
-        }
+        hash.add(mod.root.root);
+        hash.addBytes(mod.root.sub_path);
+        hash.addBytes(mod.root_src_path);
         hash.addListOfBytes(mod.deps.keys());
     }
 }
@@ -2336,7 +2320,7 @@ pub fn create(gpa: Allocator, arena: Allocator, io: Io, diag: *CreateDiagnostic,
                 // likely different compilations and therefore this would be likely to
                 // cause cache hits.
                 if (comp.zcu) |zcu| {
-                    try addModuleTableToCacheHash(zcu, arena, &hash, .path_bytes);
+                    try addModuleTableToCacheHash(zcu, &hash);
                 } else {
                     cache_helpers.addModule(&hash, options.root_mod);
                 }
@@ -3392,10 +3376,11 @@ fn addNonIncrementalStuffToCacheManifest(comp: *Compilation, man: *Cache.Manifes
     comptime assert(link_hash_implementation_version == 14);
 
     if (comp.zcu) |zcu| {
-        // No need to call `addModuleTableToCacheHash` here because it is
+        // No need to hash the actual file contents here because it is
         // redundant with the logic in `PerThread.update` which iterates over
         // `zcu.alive_files` and adds those files discovered via `@import` to
         // the whole cache manifest.
+        try addModuleTableToCacheHash(zcu, &man.hash);
 
         // Synchronize with other matching comments: ZigOnlyHashStuff
         man.hash.addListOfBytes(comp.test_filters);
