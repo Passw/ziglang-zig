@@ -3843,7 +3843,8 @@ fn loadManifest(
                 Templates.writeSimpleFile(io, Package.Manifest.basename,
                     \\.{{
                     \\    .name = .{s},
-                    \\    .version = "{s}",
+                    \\    .version = "0.0.1",
+                    \\    .minimum_zig_version = "{s}",
                     \\    .paths = .{{""}},
                     \\    .fingerprint = 0x{x},
                     \\}}
