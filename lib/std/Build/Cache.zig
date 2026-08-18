@@ -1375,7 +1375,7 @@ test "cache file and then recall it" {
             ch.hash.add(true);
             ch.hash.add(@as(u16, 1234));
             ch.hash.addBytes("1234");
-            _ = try ch.addFile(temp_file, null);
+            _ = try ch.addFilePath(.initCwd(temp_file), null);
 
             // There should be nothing in the cache
             try testing.expectEqual(false, try ch.hit(.none));
@@ -1390,7 +1390,7 @@ test "cache file and then recall it" {
             ch.hash.add(true);
             ch.hash.add(@as(u16, 1234));
             ch.hash.addBytes("1234");
-            _ = try ch.addFile(temp_file, null);
+            _ = try ch.addFilePath(.initCwd(temp_file), null);
 
             // Cache hit! We just "built" the same file
             try testing.expect(try ch.hit(.none));
@@ -1443,7 +1443,7 @@ test "check that changing a file makes cache fail" {
             defer ch.deinit();
 
             ch.hash.addBytes("1234");
-            const temp_file_idx = try ch.addFile(temp_file, 100);
+            const temp_file_idx = try ch.addFilePath(.initCwd(temp_file), 100);
 
             // There should be nothing in the cache
             try testing.expectEqual(false, try ch.hit(.none));
@@ -1462,7 +1462,7 @@ test "check that changing a file makes cache fail" {
             defer ch.deinit();
 
             ch.hash.addBytes("1234");
-            const temp_file_idx = try ch.addFile(temp_file, 100);
+            const temp_file_idx = try ch.addFilePath(.initCwd(temp_file), 100);
 
             // A file that we depend on has been updated, so the cache should not contain an entry for it
             try testing.expectEqual(false, try ch.hit(.none));
@@ -1570,7 +1570,7 @@ test "Manifest with files added after initial hash work" {
             defer ch.deinit();
 
             ch.hash.addBytes("1234");
-            _ = try ch.addFile(temp_file1, null);
+            _ = try ch.addFilePath(.initCwd(temp_file1), null);
 
             // There should be nothing in the cache
             try testing.expectEqual(false, try ch.hit(.none));
@@ -1585,7 +1585,7 @@ test "Manifest with files added after initial hash work" {
             defer ch.deinit();
 
             ch.hash.addBytes("1234");
-            _ = try ch.addFile(temp_file1, null);
+            _ = try ch.addFilePath(.initCwd(temp_file1), null);
 
             try testing.expect(try ch.hit(.none));
             digest2 = ch.final();
@@ -1608,7 +1608,7 @@ test "Manifest with files added after initial hash work" {
             defer ch.deinit();
 
             ch.hash.addBytes("1234");
-            _ = try ch.addFile(temp_file1, null);
+            _ = try ch.addFilePath(.initCwd(temp_file1), null);
 
             // A file that we depend on has been updated, so the cache should not contain an entry for it
             try testing.expectEqual(false, try ch.hit(.none));
