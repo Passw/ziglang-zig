@@ -5351,6 +5351,7 @@ fn buildMingwCrtFile(comp: *Compilation, crt_file: mingw.CrtFile, prog_node: std
 
 fn buildMingwImportLib(comp: *Compilation, lib_name: []const u8, is_prelink: bool, prog_node: std.Progress.Node) void {
     const crt_file_path = mingw.buildImportLib(comp, lib_name, prog_node) catch |err| switch (err) {
+        error.AlreadyReported => return,
         // TODO: This isn't actually true for self-hosted
         // In the non-prelink case we will end up putting foo.lib onto the linker line and letting the linker
         // use its library paths to look for libraries and report any problems.
@@ -5364,7 +5365,7 @@ fn buildMingwImportLib(comp: *Compilation, lib_name: []const u8, is_prelink: boo
         // TODO Surface more error details.
         else => |e| return comp.lockAndSetMiscFailure(
             .windows_import_lib,
-            "unable to generate mingw DLL import .lib file for {s}: {t}",
+            "generating mingw DLL import .lib file for {s} failed: {t}",
             .{ lib_name, e },
         ),
     };

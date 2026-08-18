@@ -215,12 +215,15 @@ pub fn buildImportLib(comp: *Compilation, lib_name: []const u8, prog_node: std.P
     defer arena_allocator.deinit();
     const arena = arena_allocator.allocator();
 
-    const def_file_path = findDef(arena, io, comp.getTarget(), comp.dirs.zig_lib, lib_name) catch |err| switch (err) {
-        error.FileNotFound => return error.DefNotFound,
-        else => |e| return e,
+    const def_file_path: Cache.Path = .{
+        .root_dir = comp.dirs.zig_lib,
+        .sub_path = findDef(arena, io, comp.getTarget(), comp.dirs.zig_lib, lib_name) catch |err| switch (err) {
+            error.FileNotFound => return error.DefNotFound,
+            else => |e| return e,
+        },
     };
     // Only .def.in files need preprocessing
-    const def_needs_preprocessing = mem.endsWith(u8, def_file_path, ".def.in");
+    const def_needs_preprocessing = mem.endsWith(u8, def_file_path.sub_path, ".def.in");
 
     const target = comp.getTarget();
 
@@ -243,15 +246,34 @@ pub fn buildImportLib(comp: *Compilation, lib_name: []const u8, prog_node: std.P
     var man = cache.obtain();
     defer man.deinit();
 
-    _ = try man.addFilePath(.{
-        .root_dir = comp.dirs.zig_lib,
-        .sub_path = def_file_path,
-    }, null);
+    _ = try man.addFilePath(def_file_path, null);
 
     const final_lib_basename = try std.fmt.allocPrint(gpa, "{s}.lib", .{lib_name});
     errdefer gpa.free(final_lib_basename);
 
-    if (try man.hit(prog_node)) {
+    const is_hit = man.hit(prog_node) catch |err| switch (err) {
+        error.CacheCheckFailed => switch (man.diagnostic) {
+            .none => unreachable,
+            .manifest_create, .manifest_read, .manifest_lock => |e| {
+                comp.setMiscFailure(.windows_import_lib, "checking cache failed: {t} {t}", .{ man.diagnostic, e });
+                return error.AlreadyReported;
+            },
+            .file_open, .file_stat, .file_read, .file_hash => |op| {
+                const pp = man.files.keys()[op.file_index].prefixed_path;
+                const prefix = man.cache.prefixes()[pp.prefix];
+                comp.setMiscFailure(.windows_import_lib, "checking cache failed: {f}{s} {t} {t}", .{
+                    prefix, pp.sub_path, man.diagnostic, op.err,
+                });
+                return error.AlreadyReported;
+            },
+        },
+        error.OutOfMemory, error.Canceled => |e| return e,
+        error.InvalidFormat => {
+            comp.setMiscFailure(.windows_import_lib, "checking cache failed: invalid manifest file format", .{});
+            return error.AlreadyReported;
+        },
+    };
+    if (is_hit) {
         const digest = man.final();
         const sub_path = try std.fs.path.join(gpa, &.{ "o", &digest, final_lib_basename });
         errdefer gpa.free(sub_path);
@@ -276,20 +298,11 @@ pub fn buildImportLib(comp: *Compilation, lib_name: []const u8, prog_node: std.P
     var o_dir = try comp.dirs.global_cache.handle.createDirPathOpen(io, o_sub_path, .{});
     defer o_dir.close(io);
 
-    const include_dir = try comp.dirs.zig_lib.join(arena, &.{ "libc", "mingw", "def-include" });
-
-    if (comp.verbose_cc) {
-        var buffer: [256]u8 = undefined;
-        const stderr = try io.lockStderr(&buffer, null);
-        defer io.unlockStderr();
-        const w = &stderr.file_writer.interface;
-        w.print("def file: {s}\n", .{def_file_path}) catch |err| switch (err) {
-            error.WriteFailed => return stderr.file_writer.err.?,
-        };
-        w.print("include dir: {s}\n", .{include_dir}) catch |err| switch (err) {
-            error.WriteFailed => return stderr.file_writer.err.?,
-        };
-    }
+    const sep = path.sep_str;
+    const include_dir: Cache.Path = .{
+        .root_dir = comp.dirs.zig_lib,
+        .sub_path = "libc" ++ sep ++ "mingw" ++ sep ++ "def-include",
+    };
 
     const members = members: {
         const members_node = sub_node.start("Members", 0);
@@ -313,7 +326,7 @@ pub fn buildImportLib(comp: *Compilation, lib_name: []const u8, prog_node: std.P
 
                 break :pp try aw.toOwnedSliceSentinel(0);
             },
-            false => try Io.Dir.cwd().readFileAllocOptions(io, def_file_path, gpa, .unlimited, .of(u8), 0),
+            false => try def_file_path.root_dir.handle.readFileAllocOptions(io, def_file_path.sub_path, gpa, .unlimited, .of(u8), 0),
         };
         defer gpa.free(input);
 
