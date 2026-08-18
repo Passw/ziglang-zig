@@ -1763,7 +1763,6 @@ pub fn buildExeSubprocess(
                     const sub_path = try gpa.dupe(u8, prefixed_path[1..]);
                     var keep = false;
                     defer if (!keep) gpa.free(sub_path);
-                    log.debug("file system input: {t} {s}", .{ prefix, sub_path });
                     keep = man.addPrefixedPathPost(.{
                         .prefix = @backingInt(prefix),
                         .sub_path = sub_path,

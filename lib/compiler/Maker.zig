@@ -1415,7 +1415,6 @@ fn configure(graph: *Graph, options: ConfigureOptions) !ScannedConfig {
 
             if (config_man) |man| {
                 if (try man.hit(compile_prog_node)) {
-                    log.debug("configuration cache hit", .{});
                     const digest = man.final();
                     const path: Path = .{
                         .root_dir = graph.local_cache_root,

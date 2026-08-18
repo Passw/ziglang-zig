@@ -2020,7 +2020,6 @@ pub fn create(gpa: Allocator, arena: Allocator, io: Io, diag: *CreateDiagnostic,
         cache.addPrefix(options.dirs.zig_lib);
         cache.addPrefix(options.dirs.local_cache);
         cache.addPrefix(options.dirs.global_cache);
-        log.debug("addPrefix build_root {s}", .{options.dirs.build_root.path orelse "(null)"});
         cache.addPrefix(options.dirs.build_root);
         errdefer cache.manifest_dir.close(io);
 
