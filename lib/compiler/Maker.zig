@@ -1120,6 +1120,7 @@ fn configure(graph: *Graph, options: ConfigureOptions) !ScannedConfig {
         graph.zig_exe, "build-exe", //
         "--cache-dir", graph.local_cache_root.path orelse ".", //
         "--global-cache-dir", graph.global_cache_root.path orelse ".", //
+        "--build-root", graph.build_root_directory.path orelse ".", //
         "--zig-lib-dir", graph.zig_lib_directory.path orelse ".", //
         "--name", configurer_exe_name, //
         "-fsingle-threaded", //
@@ -1424,6 +1425,7 @@ fn configure(graph: *Graph, options: ConfigureOptions) !ScannedConfig {
                     break :cp .{ path, man.toOwnedLock() };
                 }
             }
+            try graph.handleVerbose(null, null, build_configurer_argv.items);
             const configure_exe_path: Path = if (std.zig.buildExeSubprocess(gpa, io, .{
                 .argv = build_configurer_argv.items,
                 .cache_root = graph.local_cache_root,
