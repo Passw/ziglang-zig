@@ -421,6 +421,20 @@ fn resolveValue(cg: *CodeGen, val: Value) InnerError!WValue {
 /// NOTE: if result == .stack, it will be stored in .local
 fn finishAir(cg: *CodeGen, inst: Air.Inst.Index, result: WValue, operands: []const Air.Inst.Ref) InnerError!void {
     assert(operands.len <= Air.Liveness.bpi - 1);
+
+    var final_result = result;
+    const aliased_operand: ?*WValue = if (result == .local) aliased: {
+        for (operands) |operand| {
+            if (operand.toIndex() == null) continue;
+            const resolved_operand = cg.getResolvedInst(operand);
+            if (resolved_operand.* != .local or resolved_operand.local.value != result.local.value) continue;
+
+            resolved_operand.local.references += 1;
+            break :aliased resolved_operand;
+        }
+        break :aliased null;
+    } else null;
+
     var tomb_bits = cg.liveness.getTombBits(inst);
     for (operands) |operand| {
         const dies = @as(u1, @truncate(tomb_bits)) != 0;
@@ -428,7 +442,8 @@ fn finishAir(cg: *CodeGen, inst: Air.Inst.Index, result: WValue, operands: []con
         if (!dies) continue;
         processDeath(cg, operand);
     }
-    try cg.finishAirResult(inst, result);
+    if (aliased_operand) |operand| final_result.local.references = operand.local.references;
+    try cg.finishAirResult(inst, final_result);
 }
 
 fn finishAirResult(cg: *CodeGen, inst: Air.Inst.Index, result: WValue) InnerError!void {
@@ -478,7 +493,7 @@ fn processDeath(cg: *CodeGen, ref: Air.Inst.Ref) void {
         return; // function arguments can never be re-used
     }
     log.debug("Decreasing reference for ref: %{d}, using local '{d}'", .{ @backingInt(ref.toIndex().?), value.local.value });
-    value.local.references -= 1; // if this panics, a call to `reuseOperand` was forgotten by the developer
+    value.local.references -= 1;
     if (value.local.references == 0) {
         value.free(cg);
     }
@@ -631,7 +646,7 @@ fn genBlockType(ty: Type, zcu: *const Zcu, target: *const std.Target) std.wasm.B
 /// Writes the bytecode depending on the given `WValue` in `val`
 fn emitWValue(cg: *CodeGen, value: WValue) InnerError!void {
     switch (value) {
-        .dead => unreachable, // reference to free'd `WValue` (missing reuseOperand?)
+        .dead => unreachable, // reference to free'd `WValue`
         .none, .stack => {}, // no-op
         .local => |idx| try cg.addLocal(.local_get, idx.value),
         .imm32 => |val| try cg.addImm32(val),
@@ -697,23 +712,6 @@ fn emitWValue(cg: *CodeGen, value: WValue) InnerError!void {
         },
         .stack_offset => try cg.addLocal(.local_get, cg.bottom_stack_value.local.value), // caller must ensure to address the offset
     }
-}
-
-/// If given a local or stack-offset, increases the reference count by 1.
-/// The old `WValue` found at instruction `ref` is then replaced by the
-/// modified `WValue` and returned. When given a non-local or non-stack-offset,
-/// returns the given `operand` itfunc instead.
-fn reuseOperand(cg: *CodeGen, ref: Air.Inst.Ref, operand: WValue) WValue {
-    if (operand != .local and operand != .stack_offset) return operand;
-    var new_value = operand;
-    switch (new_value) {
-        .local => |*local| local.references += 1,
-        .stack_offset => |*stack_offset| stack_offset.references += 1,
-        else => unreachable,
-    }
-    const old_value = cg.getResolvedInst(ref);
-    old_value.* = new_value;
-    return new_value;
 }
 
 /// From a reference, returns its resolved `WValue`.
@@ -1598,17 +1596,7 @@ fn genInst(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
             const src_int_ty: IntType = .fromType(cg, src_ty);
             const dest_int_ty: IntType = .fromType(cg, dest_ty);
 
-            const src_bits = src_int_ty.bits;
-            const dest_bits = dest_int_ty.bits;
-
-            const same_class: bool = (src_bits <= 32 and dest_bits <= 32) or
-                (src_bits >= 33 and src_bits <= 64 and dest_bits >= 33 and dest_bits <= 64) or
-                (src_bits >= 65 and src_bits <= 128 and dest_bits >= 65 and dest_bits <= 128);
-
-            const result = if (same_class)
-                cg.reuseOperand(ty_op.operand, operand)
-            else
-                try cg.intCast(dest_int_ty, src_int_ty, operand);
+            const result = try cg.intCast(dest_int_ty, src_int_ty, operand);
 
             try cg.finishAir(inst, result, &.{ty_op.operand});
         },
@@ -1625,12 +1613,7 @@ fn genInst(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
 
             const src_int_ty: IntType = .fromType(cg, src_ty);
             const dest_int_ty: IntType = .fromType(cg, dest_ty);
-
-            const result = if (src_int_ty.bits == dest_int_ty.bits)
-                cg.reuseOperand(ty_op.operand, operand)
-            else blk: {
-                break :blk try cg.intTrunc(dest_int_ty, src_int_ty, operand);
-            };
+            const result = try cg.intTrunc(dest_int_ty, src_int_ty, operand);
 
             try cg.finishAir(inst, result, &.{ty_op.operand});
         },
@@ -4259,6 +4242,7 @@ fn intCast(cg: *CodeGen, dest_ty: IntType, src_ty: IntType, operand: WValue) Inn
 }
 
 fn intTrunc(cg: *CodeGen, dest_ty: IntType, src_ty: IntType, operand: WValue) InnerError!WValue {
+    assert(src_ty.bits > dest_ty.bits);
     var result = try cg.intCast(dest_ty, src_ty, operand);
 
     const dest_wasm_bits = cg.intBackingBits(dest_ty.bits);
@@ -5584,8 +5568,7 @@ fn airNopCast(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     assert(operand_ty.abiAlignment(zcu) == dest_ty.abiAlignment(zcu));
 
     const operand = try cg.resolveInst(ty_op.operand);
-    const result = cg.reuseOperand(ty_op.operand, operand);
-    return cg.finishAir(inst, result, &.{ty_op.operand});
+    return cg.finishAir(inst, operand, &.{ty_op.operand});
 }
 
 fn airIntFromPtr(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
@@ -5601,7 +5584,7 @@ fn airIntFromPtr(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     const operand = try cg.resolveInst(ty_op.operand);
     const result = switch (operand) {
         .stack_offset => try cg.buildPointerOffset(operand, 0, .new),
-        else => cg.reuseOperand(ty_op.operand, operand),
+        else => operand,
     };
     return cg.finishAir(inst, result, &.{ty_op.operand});
 }
@@ -5627,7 +5610,7 @@ fn airBitcast(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     const dest_ty = cg.typeOfIndex(inst);
     const src_ty = cg.typeOf(ty_op.operand);
 
-    const result = (try cg.bitcast(dest_ty, src_ty, operand)) orelse cg.reuseOperand(ty_op.operand, operand);
+    const result = try cg.bitcast(dest_ty, src_ty, operand);
 
     return cg.finishAir(inst, result, &.{ty_op.operand});
 }
@@ -5654,8 +5637,8 @@ fn bitcastClass(cg: *CodeGen, ty: Type) BitcastClass {
     };
 }
 
-fn bitcast(cg: *CodeGen, dest_ty: Type, src_ty: Type, operand: WValue) InnerError!?WValue {
-    if (dest_ty.eql(src_ty)) return null;
+fn bitcast(cg: *CodeGen, dest_ty: Type, src_ty: Type, operand: WValue) InnerError!WValue {
+    if (dest_ty.eql(src_ty)) return operand;
 
     const zcu = cg.pt.zcu;
     const src_class = cg.bitcastClass(src_ty);
@@ -5674,7 +5657,7 @@ fn bitcast(cg: *CodeGen, dest_ty: Type, src_ty: Type, operand: WValue) InnerErro
 
     if (src_by_ref and dest_by_ref) {
         if (needs_wrapping) return try cg.intWrap(dest_class.int, operand);
-        return null;
+        return operand;
     }
 
     if (dest_by_ref) {
@@ -5708,7 +5691,7 @@ fn bitcast(cg: *CodeGen, dest_ty: Type, src_ty: Type, operand: WValue) InnerErro
 
     switch (dest_class) {
         .float => |float_ty| switch (float_ty) {
-            .f16 => return null,
+            .f16 => return operand,
             .f32 => {
                 try cg.emitWValue(operand);
                 try cg.addTag(.f32_reinterpret_i32);
@@ -5729,7 +5712,7 @@ fn bitcast(cg: *CodeGen, dest_ty: Type, src_ty: Type, operand: WValue) InnerErro
         return try cg.intWrap(dest_class.int, operand);
     }
 
-    return null;
+    return operand;
 }
 
 fn airStructFieldPtr(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
@@ -5740,7 +5723,7 @@ fn airStructFieldPtr(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     const struct_ptr = try cg.resolveInst(extra.data.struct_operand);
     const struct_ptr_ty = cg.typeOf(extra.data.struct_operand);
     const struct_ty = struct_ptr_ty.childType(zcu);
-    const result = try cg.structFieldPtr(inst, extra.data.struct_operand, struct_ptr, struct_ptr_ty, struct_ty, extra.data.field_index);
+    const result = try cg.structFieldPtr(inst, struct_ptr, struct_ptr_ty, struct_ty, extra.data.field_index);
     return cg.finishAir(inst, result, &.{extra.data.struct_operand});
 }
 
@@ -5751,14 +5734,13 @@ fn airStructFieldPtrIndex(cg: *CodeGen, inst: Air.Inst.Index, index: u32) InnerE
     const struct_ptr_ty = cg.typeOf(ty_op.operand);
     const struct_ty = struct_ptr_ty.childType(zcu);
 
-    const result = try cg.structFieldPtr(inst, ty_op.operand, struct_ptr, struct_ptr_ty, struct_ty, index);
+    const result = try cg.structFieldPtr(inst, struct_ptr, struct_ptr_ty, struct_ty, index);
     return cg.finishAir(inst, result, &.{ty_op.operand});
 }
 
 fn structFieldPtr(
     cg: *CodeGen,
     inst: Air.Inst.Index,
-    ref: Air.Inst.Ref,
     struct_ptr: WValue,
     struct_ptr_ty: Type,
     struct_ty: Type,
@@ -5785,7 +5767,7 @@ fn structFieldPtr(
     };
     // save a load and store when we can simply reuse the operand
     if (offset == 0) {
-        return cg.reuseOperand(ref, struct_ptr);
+        return struct_ptr;
     }
     switch (struct_ptr) {
         .stack_offset => |stack_offset| {
@@ -6092,7 +6074,7 @@ fn airUnwrapErrUnionPayload(cg: *CodeGen, inst: Air.Inst.Index, op_is_ptr: bool)
     const result: WValue = result: {
         if (!payload_ty.hasRuntimeBits(zcu)) {
             if (op_is_ptr) {
-                break :result cg.reuseOperand(ty_op.operand, operand);
+                break :result operand;
             } else {
                 break :result .none;
             }
@@ -6131,7 +6113,7 @@ fn airUnwrapErrUnionError(cg: *CodeGen, inst: Air.Inst.Index, op_is_ptr: bool) I
             break :result try cg.load(operand, Type.anyerror, err_offset);
         } else {
             assert(!payload_ty.hasRuntimeBits(zcu));
-            break :result cg.reuseOperand(ty_op.operand, operand);
+            break :result operand;
         }
     };
     return cg.finishAir(inst, result, &.{ty_op.operand});
@@ -6147,7 +6129,7 @@ fn airWrapErrUnionPayload(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     const pl_ty = cg.typeOf(ty_op.operand);
     const result = result: {
         if (!pl_ty.hasRuntimeBits(zcu)) {
-            break :result cg.reuseOperand(ty_op.operand, operand);
+            break :result operand;
         }
 
         const err_union = try cg.allocStack(err_ty);
@@ -6177,7 +6159,7 @@ fn airWrapErrUnionErr(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
 
     const result = result: {
         if (!pl_ty.hasRuntimeBits(zcu)) {
-            break :result cg.reuseOperand(ty_op.operand, operand);
+            break :result operand;
         }
 
         const err_union = try cg.allocStack(err_ty);
@@ -6257,7 +6239,7 @@ fn airOptionalPayload(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
 
     const result = result: {
         const operand = try cg.resolveInst(ty_op.operand);
-        if (opt_ty.optionalReprIsPayload(zcu)) break :result cg.reuseOperand(ty_op.operand, operand);
+        if (opt_ty.optionalReprIsPayload(zcu)) break :result operand;
 
         if (isByRef(payload_ty, zcu, cg.target)) {
             break :result try cg.buildPointerOffset(operand, 0, .new);
@@ -6277,7 +6259,7 @@ fn airOptionalPayloadPtr(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     const result = result: {
         const payload_ty = opt_ty.optionalChild(zcu);
         if (!payload_ty.hasRuntimeBits(zcu) or opt_ty.optionalReprIsPayload(zcu)) {
-            break :result cg.reuseOperand(ty_op.operand, operand);
+            break :result operand;
         }
 
         break :result try cg.buildPointerOffset(operand, 0, .new);
@@ -6327,7 +6309,7 @@ fn airWrapOptional(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
         const operand = try cg.resolveInst(ty_op.operand);
         const op_ty = cg.typeOfIndex(inst);
         if (op_ty.optionalReprIsPayload(zcu)) {
-            break :result cg.reuseOperand(ty_op.operand, operand);
+            break :result operand;
         }
         const offset = std.math.cast(u32, payload_ty.abiSize(zcu)) orelse {
             return cg.fail("Optional type {f} too big to fit into stack frame", .{op_ty.fmt(pt)});
@@ -7146,7 +7128,7 @@ fn airErrUnionPayloadPtrSet(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void 
 
     const result = result: {
         if (!payload_ty.hasRuntimeBits(zcu)) {
-            break :result cg.reuseOperand(ty_op.operand, operand);
+            break :result operand;
         }
 
         break :result try cg.buildPointerOffset(operand, @as(u32, @intCast(errUnionPayloadOffset(payload_ty, zcu))), .new);
@@ -7182,7 +7164,7 @@ fn airFieldParentPtr(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
         try cg.addTag(.i32_sub);
         try cg.addLocal(.local_set, base.local.value);
         break :result base;
-    } else cg.reuseOperand(extra.field_ptr, field_ptr);
+    } else field_ptr;
 
     return cg.finishAir(inst, result, &.{extra.field_ptr});
 }
