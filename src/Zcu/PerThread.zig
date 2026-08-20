@@ -1026,7 +1026,12 @@ pub fn ensureFilePopulated(pt: Zcu.PerThread, file_index: Zcu.File.Index) (Alloc
     };
     errdefer wip.cancel(ip, pt.tid);
 
-    wip.setName(ip, try file.internFullyQualifiedName(pt), .none);
+    wip.setName(
+        ip,
+        try ip.getOrPutString(gpa, io, pt.tid, std.fs.path.stem(file.sub_file_path), .no_embedded_nulls),
+        try file.internFullyQualifiedName(pt),
+        .none,
+    );
     const new_namespace_index: InternPool.NamespaceIndex = try pt.createNamespace(.{
         .parent = .none,
         .owner_type = wip.index,
@@ -1267,6 +1272,7 @@ fn analyzeComptimeUnit(pt: Zcu.PerThread, cu_id: InternPool.ComptimeUnit.Id) Zcu
     // The comptime unit declares on the source of the corresponding `comptime` declaration.
     try sema.declareDependency(.{ .src_hash = comptime_unit.zir_index });
 
+    const parent_ns = Type.fromInterned(zcu.namespacePtr(comptime_unit.namespace).owner_type).containerTypeName(ip);
     var block: Sema.Block = .{
         .parent = null,
         .sema = &sema,
@@ -1282,7 +1288,10 @@ fn analyzeComptimeUnit(pt: Zcu.PerThread, cu_id: InternPool.ComptimeUnit.Id) Zcu
         } },
         .src_base_inst = comptime_unit.zir_index,
         .type_name_ctx = try ip.getOrPutStringFmt(gpa, io, pt.tid, "{f}.comptime", .{
-            Type.fromInterned(zcu.namespacePtr(comptime_unit.namespace).owner_type).containerTypeName(ip).fmt(ip),
+            parent_ns.name.fmt(ip),
+        }, .no_embedded_nulls),
+        .type_fqn_ctx = try ip.getOrPutStringFmt(gpa, io, pt.tid, "{f}.comptime", .{
+            parent_ns.fqn.fmt(ip),
         }, .no_embedded_nulls),
     };
     defer block.instructions.deinit(gpa);
@@ -1358,7 +1367,7 @@ pub fn ensureTypeLayoutUpToDate(
         info.deps.clearRetainingCapacity();
     }
 
-    const unit_tracking = zcu.trackUnitSema(ty.containerTypeName(ip).toSlice(ip), null);
+    const unit_tracking = zcu.trackUnitSema(ty.containerTypeName(ip).fqn.toSlice(ip), null);
     defer unit_tracking.end(zcu);
 
     try zcu.analysis_in_progress.put(gpa, anal_unit, reason);
@@ -1470,7 +1479,7 @@ pub fn ensureStructDefaultsUpToDate(
         info.deps.clearRetainingCapacity();
     }
 
-    const unit_tracking = zcu.trackUnitSema(ty.containerTypeName(ip).toSlice(ip), null);
+    const unit_tracking = zcu.trackUnitSema(ty.containerTypeName(ip).fqn.toSlice(ip), null);
     defer unit_tracking.end(zcu);
 
     try zcu.analysis_in_progress.put(gpa, anal_unit, reason);
@@ -1679,7 +1688,8 @@ fn analyzeNavVal(
         .inlining = null,
         .comptime_reason = undefined, // set below
         .src_base_inst = old_nav.analysis.?.zir_index,
-        .type_name_ctx = old_nav.fqn,
+        .type_name_ctx = old_nav.name,
+        .type_fqn_ctx = old_nav.fqn,
     };
     defer block.instructions.deinit(gpa);
 
@@ -2048,7 +2058,8 @@ fn analyzeNavType(
         .inlining = null,
         .comptime_reason = undefined, // set below
         .src_base_inst = old_nav.analysis.?.zir_index,
-        .type_name_ctx = old_nav.fqn,
+        .type_name_ctx = old_nav.name,
+        .type_fqn_ctx = old_nav.fqn,
     };
     defer block.instructions.deinit(gpa);
 
@@ -2989,11 +3000,11 @@ pub fn scanNamespace(
 
     const tracy_trace = trace(@src());
     defer tracy_trace.end();
-    tracy_trace.addText(Type.fromInterned(namespace.owner_type).containerTypeName(ip).toSlice(ip));
+    tracy_trace.addText(Type.fromInterned(namespace.owner_type).containerTypeName(ip).fqn.toSlice(ip));
     tracy_trace.addTextFmt("type_ip_index={d}", .{namespace.owner_type});
 
     const tracked_unit = zcu.trackUnitSema(
-        Type.fromInterned(namespace.owner_type).containerTypeName(ip).toSlice(ip),
+        Type.fromInterned(namespace.owner_type).containerTypeName(ip).fqn.toSlice(ip),
         null,
     );
     defer tracked_unit.end(zcu);
@@ -3315,7 +3326,8 @@ fn analyzeFuncBodyInner(
         .inlining = null,
         .comptime_reason = null,
         .src_base_inst = decl_analysis.zir_index,
-        .type_name_ctx = func_nav.fqn,
+        .type_name_ctx = func_nav.name,
+        .type_fqn_ctx = func_nav.fqn,
     };
     defer inner_block.instructions.deinit(gpa);
 

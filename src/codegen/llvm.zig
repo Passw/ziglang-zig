@@ -2893,7 +2893,7 @@ pub const Object = struct {
                         }
                     }
 
-                    const ty = try o.builder.opaqueType(try o.builder.string(t.containerTypeName(ip).toSlice(ip)));
+                    const ty = try o.builder.opaqueType(try o.builder.string(t.containerTypeName(ip).fqn.toSlice(ip)));
                     try o.type_map.put(o.gpa, t.toIntern(), ty);
 
                     o.builder.namedTypeSetBody(
@@ -2983,7 +2983,7 @@ pub const Object = struct {
                     };
 
                     if (layout.tag_size == 0) {
-                        const ty = try o.builder.opaqueType(try o.builder.string(t.containerTypeName(ip).toSlice(ip)));
+                        const ty = try o.builder.opaqueType(try o.builder.string(t.containerTypeName(ip).fqn.toSlice(ip)));
                         try o.type_map.put(o.gpa, t.toIntern(), ty);
 
                         o.builder.namedTypeSetBody(
@@ -3011,7 +3011,7 @@ pub const Object = struct {
                         llvm_fields_len += 1;
                     }
 
-                    const ty = try o.builder.opaqueType(try o.builder.string(t.containerTypeName(ip).toSlice(ip)));
+                    const ty = try o.builder.opaqueType(try o.builder.string(t.containerTypeName(ip).fqn.toSlice(ip)));
                     try o.type_map.put(o.gpa, t.toIntern(), ty);
 
                     o.builder.namedTypeSetBody(
@@ -4026,7 +4026,7 @@ pub const Object = struct {
             // Dummy function type; `updateEnumTagNameFunction` will replace it with the correct type.
             // TODO: change the builder API so we don't need to do this.
             try o.builder.fnType(.void, &.{}, .normal),
-            try o.builder.strtabStringFmt("__zig_tag_name_{f}", .{enum_ty.containerTypeName(ip).fmt(ip)}),
+            try o.builder.strtabStringFmt("__zig_tag_name_{f}", .{enum_ty.containerTypeName(ip).fqn.fmt(ip)}),
             toLlvmAddressSpace(.generic, zcu.getTarget()),
         );
         gop.value_ptr.* = llvm_function;
@@ -4123,7 +4123,7 @@ pub const Object = struct {
             // Dummy function type; `updateIsNamedEnumValue` will replace it with the correct type.
             // TODO: change the builder API so we don't need to do this.
             try o.builder.fnType(.void, &.{}, .normal),
-            try o.builder.strtabStringFmt("__zig_is_named_enum_value_{f}", .{enum_ty.containerTypeName(ip).fmt(ip)}),
+            try o.builder.strtabStringFmt("__zig_is_named_enum_value_{f}", .{enum_ty.containerTypeName(ip).fqn.fmt(ip)}),
             toLlvmAddressSpace(.generic, zcu.getTarget()),
         );
         gop.value_ptr.* = llvm_function;

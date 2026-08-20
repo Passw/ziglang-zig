@@ -947,9 +947,9 @@ pub const Namespace = struct {
         tid: Zcu.PerThread.Id,
         name: InternPool.NullTerminatedString,
     ) !InternPool.NullTerminatedString {
-        const ns_name = Type.fromInterned(ns.owner_type).containerTypeName(ip);
-        if (name == .empty) return ns_name;
-        return ip.getOrPutStringFmt(gpa, io, tid, "{f}.{f}", .{ ns_name.fmt(ip), name.fmt(ip) }, .no_embedded_nulls);
+        const ns_fqn = Type.fromInterned(ns.owner_type).containerTypeName(ip).fqn;
+        if (name == .empty) return ns_fqn;
+        return ip.getOrPutStringFmt(gpa, io, tid, "{f}.{f}", .{ ns_fqn.fmt(ip), name.fmt(ip) }, .no_embedded_nulls);
     }
 };
 
@@ -4237,7 +4237,7 @@ fn resolveReferencesInner(zcu: *Zcu) Allocator.Error!std.array_hash_map.Auto(Ana
             const referencer = types.values()[type_idx];
             type_idx += 1;
 
-            refs_log.debug("handle type '{f}'", .{Type.fromInterned(ty).containerTypeName(ip).fmt(ip)});
+            refs_log.debug("handle type '{f}'", .{Type.fromInterned(ty).containerTypeName(ip).fqn.fmt(ip)});
 
             // Queue any decls within this type which would be automatically analyzed.
             // Keep in sync with analysis queueing logic in `Zcu.PerThread.ScanDeclIter.scanDecl`.
@@ -4248,7 +4248,7 @@ fn resolveReferencesInner(zcu: *Zcu) Allocator.Error!std.array_hash_map.Auto(Ana
                 const gop = try units.getOrPut(gpa, unit);
                 if (!gop.found_existing) {
                     refs_log.debug("type '{f}': ref comptime %{}", .{
-                        Type.fromInterned(ty).containerTypeName(ip).fmt(ip),
+                        Type.fromInterned(ty).containerTypeName(ip).fqn.fmt(ip),
                         @backingInt(ip.getComptimeUnit(cu).zir_index.resolve(ip) orelse continue),
                     });
                     gop.value_ptr.* = referencer;
@@ -4282,7 +4282,7 @@ fn resolveReferencesInner(zcu: *Zcu) Allocator.Error!std.array_hash_map.Auto(Ana
                         const gop = try units.getOrPut(gpa, .wrap(.{ .nav_val = nav_id }));
                         if (!gop.found_existing) {
                             refs_log.debug("type '{f}': ref test %{}", .{
-                                Type.fromInterned(ty).containerTypeName(ip).fmt(ip),
+                                Type.fromInterned(ty).containerTypeName(ip).fqn.fmt(ip),
                                 @backingInt(inst_info.inst),
                             });
                             gop.value_ptr.* = referencer;
@@ -4305,7 +4305,7 @@ fn resolveReferencesInner(zcu: *Zcu) Allocator.Error!std.array_hash_map.Auto(Ana
                     const gop = try units.getOrPut(gpa, unit);
                     if (!gop.found_existing) {
                         refs_log.debug("type '{f}': ref named %{}", .{
-                            Type.fromInterned(ty).containerTypeName(ip).fmt(ip),
+                            Type.fromInterned(ty).containerTypeName(ip).fqn.fmt(ip),
                             @backingInt(inst_info.inst),
                         });
                         gop.value_ptr.* = referencer;
@@ -4322,7 +4322,7 @@ fn resolveReferencesInner(zcu: *Zcu) Allocator.Error!std.array_hash_map.Auto(Ana
                     const gop = try units.getOrPut(gpa, unit);
                     if (!gop.found_existing) {
                         refs_log.debug("type '{f}': ref named %{}", .{
-                            Type.fromInterned(ty).containerTypeName(ip).fmt(ip),
+                            Type.fromInterned(ty).containerTypeName(ip).fqn.fmt(ip),
                             @backingInt(inst_info.inst),
                         });
                         gop.value_ptr.* = referencer;
@@ -4385,7 +4385,7 @@ fn resolveReferencesInner(zcu: *Zcu) Allocator.Error!std.array_hash_map.Auto(Ana
                     if (!gop.found_existing) {
                         refs_log.debug("unit '{f}': ref type '{f}'", .{
                             zcu.fmtAnalUnit(unit),
-                            Type.fromInterned(ref.referenced).containerTypeName(ip).fmt(ip),
+                            Type.fromInterned(ref.referenced).containerTypeName(ip).fqn.fmt(ip),
                         });
                         gop.value_ptr.* = .{
                             .referencer = unit,
@@ -4498,7 +4498,7 @@ fn formatAnalUnit(data: FormatAnalUnit, writer: *Io.Writer) Io.Writer.Error!void
             }
         },
         .nav_val, .nav_ty => |nav, tag| return writer.print("{t}('{f}' [{}])", .{ tag, ip.getNav(nav).fqn.fmt(ip), @backingInt(nav) }),
-        .type_layout, .struct_defaults => |ty, tag| return writer.print("{t}('{f}' [{}])", .{ tag, Type.fromInterned(ty).containerTypeName(ip).fmt(ip), @backingInt(ty) }),
+        .type_layout, .struct_defaults => |ty, tag| return writer.print("{t}('{f}' [{}])", .{ tag, Type.fromInterned(ty).containerTypeName(ip).fqn.fmt(ip), @backingInt(ty) }),
         .func => |func| {
             const nav = zcu.funcInfo(func).owner_nav;
             return writer.print("func('{f}' [{}])", .{ ip.getNav(nav).fqn.fmt(ip), @backingInt(func) });
@@ -4524,8 +4524,8 @@ fn formatDependee(data: FormatDependee, writer: *Io.Writer) Io.Writer.Error!void
             return writer.print("{t}('{f}')", .{ tag, fqn.fmt(ip) });
         },
         .type_layout, .struct_defaults => |ip_index, tag| {
-            const name = Type.fromInterned(ip_index).containerTypeName(ip);
-            return writer.print("{t}('{f}')", .{ tag, name.fmt(ip) });
+            const fqn = Type.fromInterned(ip_index).containerTypeName(ip).fqn;
+            return writer.print("{t}('{f}')", .{ tag, fqn.fmt(ip) });
         },
         .func_ies => |ip_index| {
             const fqn = ip.getNav(ip.indexToKey(ip_index).func.owner_nav).fqn;
@@ -5002,7 +5002,7 @@ fn addDependencyLoopErrorLine(
         }),
         .struct_defaults => |ty| try eb.printString(
             "default field values of '{f}' depend on themselves for initialization here",
-            .{Type.fromInterned(ty).containerTypeName(ip).fmt(ip)},
+            .{Type.fromInterned(ty).containerTypeName(ip).fqn.fmt(ip)},
         ),
     } else switch (dep_node.unit.unwrap()) {
         .@"comptime" => unreachable, // cannot be involved in a dependency loop
@@ -5021,12 +5021,12 @@ fn addDependencyLoopErrorLine(
         }),
         .type_layout => |ty| try eb.printString("{f} depends on type '{f}' {s}", .{
             fmt_source,
-            Type.fromInterned(ty).containerTypeName(ip).fmt(ip),
+            Type.fromInterned(ty).containerTypeName(ip).fqn.fmt(ip),
             dep_node.reason.type_layout_reason.msg(),
         }),
         .struct_defaults => |ty| try eb.printString(
             "{f} uses default field values of '{f}' here",
-            .{ fmt_source, Type.fromInterned(ty).containerTypeName(ip).fmt(ip) },
+            .{ fmt_source, Type.fromInterned(ty).containerTypeName(ip).fqn.fmt(ip) },
         ),
     };
 
@@ -5068,10 +5068,10 @@ fn formatDependencyLoopSourceUnit(data: FormatAnalUnit, w: *Io.Writer) Io.Writer
             else => try w.writeAll("'std.lang' declarations"),
         },
         .type_layout => |ty| try w.print("type '{f}'", .{
-            Type.fromInterned(ty).containerTypeName(ip).fmt(ip),
+            Type.fromInterned(ty).containerTypeName(ip).fqn.fmt(ip),
         }),
         .struct_defaults => |ty| try w.print("default field value of '{f}'", .{
-            Type.fromInterned(ty).containerTypeName(ip).fmt(ip),
+            Type.fromInterned(ty).containerTypeName(ip).fqn.fmt(ip),
         }),
         .func => |func| try w.print("function '{f}'", .{
             ip.getNav(zcu.funcInfo(func).owner_nav).fqn.fmt(ip),
@@ -5121,7 +5121,7 @@ pub fn populateReferenceTrace(
             const root_name: ?[]const u8 = switch (ref.referencer.unwrap()) {
                 .@"comptime" => "comptime",
                 .nav_val, .nav_ty => |nav| ip.getNav(nav).name.toSlice(ip),
-                .type_layout, .struct_defaults => |ty| Type.fromInterned(ty).containerTypeName(ip).toSlice(ip),
+                .type_layout, .struct_defaults => |ty| Type.fromInterned(ty).containerTypeName(ip).fqn.toSlice(ip),
                 .func => |f| ip.getNav(zcu.funcInfo(f).owner_nav).name.toSlice(ip),
                 .memoized_state => null,
             };

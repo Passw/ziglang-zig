@@ -607,8 +607,8 @@ pub fn print(ty: Type, writer: *std.Io.Writer, pt: Zcu.PerThread, ctx: ?*Compari
             .generic_poison => unreachable,
         },
         .struct_type => {
-            const name = ip.loadStructType(ty.toIntern()).name;
-            try writer.print("{f}", .{name.fmt(ip)});
+            const fqn = ip.loadStructType(ty.toIntern()).fqn;
+            try writer.print("{f}", .{fqn.fmt(ip)});
         },
         .tuple_type => |tuple| {
             if (tuple.types.len == 0) {
@@ -625,16 +625,16 @@ pub fn print(ty: Type, writer: *std.Io.Writer, pt: Zcu.PerThread, ctx: ?*Compari
         },
 
         .union_type => {
-            const name = ip.loadUnionType(ty.toIntern()).name;
-            try writer.print("{f}", .{name.fmt(ip)});
+            const fqn = ip.loadUnionType(ty.toIntern()).fqn;
+            try writer.print("{f}", .{fqn.fmt(ip)});
         },
         .opaque_type => {
-            const name = ip.loadOpaqueType(ty.toIntern()).name;
-            try writer.print("{f}", .{name.fmt(ip)});
+            const fqn = ip.loadOpaqueType(ty.toIntern()).fqn;
+            try writer.print("{f}", .{fqn.fmt(ip)});
         },
         .enum_type => {
-            const name = ip.loadEnumType(ty.toIntern()).name;
-            try writer.print("{f}", .{name.fmt(ip)});
+            const fqn = ip.loadEnumType(ty.toIntern()).fqn;
+            try writer.print("{f}", .{fqn.fmt(ip)});
         },
         .spirv_type => {
             const info = ip.loadSpirvType(ty.toIntern());
@@ -3020,14 +3020,29 @@ pub fn fieldPtrType(ptr_ty: Type, field_index: u32, pt: Zcu.PerThread) Allocator
     return pt.ptrType(field_ptr_info);
 }
 
-pub fn containerTypeName(ty: Type, ip: *const InternPool) InternPool.NullTerminatedString {
-    return switch (ip.indexToKey(ty.toIntern())) {
-        .struct_type => ip.loadStructType(ty.toIntern()).name,
-        .union_type => ip.loadUnionType(ty.toIntern()).name,
-        .enum_type => ip.loadEnumType(ty.toIntern()).name,
-        .opaque_type => ip.loadOpaqueType(ty.toIntern()).name,
+pub fn containerTypeName(ty: Type, ip: *const InternPool) struct {
+    name: InternPool.NullTerminatedString,
+    fqn: InternPool.NullTerminatedString,
+} {
+    switch (ip.indexToKey(ty.toIntern())) {
+        .struct_type => {
+            const loaded_struct = ip.loadStructType(ty.toIntern());
+            return .{ .name = loaded_struct.name, .fqn = loaded_struct.fqn };
+        },
+        .union_type => {
+            const loaded_union = ip.loadUnionType(ty.toIntern());
+            return .{ .name = loaded_union.name, .fqn = loaded_union.fqn };
+        },
+        .enum_type => {
+            const loaded_enum = ip.loadEnumType(ty.toIntern());
+            return .{ .name = loaded_enum.name, .fqn = loaded_enum.fqn };
+        },
+        .opaque_type => {
+            const loaded_opaque = ip.loadOpaqueType(ty.toIntern());
+            return .{ .name = loaded_opaque.name, .fqn = loaded_opaque.fqn };
+        },
         else => unreachable,
-    };
+    }
 }
 
 pub fn destructurable(ty: Type, zcu: *const Zcu) bool {

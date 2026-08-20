@@ -2349,7 +2349,7 @@ fn updateConstInner(
                             else => if (struct_is_file) .file else .struct_type,
                         }));
                         try diw.writeUleb128(@backingInt(fi));
-                        try dwarf.strp(&dwarf.debug_str, di_nw, loaded_struct.name.toSlice(ip));
+                        try dwarf.strp(&dwarf.debug_str, di_nw, loaded_struct.fqn.toSlice(ip));
                     }
                     if (loaded_struct.field_types.len > 0) {
                         const ty: Type = .fromInterned(val);
@@ -2422,14 +2422,14 @@ fn updateConstInner(
                         if (loaded_enum.field_names.len > 0) .enum_type else .empty_enum_type,
                     ));
                     try diw.writeUleb128(@backingInt(fi));
-                    try dwarf.strp(&dwarf.debug_str, di_nw, loaded_enum.name.toSlice(ip));
+                    try dwarf.strp(&dwarf.debug_str, di_nw, loaded_enum.fqn.toSlice(ip));
                 }
             } else {
                 assert(loaded_enum.owner_union != .none);
                 try diw.writeUleb128(try dwarf.refAbbrevCode(
                     if (loaded_enum.field_names.len == 0) .generated_empty_enum_type else .generated_enum_type,
                 ));
-                try dwarf.strp(&dwarf.debug_str, di_nw, loaded_enum.name.toSlice(ip));
+                try dwarf.strp(&dwarf.debug_str, di_nw, loaded_enum.fqn.toSlice(ip));
             }
             try dwarf.refConst(pt, di_nw, .fromInterned(loaded_enum.int_tag_type));
             for (0..loaded_enum.field_names.len) |field_index| {
@@ -2465,7 +2465,7 @@ fn updateConstIncompleteInner(
     const ip = &zcu.intern_pool;
     const diw = &di_nw.interface;
     done: {
-        const src_inst, const zf, const capture_names, const captures, const name, const maybe_name_nav, const namespace = container: switch (ip.indexToKey(val)) {
+        const src_inst, const zf, const capture_names, const captures, const fqn, const maybe_name_nav, const namespace = container: switch (ip.indexToKey(val)) {
             .struct_type => {
                 const loaded_struct = ip.loadStructType(val);
                 const src_inst = loaded_struct.zir_index.resolveFull(ip) orelse {
@@ -2479,7 +2479,7 @@ fn updateConstIncompleteInner(
                         _, const fi = try ui.get(dwarf).getFile(zcu.gpa, ui, src_inst.file);
                         try diw.writeUleb128(try dwarf.refAbbrevCode(.empty_file));
                         try diw.writeUleb128(@backingInt(fi));
-                        try dwarf.strp(&dwarf.debug_str, di_nw, loaded_struct.name.toSlice(ip));
+                        try dwarf.strp(&dwarf.debug_str, di_nw, loaded_struct.fqn.toSlice(ip));
                         try diw.writeByte(@intFromBool(true));
                         break :done;
                     },
@@ -2488,7 +2488,7 @@ fn updateConstIncompleteInner(
                         zf,
                         zf.zir.?.getStructDecl(src_inst.inst).capture_names,
                         loaded_struct.captures,
-                        loaded_struct.name,
+                        loaded_struct.fqn,
                         loaded_struct.name_nav,
                         loaded_struct.namespace,
                     },
@@ -2506,7 +2506,7 @@ fn updateConstIncompleteInner(
                     zf,
                     zf.zir.?.getUnionDecl(src_inst.inst).capture_names,
                     loaded_union.captures,
-                    loaded_union.name,
+                    loaded_union.fqn,
                     loaded_union.name_nav,
                     loaded_union.namespace,
                 };
@@ -2515,7 +2515,7 @@ fn updateConstIncompleteInner(
                 const loaded_enum = ip.loadEnumType(val);
                 const zir_index = loaded_enum.zir_index.unwrap() orelse {
                     try diw.writeUleb128(try dwarf.refAbbrevCode(.generated_empty_struct_type));
-                    try dwarf.strp(&dwarf.debug_str, di_nw, loaded_enum.name.toSlice(ip));
+                    try dwarf.strp(&dwarf.debug_str, di_nw, loaded_enum.fqn.toSlice(ip));
                     try diw.writeByte(@intFromBool(true));
                     break :done;
                 };
@@ -2529,7 +2529,7 @@ fn updateConstIncompleteInner(
                     zf,
                     zf.zir.?.getEnumDecl(src_inst.inst).capture_names,
                     loaded_enum.captures,
-                    loaded_enum.name,
+                    loaded_enum.fqn,
                     loaded_enum.name_nav,
                     loaded_enum.namespace,
                 };
@@ -2546,7 +2546,7 @@ fn updateConstIncompleteInner(
                     zf,
                     zf.zir.?.getOpaqueDecl(src_inst.inst).capture_names,
                     loaded_opaque.captures,
-                    loaded_opaque.name,
+                    loaded_opaque.fqn,
                     loaded_opaque.name_nav,
                     loaded_opaque.namespace,
                 };
@@ -2597,7 +2597,7 @@ fn updateConstIncompleteInner(
                 if (capturing) .capturing_empty_struct_type else .empty_struct_type,
             ));
             try diw.writeUleb128(@backingInt(fi));
-            try dwarf.strp(&dwarf.debug_str, di_nw, name.toSlice(ip));
+            try dwarf.strp(&dwarf.debug_str, di_nw, fqn.toSlice(ip));
         }
         try diw.writeByte(@intFromBool(true));
         if (capturing) {
@@ -2661,7 +2661,7 @@ fn genDeclInner(
             try diw.writeInt(u32, 0, dwarf.endian);
             try diw.writeUleb128(0);
             try diw.writeByte(DW.ACCESS.public);
-            try dwarf.strp(&dwarf.debug_str, di_nw, loaded_struct.name.toSlice(ip));
+            try dwarf.strp(&dwarf.debug_str, di_nw, loaded_struct.fqn.toSlice(ip));
         },
         .enum_type => {
             const loaded_enum = ip.loadEnumType(instance_val);
@@ -2673,7 +2673,7 @@ fn genDeclInner(
             try diw.writeInt(u32, 0, dwarf.endian);
             try diw.writeUleb128(0);
             try diw.writeByte(DW.ACCESS.public);
-            try dwarf.strp(&dwarf.debug_str, di_nw, loaded_enum.name.toSlice(ip));
+            try dwarf.strp(&dwarf.debug_str, di_nw, loaded_enum.fqn.toSlice(ip));
         },
         .union_type => {
             const loaded_union = ip.loadUnionType(instance_val);
@@ -2685,7 +2685,7 @@ fn genDeclInner(
             try diw.writeInt(u32, 0, dwarf.endian);
             try diw.writeUleb128(0);
             try diw.writeByte(DW.ACCESS.public);
-            try dwarf.strp(&dwarf.debug_str, di_nw, loaded_union.name.toSlice(ip));
+            try dwarf.strp(&dwarf.debug_str, di_nw, loaded_union.fqn.toSlice(ip));
         },
     }
     try dwarf.genDebugInfoPadding(diw, diw.unusedCapacityLen());

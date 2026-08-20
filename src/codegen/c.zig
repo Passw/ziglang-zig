@@ -2175,11 +2175,11 @@ pub fn genTagNameFn(
     }
 
     if (!zcu.comp.config.root_strip) try w.print("/* @tagName({f}) */\n", .{
-        loaded_enum.name.fmt(ip),
+        loaded_enum.fqn.fmt(ip),
     });
     try w.print("static {s} zig_tagName_{f}__{d}({s} tag) {{\n", .{
         slice_const_u8_sentinel_0_type_name,
-        fmtIdentUnsolo(loaded_enum.name.toSlice(ip)),
+        fmtIdentUnsolo(loaded_enum.fqn.toSlice(ip)),
         @backingInt(enum_ty.toIntern()),
         enum_type_name,
     });
@@ -6667,7 +6667,7 @@ fn airTagName(f: *Function, inst: Air.Inst.Index) !CValue {
     try f.writeCValue(w, local, .other);
     try f.need_tag_name_funcs.put(gpa, enum_ty.toIntern(), {});
     try w.print(" = zig_tagName_{f}__{d}(", .{
-        fmtIdentUnsolo(enum_ty.containerTypeName(ip).toSlice(ip)),
+        fmtIdentUnsolo(enum_ty.containerTypeName(ip).fqn.toSlice(ip)),
         @backingInt(enum_ty.toIntern()),
     });
     try f.writeCValue(w, operand, .other);

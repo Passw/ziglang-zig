@@ -3387,12 +3387,12 @@ fn updateConstIncompleteInner(dwarf: *Dwarf, pt: Zcu.PerThread, debug_const_inde
                 const file_gop = try dwarf.getModInfo(unit).files.getOrPut(dwarf.gpa, file_index);
                 try wip_nav.abbrevCode(.empty_file);
                 try wip_nav.debug_info.writer.writeUleb128(file_gop.index);
-                try wip_nav.strp(loaded_struct.name.toSlice(ip));
+                try wip_nav.strp(loaded_struct.fqn.toSlice(ip));
             } else {
                 try dwarf.emitIncompleteContainerType(
                     &wip_nav,
                     loaded_struct.zir_index,
-                    loaded_struct.name,
+                    loaded_struct.fqn,
                     loaded_struct.name_nav,
                 );
             }
@@ -3402,7 +3402,7 @@ fn updateConstIncompleteInner(dwarf: *Dwarf, pt: Zcu.PerThread, debug_const_inde
             try dwarf.emitIncompleteContainerType(
                 &wip_nav,
                 loaded_union.zir_index,
-                loaded_union.name,
+                loaded_union.fqn,
                 loaded_union.name_nav,
             );
         },
@@ -3412,12 +3412,12 @@ fn updateConstIncompleteInner(dwarf: *Dwarf, pt: Zcu.PerThread, debug_const_inde
                 try dwarf.emitIncompleteContainerType(
                     &wip_nav,
                     zir_index,
-                    loaded_enum.name,
+                    loaded_enum.fqn,
                     loaded_enum.name_nav,
                 );
             } else {
                 try wip_nav.abbrevCode(.generated_empty_struct_type);
-                try wip_nav.strp(loaded_enum.name.toSlice(ip));
+                try wip_nav.strp(loaded_enum.fqn.toSlice(ip));
                 try wip_nav.debug_info.writer.writeByte(@intFromBool(true));
             }
         },
@@ -3426,7 +3426,7 @@ fn updateConstIncompleteInner(dwarf: *Dwarf, pt: Zcu.PerThread, debug_const_inde
             try dwarf.emitIncompleteContainerType(
                 &wip_nav,
                 loaded_opaque.zir_index,
-                loaded_opaque.name,
+                loaded_opaque.fqn,
                 loaded_opaque.name_nav,
             );
         },
@@ -3451,7 +3451,7 @@ fn emitIncompleteContainerType(
     dwarf: *Dwarf,
     wip_nav: *WipNav,
     zir_index: InternPool.TrackedInst.Index,
-    name: InternPool.NullTerminatedString,
+    fqn: InternPool.NullTerminatedString,
     name_nav: InternPool.Nav.Index.Optional,
 ) !void {
     const zcu = wip_nav.pt.zcu;
@@ -3472,7 +3472,7 @@ fn emitIncompleteContainerType(
         const file_gop = try dwarf.getModInfo(wip_nav.unit).files.getOrPut(dwarf.gpa, file);
         try wip_nav.abbrevCode(.empty_struct_type);
         try diw.writeUleb128(file_gop.index);
-        try wip_nav.strp(name.toSlice(ip));
+        try wip_nav.strp(fqn.toSlice(ip));
         try diw.writeByte(@intFromBool(true));
     }
 }
@@ -3895,7 +3895,7 @@ fn updateConstInner(dwarf: *Dwarf, pt: Zcu.PerThread, debug_const_index: link.Co
                             else => if (struct_is_file) .file else .struct_type,
                         });
                         try diw.writeUleb128(file_gop.index);
-                        try wip_nav.strp(loaded_struct.name.toSlice(ip));
+                        try wip_nav.strp(loaded_struct.fqn.toSlice(ip));
                     }
                     if (loaded_struct.field_types.len == 0) {
                         if (!struct_is_file) try diw.writeByte(@intFromBool(false));
@@ -3968,7 +3968,7 @@ fn updateConstInner(dwarf: *Dwarf, pt: Zcu.PerThread, debug_const_index: link.Co
                         const file_gop = try dwarf.getModInfo(unit).files.getOrPut(dwarf.gpa, file);
                         try wip_nav.abbrevCode(if (loaded_struct.field_types.len > 0) .packed_struct_type else .empty_packed_struct_type);
                         try diw.writeUleb128(file_gop.index);
-                        try wip_nav.strp(loaded_struct.name.toSlice(ip));
+                        try wip_nav.strp(loaded_struct.fqn.toSlice(ip));
                         break :t loaded_struct.field_types.len > 0;
                     };
                     try wip_nav.refType(.fromInterned(loaded_struct.packed_backing_int_type));
@@ -4005,7 +4005,7 @@ fn updateConstInner(dwarf: *Dwarf, pt: Zcu.PerThread, debug_const_index: link.Co
                         const file_gop = try dwarf.getModInfo(unit).files.getOrPut(dwarf.gpa, file);
                         try wip_nav.abbrevCode(if (loaded_union.field_types.len > 0) .union_type else .empty_union_type);
                         try diw.writeUleb128(file_gop.index);
-                        try wip_nav.strp(loaded_union.name.toSlice(ip));
+                        try wip_nav.strp(loaded_union.fqn.toSlice(ip));
                         break :t loaded_union.field_types.len > 0;
                     };
                     const union_layout = Type.getUnionLayout(loaded_union, zcu);
@@ -4067,7 +4067,7 @@ fn updateConstInner(dwarf: *Dwarf, pt: Zcu.PerThread, debug_const_index: link.Co
                         const file_gop = try dwarf.getModInfo(unit).files.getOrPut(dwarf.gpa, file);
                         try wip_nav.abbrevCode(if (loaded_union.field_types.len > 0) .packed_union_type else .empty_packed_union_type);
                         try diw.writeUleb128(file_gop.index);
-                        try wip_nav.strp(loaded_union.name.toSlice(ip));
+                        try wip_nav.strp(loaded_union.fqn.toSlice(ip));
                         break :t loaded_union.field_types.len > 0;
                     };
                     try wip_nav.refType(.fromInterned(loaded_union.packed_backing_int_type));
@@ -4103,7 +4103,7 @@ fn updateConstInner(dwarf: *Dwarf, pt: Zcu.PerThread, debug_const_index: link.Co
                     const file_gop = try dwarf.getModInfo(unit).files.getOrPut(dwarf.gpa, file);
                     try wip_nav.abbrevCode(if (loaded_enum.field_names.len > 0) .enum_type else .empty_enum_type);
                     try diw.writeUleb128(file_gop.index);
-                    try wip_nav.strp(loaded_enum.name.toSlice(ip));
+                    try wip_nav.strp(loaded_enum.fqn.toSlice(ip));
                 }
                 try wip_nav.refType(.fromInterned(loaded_enum.int_tag_type));
                 for (0..loaded_enum.field_names.len) |field_index| {
@@ -4115,7 +4115,7 @@ fn updateConstInner(dwarf: *Dwarf, pt: Zcu.PerThread, debug_const_index: link.Co
             } else {
                 assert(loaded_enum.owner_union != .none);
                 try wip_nav.abbrevCode(if (loaded_enum.field_names.len == 0) .generated_empty_enum_type else .generated_enum_type);
-                try wip_nav.strp(loaded_enum.name.toSlice(ip));
+                try wip_nav.strp(loaded_enum.fqn.toSlice(ip));
                 try wip_nav.refType(.fromInterned(loaded_enum.int_tag_type));
                 for (0..loaded_enum.field_names.len) |field_index| {
                     try wip_nav.abbrevCode(.enum_field);
@@ -4141,7 +4141,7 @@ fn updateConstInner(dwarf: *Dwarf, pt: Zcu.PerThread, debug_const_index: link.Co
                 const file_gop = try dwarf.getModInfo(unit).files.getOrPut(dwarf.gpa, file);
                 try wip_nav.abbrevCode(.empty_struct_type);
                 try diw.writeUleb128(file_gop.index);
-                try wip_nav.strp(loaded_opaque.name.toSlice(ip));
+                try wip_nav.strp(loaded_opaque.fqn.toSlice(ip));
             }
             try diw.writeByte(@intFromBool(true));
         },

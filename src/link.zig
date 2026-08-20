@@ -1705,8 +1705,8 @@ pub fn doZcuTask(comp: *Compilation, tid: Zcu.PerThread.Id, task: ZcuTask) void 
             break :nav ip.indexToKey(func).func.owner_nav;
         },
         .debug_update_container_type => |container_update| nav: {
-            const name = Type.fromInterned(container_update.ty).containerTypeName(ip).toSlice(ip);
-            const ty_prog_node = comp.link_prog_node.start(name, 0);
+            const fqn = Type.fromInterned(container_update.ty).containerTypeName(ip).fqn.toSlice(ip);
+            const ty_prog_node = comp.link_prog_node.start(fqn, 0);
             defer ty_prog_node.end();
             (if (zcu.llvm_object) |llvm_object|
                 llvm_object.updateContainerType(pt, container_update.ty, container_update.success)
