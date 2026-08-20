@@ -538,18 +538,24 @@ test fmtChar {
 }
 
 /// Print the string as escaped contents of a double quoted string.
+///
+/// The following transformations are made:
+/// * escaped: '\n', '\r', '\t', '\\', '"'
+/// * hex-encoded: ascii control characters
+///
+/// Everything else is passed through unmodified.
 pub fn stringEscape(bytes: []const u8, w: *Writer) Writer.Error!void {
     for (bytes) |byte| switch (byte) {
+        '\t' => try w.writeAll("\\t"),
         '\n' => try w.writeAll("\\n"),
         '\r' => try w.writeAll("\\r"),
-        '\t' => try w.writeAll("\\t"),
         '\\' => try w.writeAll("\\\\"),
         '"' => try w.writeAll("\\\""),
-        ' ', '!', '#'...'[', ']'...'~' => try w.writeByte(byte),
-        else => {
+        0...8, 11, 12, 14...0x1f, 0x7f => {
             try w.writeAll("\\x");
             try w.printInt(byte, 16, .lower, .{ .width = 2, .fill = '0' });
         },
+        else => try w.writeByte(byte),
     };
 }
 
