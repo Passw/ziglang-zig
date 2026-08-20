@@ -435,7 +435,7 @@ pub const Path = struct {
         const dir = switch (p.root) {
             .none => {
                 const cwd_sub_path = absToCwdRelative(p.sub_path, dirs.cwd);
-                return .{ Io.Dir.cwd(), cwd_sub_path };
+                return .{ Io.Dir.cwd(), if (cwd_sub_path.len == 0) "." else cwd_sub_path };
             },
             .zig_lib => dirs.zig_lib.handle,
             .global_cache => dirs.global_cache.handle,
@@ -456,20 +456,18 @@ pub const Path = struct {
         comp: *Compilation,
         pub fn format(f: Formatter, w: *Writer) Writer.Error!void {
             const root_path: []const u8 = switch (f.p.root) {
-                .zig_lib => f.comp.dirs.zig_lib.path orelse ".",
-                .global_cache => f.comp.dirs.global_cache.path orelse ".",
-                .local_cache => f.comp.dirs.local_cache.path orelse ".",
-                .build_root => f.comp.dirs.build_root.path orelse ".",
+                .zig_lib => f.comp.dirs.zig_lib.path orelse "",
+                .global_cache => f.comp.dirs.global_cache.path orelse "",
+                .local_cache => f.comp.dirs.local_cache.path orelse "",
+                .build_root => f.comp.dirs.build_root.path orelse "",
                 .none => {
-                    const cwd_sub_path = absToCwdRelative(f.p.sub_path, f.comp.dirs.cwd);
-                    try w.writeAll(cwd_sub_path);
+                    try w.writeAll(absToCwdRelative(f.p.sub_path, f.comp.dirs.cwd));
                     return;
                 },
             };
-            assert(root_path.len != 0);
             try w.writeAll(root_path);
             if (f.p.sub_path.len > 0) {
-                try w.writeByte(fs.path.sep);
+                if (root_path.len != 0) try w.writeByte(fs.path.sep);
                 try w.writeAll(f.p.sub_path);
             }
         }
@@ -477,16 +475,16 @@ pub const Path = struct {
 
     /// Given the `sub_path` of a `Path` with `Path.root == .none`, attempts to convert
     /// the (absolute) path to a cwd-relative path. Otherwise, returns the absolute path
-    /// unmodified. The returned string is never empty: "" is converted to ".".
+    /// unmodified. The returned string is never "."; empty string will be returned instead.
     fn absToCwdRelative(sub_path: []const u8, cwd_path: []const u8) []const u8 {
         if (builtin.target.os.tag == .wasi) {
-            if (sub_path.len == 0) return ".";
+            if (sub_path.len == 0) return "";
             assert(!fs.path.isAbsolute(sub_path));
             return sub_path;
         }
         assert(fs.path.isAbsolute(sub_path));
         if (!std.mem.startsWith(u8, sub_path, cwd_path)) return sub_path;
-        if (sub_path.len == cwd_path.len) return "."; // the strings are equal
+        if (sub_path.len == cwd_path.len) return ""; // the strings are equal
         const path_sep_index = path_sep_index: {
             // cwd is just a root, e.g. / or C:\
             if (cwd_path[cwd_path.len - 1] == fs.path.sep) break :path_sep_index cwd_path.len - 1;
@@ -647,7 +645,7 @@ pub const Path = struct {
                 const cwd_sub_path = absToCwdRelative(p.sub_path, dirs.cwd);
                 return .{
                     .root_dir = .cwd(),
-                    .sub_path = cwd_sub_path,
+                    .sub_path = if (cwd_sub_path.len == 0) null else cwd_sub_path,
                 };
             },
         };
