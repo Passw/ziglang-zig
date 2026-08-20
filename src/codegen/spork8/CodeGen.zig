@@ -14,87 +14,163 @@ const Mir = @import("Mir.zig");
 air: Air,
 liveness: Liveness,
 gpa: Allocator,
-spork8: *Spork8,
 pt: Zcu.PerThread,
 owner_nav: InternPool.Nav.Index,
 func_index: InternPool.Index,
-mir_instructions: *std.MultiArrayList(Mir.Inst),
+mir_instructions: std.MultiArrayList(Mir.Inst),
 /// Contains extra data for MIR
-mir_extra: *std.ArrayListUnmanaged(u32),
-start_mir_extra_off: u32,
+mir_extra: std.ArrayListUnmanaged(u32),
 
-pub const Error = error{
-    OutOfMemory,
-    /// Compiler was asked to operate on a number larger than supported.
-    Overflow,
-    /// Indicates the error is already stored in Zcu `failed_codegen`.
-    CodegenFail,
-};
+pub fn legalizeFeatures(_: *const std.Target) *const Air.Legalize.Features {
+    return comptime &.initMany(&.{
+        .expand_bit_cast_safe,
+        .expand_int_cast_safe,
+        .expand_int_from_float_safe,
+        .expand_int_from_float_optimized_safe,
+        .expand_add_safe,
+        .expand_sub_safe,
+        .expand_mul_safe,
 
-pub const Function = extern struct {
-    /// Index into `Spork8.mir_instructions`.
-    mir_off: u32,
-    /// This is unused except for as a safety slice bound and could be removed.
-    mir_len: u32,
-    /// Index into `Spork8.mir_extra`.
-    mir_extra_off: u32,
-    /// This is unused except for as a safety slice bound and could be removed.
-    mir_extra_len: u32,
-};
+        .expand_packed_load,
+        .expand_packed_store,
+        .expand_packed_agg_field_val,
+        .expand_packed_aggregate_init,
+        .expand_array_to_vector,
 
-pub fn function(
-    spork8: *Spork8,
+        .scalarize_add,
+        .scalarize_add_optimized,
+        .scalarize_add_wrap,
+        .scalarize_add_sat,
+        .scalarize_sub,
+        .scalarize_sub_optimized,
+        .scalarize_sub_wrap,
+        .scalarize_sub_sat,
+        .scalarize_mul,
+        .scalarize_mul_optimized,
+        .scalarize_mul_wrap,
+        .scalarize_mul_sat,
+        .scalarize_div_float,
+        .scalarize_div_float_optimized,
+        .scalarize_div_trunc,
+        .scalarize_div_trunc_optimized,
+        .scalarize_div_floor,
+        .scalarize_div_floor_optimized,
+        .scalarize_div_ceil,
+        .scalarize_div_ceil_optimized,
+        .scalarize_div_exact,
+        .scalarize_div_exact_optimized,
+        .scalarize_rem,
+        .scalarize_rem_optimized,
+        .scalarize_mod,
+        .scalarize_mod_optimized,
+        .scalarize_max,
+        .scalarize_min,
+        .scalarize_add_with_overflow,
+        .scalarize_sub_with_overflow,
+        .scalarize_mul_with_overflow,
+        .scalarize_shl_with_overflow,
+        .scalarize_bit_and,
+        .scalarize_bit_or,
+        .scalarize_shr,
+        .scalarize_shr_exact,
+        .scalarize_shl,
+        .scalarize_shl_exact,
+        .scalarize_shl_sat,
+        .scalarize_xor,
+        .scalarize_not,
+        .scalarize_clz,
+        .scalarize_ctz,
+        .scalarize_popcount,
+        .scalarize_byte_swap,
+        .scalarize_bit_reverse,
+        .scalarize_sqrt,
+        .scalarize_sin,
+        .scalarize_cos,
+        .scalarize_tan,
+        .scalarize_exp,
+        .scalarize_exp2,
+        .scalarize_log,
+        .scalarize_log2,
+        .scalarize_log10,
+        .scalarize_abs,
+        .scalarize_floor,
+        .scalarize_ceil,
+        .scalarize_round,
+        .scalarize_trunc_float,
+        .scalarize_neg,
+        .scalarize_neg_optimized,
+        .scalarize_cmp_vector,
+        .scalarize_cmp_vector_optimized,
+        .scalarize_fptrunc,
+        .scalarize_fpext,
+        .scalarize_int_cast,
+        .scalarize_ptr_cast,
+        .scalarize_ptr_from_int,
+        .scalarize_int_from_ptr,
+        .scalarize_trunc,
+        .scalarize_int_from_float,
+        .scalarize_int_from_float_optimized,
+        .scalarize_float_from_int,
+        .scalarize_reduce,
+        .scalarize_reduce_optimized,
+        .scalarize_shuffle_one,
+        .scalarize_shuffle_two,
+        .scalarize_select,
+        .scalarize_mul_add,
+
+        .scalarize_bit_cast_padded_elems,
+    });
+}
+
+pub fn generate(
+    bin_file: *link.File,
     pt: Zcu.PerThread,
     func_index: InternPool.Index,
-    air: Air,
-    liveness: Liveness,
-) Error!Function {
+    air: *const Air,
+    liveness: *const ?Air.Liveness,
+) link.Error!Mir {
+    _ = bin_file;
     const zcu = pt.zcu;
     const gpa = zcu.gpa;
-    const func_info = zcu.funcInfo(func_index);
+    const cg = zcu.funcInfo(func_index);
 
     var code_gen: CodeGen = .{
         .gpa = gpa,
         .pt = pt,
-        .air = air,
-        .liveness = liveness,
-        .owner_nav = func_info.owner_nav,
-        .spork8 = spork8,
+        .air = air.*,
+        .liveness = liveness.*.?,
+        .owner_nav = cg.owner_nav,
         .func_index = func_index,
-        .mir_instructions = &spork8.mir_instructions,
-        .mir_extra = &spork8.mir_extra,
-        .start_mir_extra_off = @intCast(spork8.mir_extra.items.len),
+        .mir_instructions = .empty,
+        .mir_extra = .empty,
     };
     defer code_gen.deinit();
 
-    return functionInner(&code_gen) catch |err| switch (err) {
-        error.CodegenFail => return error.CodegenFail,
-        else => |e| return code_gen.fail("failed to generate function: {s}", .{@errorName(e)}),
+    return generateInner(&code_gen) catch |err| switch (err) {
+        error.AlreadyReported,
+        error.OutOfMemory,
+        => |e| return e,
     };
 }
 
-fn deinit(cg: *CodeGen) void {
+pub fn deinit(cg: *CodeGen) void {
     cg.* = undefined;
 }
 
 const InnerError = error{
-    CodegenFail,
+    AlreadyReported,
     OutOfMemory,
 };
 
-fn functionInner(cg: *CodeGen) InnerError!Function {
-    const spork8 = cg.spork8;
-
-    const start_mir_off: u32 = @intCast(spork8.mir_instructions.len);
-
+fn generateInner(cg: *CodeGen) InnerError!Mir {
     // Generate MIR for function body
     try cg.genBody(cg.air.getMainBody());
 
+    try cg.mir_extra.shrinkToLen(cg.gpa);
+
     return .{
-        .mir_off = start_mir_off,
-        .mir_len = @intCast(spork8.mir_instructions.len - start_mir_off),
-        .mir_extra_off = cg.start_mir_extra_off,
-        .mir_extra_len = cg.extraLen(),
+        .instructions = cg.mir_instructions.toOwnedSlice(),
+        .extra = cg.mir_extra.toOwnedSliceAssert(),
     };
 }
 
@@ -130,8 +206,6 @@ fn genInst(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
         .div_floor,
         .bit_and,
         .bit_or,
-        .bool_and,
-        .bool_or,
         .rem,
         .mod,
         .shl,
@@ -177,13 +251,11 @@ fn genInst(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
         .cmp_neq,
 
         .cmp_vector,
-        .cmp_lt_errors_len,
 
         .array_elem_val,
         .array_to_slice,
         .alloc,
         .arg,
-        .bitcast,
         .block,
         .trap,
         .breakpoint,
@@ -191,7 +263,6 @@ fn genInst(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
         .repeat,
         .switch_dispatch,
         .cond_br,
-        .intcast,
         .fptrunc,
         .fpext,
         .int_from_float,
@@ -241,7 +312,6 @@ fn genInst(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
         .ret_load,
         .splat,
         .select,
-        .shuffle,
         .reduce,
         .aggregate_init,
         .union_init,
@@ -266,7 +336,6 @@ fn genInst(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
         .struct_field_ptr_index_1,
         .struct_field_ptr_index_2,
         .struct_field_ptr_index_3,
-        .struct_field_val,
         .field_parent_ptr,
 
         .switch_br,
@@ -303,7 +372,6 @@ fn genInst(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
         .save_err_return_trace_index,
         .is_named_enum_value,
         .addrspace_cast,
-        .vector_store_elem,
         .c_va_arg,
         .c_va_copy,
         .c_va_end,
@@ -341,7 +409,31 @@ fn genInst(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
         .add_safe,
         .sub_safe,
         .mul_safe,
-        .intcast_safe,
+        .div_ceil,
+        .div_ceil_optimized,
+        .bit_cast,
+        .bit_cast_safe,
+        .ptr_cast,
+        .ptr_from_int,
+        .int_from_ptr,
+        .error_cast,
+        .error_from_int,
+        .int_from_error,
+        .union_from_enum,
+        .int_cast,
+        .int_cast_safe,
+        .agg_field_val,
+        .array_to_vector,
+        .int_from_float_safe,
+        .int_from_float_optimized_safe,
+        .shuffle_one,
+        .shuffle_two,
+        .cmp_lte_errors_len,
+        .runtime_nav_ptr,
+        .spirv_runtime_array_len,
+        .legalize_vec_store_elem,
+        .legalize_vec_elem_val,
+        .legalize_compiler_rt_call,
         => |tag| return cg.fail("TODO: implement spork8 inst: {s}", .{@tagName(tag)}),
 
         .work_item_id,
@@ -356,7 +448,7 @@ fn airUnreachable(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     _ = inst;
 }
 
-fn fail(cg: *CodeGen, comptime fmt: []const u8, args: anytype) error{ OutOfMemory, CodegenFail } {
+fn fail(cg: *CodeGen, comptime fmt: []const u8, args: anytype) error{ OutOfMemory, AlreadyReported } {
     const zcu = cg.pt.zcu;
     const func = zcu.funcInfo(cg.func_index);
     return zcu.codegenFail(func.owner_nav, fmt, args);

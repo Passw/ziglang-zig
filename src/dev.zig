@@ -248,6 +248,7 @@ pub const Env = enum {
             .spork8 => switch (feature) {
                 .stdio_listen,
                 .incremental,
+                .legalize,
                 .spork8_backend,
                 .spork8_linker,
                 => true,

@@ -22,7 +22,6 @@ const dev = @import("../dev.zig");
 const Value = @import("../Value.zig");
 
 base: link.File,
-funcs: std.AutoArrayHashMapUnmanaged(InternPool.Index, CodeGen.Function) = .empty,
 /// All MIR instructions for all Zcu functions.
 mir_instructions: std.MultiArrayList(Mir.Inst) = .{},
 /// Corresponds to `mir_instructions`.

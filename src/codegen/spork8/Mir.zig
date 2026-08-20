@@ -5,8 +5,8 @@ const builtin = @import("builtin");
 const std = @import("std");
 const assert = std.debug.assert;
 
-instruction_tags: []const Inst.Tag,
-instruction_datas: []const Inst.Data,
+instructions: std.MultiArrayList(Inst).Slice,
+
 extra: []const u32,
 
 pub const Inst = struct {
@@ -24,9 +24,9 @@ pub const Inst = struct {
         /// imm8
         set_addr_i = 0x09,
         /// imm8
-        load_i = 0x10,
+        load_i = 0x11,
         /// index
-        jump,
+        jump = 0x68,
     };
 
     /// All instructions contain a 4-byte payload, which is contained within
@@ -44,3 +44,8 @@ pub const Inst = struct {
         }
     };
 };
+
+pub fn deinit(mir: *Mir, gpa: std.mem.Allocator) void {
+    mir.instructions.deinit(gpa);
+    mir.* = undefined;
+}
