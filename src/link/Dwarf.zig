@@ -2202,7 +2202,7 @@ pub const WipNav = struct {
         wip_nav: *WipNav,
         abbrev_code: struct {
             decl: AbbrevCode,
-            decl_abstract: AbbrevCode,
+            decl_specification: AbbrevCode,
             decl_instance: AbbrevCode,
         },
         nav: *const InternPool.Nav,
@@ -2216,11 +2216,11 @@ pub const WipNav = struct {
 
         const orig_entry = wip_nav.entry;
         defer wip_nav.entry = orig_entry;
-        const parent_type, const is_abstract = if (nav.analysis) |analysis| parent_info: {
+        const parent_type, const is_specification = if (nav.analysis) |analysis| parent_info: {
             const parent_type: Type = .fromInterned(zcu.namespacePtr(analysis.namespace).owner_type);
             const decl_gop = try dwarf.decls.getOrPut(dwarf.gpa, analysis.zir_index);
             errdefer _ = if (!decl_gop.found_existing) dwarf.decls.pop();
-            const was_abstract = decl_gop.found_existing and
+            const was_specification = decl_gop.found_existing and
                 switch (try dwarf.debug_info.declAbbrevCode(wip_nav.unit, decl_gop.value_ptr.*)) {
                     .null,
                     .decl_alias,
@@ -2242,9 +2242,9 @@ pub const WipNav = struct {
                     .decl_extern_nullary_func,
                     .decl_extern_func,
                     => false,
-                    .decl_abstract_var,
-                    .decl_abstract_const,
-                    .decl_abstract_func,
+                    .decl_specification_var,
+                    .decl_specification_const,
+                    .decl_specification_func,
                     => true,
 
                     // This comes from a decl which was previously generated as an incomplete value
@@ -2255,11 +2255,11 @@ pub const WipNav = struct {
                     else => |t| std.debug.panic("bad decl abbrev code: {t}", .{t}),
                 };
             if (parent_type.getCaptures(zcu).len == 0) {
-                if (was_abstract) try dwarf.freeCommonEntry(wip_nav.unit, decl_gop.value_ptr.*);
+                if (was_specification) try dwarf.freeCommonEntry(wip_nav.unit, decl_gop.value_ptr.*);
                 decl_gop.value_ptr.* = orig_entry;
                 break :parent_info .{ parent_type, false };
             } else {
-                if (was_abstract)
+                if (was_specification)
                     dwarf.debug_info.section.getUnit(wip_nav.unit).getEntry(decl_gop.value_ptr.*).clear()
                 else
                     decl_gop.value_ptr.* = try dwarf.addCommonEntry(wip_nav.unit);
@@ -2268,8 +2268,8 @@ pub const WipNav = struct {
             }
         } else .{ null, false };
 
-        try wip_nav.abbrevCode(if (is_abstract) abbrev_code.decl_abstract else abbrev_code.decl);
-        try wip_nav.refType((if (is_abstract) null else parent_type) orelse
+        try wip_nav.abbrevCode(if (is_specification) abbrev_code.decl_specification else abbrev_code.decl);
+        try wip_nav.refType((if (is_specification) null else parent_type) orelse
             .fromInterned(zcu.fileRootType(file)));
         assert(diw.end == DebugInfo.declEntryLineOff(dwarf));
         try diw.writeInt(u32, decl.src_line + 1, dwarf.endian);
@@ -2277,14 +2277,14 @@ pub const WipNav = struct {
         try diw.writeByte(if (decl.is_pub) DW.ACCESS.public else DW.ACCESS.private);
         try wip_nav.strp(nav.name.toSlice(ip));
 
-        if (!is_abstract) return;
-        const abstract_entry = wip_nav.entry;
-        try dwarf.debug_info.section.replaceEntry(wip_nav.unit, abstract_entry, dwarf, wip_nav.debug_info.written());
+        if (!is_specification) return;
+        const specification_entry = wip_nav.entry;
+        try dwarf.debug_info.section.replaceEntry(wip_nav.unit, specification_entry, dwarf, wip_nav.debug_info.written());
         wip_nav.debug_info.clearRetainingCapacity();
         wip_nav.entry = orig_entry;
         try wip_nav.abbrevCode(abbrev_code.decl_instance);
         try wip_nav.refType(parent_type.?);
-        try wip_nav.infoSectionOffset(.debug_info, wip_nav.unit, abstract_entry, 0);
+        try wip_nav.infoSectionOffset(.debug_info, wip_nav.unit, specification_entry, 0);
     }
 };
 
@@ -2680,11 +2680,11 @@ fn initWipNavInner(
                     const diw = &wip_nav.debug_info.writer;
                     try wip_nav.declCommon(if (func_type.param_types.len > 0 or func_type.is_var_args) .{
                         .decl = .decl_extern_func,
-                        .decl_abstract = .decl_abstract_func,
+                        .decl_specification = .decl_specification_func,
                         .decl_instance = .decl_instance_extern_func,
                     } else .{
                         .decl = .decl_extern_nullary_func,
-                        .decl_abstract = .decl_abstract_func,
+                        .decl_specification = .decl_specification_func,
                         .decl_instance = .decl_instance_extern_nullary_func,
                     }, &nav, inst_info.file, &decl);
                     try wip_nav.strp(@"extern".name.toSlice(ip));
@@ -2705,7 +2705,7 @@ fn initWipNavInner(
         .func => |func| if (func.owner_nav != nav_index) {
             try wip_nav.declCommon(.{
                 .decl = .decl_alias,
-                .decl_abstract = .decl_abstract_const,
+                .decl_specification = .decl_specification_const,
                 .decl_instance = .decl_instance_alias,
             }, &nav, inst_info.file, &decl);
             try wip_nav.refNav(func.owner_nav);
@@ -2758,7 +2758,7 @@ fn initWipNavInner(
             const diw = &wip_nav.debug_info.writer;
             try wip_nav.declCommon(.{
                 .decl = .decl_func,
-                .decl_abstract = .decl_abstract_func,
+                .decl_specification = .decl_specification_func,
                 .decl_instance = .decl_instance_func,
             }, &nav, inst_info.file, &decl);
             try wip_nav.strp(switch (decl.linkage) {
@@ -2817,10 +2817,10 @@ fn initWipNavInner(
             const diw = &wip_nav.debug_info.writer;
             try wip_nav.declCommon(.{
                 .decl = .decl_var,
-                .decl_abstract = switch (decl.kind) {
+                .decl_specification = switch (decl.kind) {
                     .unnamed_test, .@"test", .decltest, .@"comptime" => unreachable,
-                    .@"const" => .decl_abstract_const,
-                    .@"var" => .decl_abstract_var,
+                    .@"const" => .decl_specification_const,
+                    .@"var" => .decl_specification_var,
                 },
                 .decl_instance = .decl_instance_var,
             }, &nav, inst_info.file, &decl);
@@ -3181,7 +3181,7 @@ fn updateComptimeNavInner(dwarf: *Dwarf, pt: Zcu.PerThread, nav_index: InternPoo
         .alias => {
             try wip_nav.declCommon(.{
                 .decl = .decl_alias,
-                .decl_abstract = .decl_abstract_const,
+                .decl_specification = .decl_specification_const,
                 .decl_instance = .decl_instance_alias,
             }, &nav, inst_info.file, &decl);
             try wip_nav.refType(nav_val.toType());
@@ -3189,7 +3189,7 @@ fn updateComptimeNavInner(dwarf: *Dwarf, pt: Zcu.PerThread, nav_index: InternPoo
         .@"var" => {
             try wip_nav.declCommon(.{
                 .decl = .decl_var,
-                .decl_abstract = .decl_abstract_var,
+                .decl_specification = .decl_specification_var,
                 .decl_instance = .decl_instance_var,
             }, &nav, inst_info.file, &decl);
             try wip_nav.strp(switch (decl.linkage) {
@@ -3209,19 +3209,19 @@ fn updateComptimeNavInner(dwarf: *Dwarf, pt: Zcu.PerThread, nav_index: InternPoo
             const has_comptime_state = nav_ty.comptimeOnly(zcu);
             try wip_nav.declCommon(if (has_runtime_bits and has_comptime_state) .{
                 .decl = .decl_const_runtime_bits_comptime_state,
-                .decl_abstract = .decl_abstract_const,
+                .decl_specification = .decl_specification_const,
                 .decl_instance = .decl_instance_const_runtime_bits_comptime_state,
             } else if (has_comptime_state) .{
                 .decl = .decl_const_comptime_state,
-                .decl_abstract = .decl_abstract_const,
+                .decl_specification = .decl_specification_const,
                 .decl_instance = .decl_instance_const_comptime_state,
             } else if (has_runtime_bits) .{
                 .decl = .decl_const_runtime_bits,
-                .decl_abstract = .decl_abstract_const,
+                .decl_specification = .decl_specification_const,
                 .decl_instance = .decl_instance_const_runtime_bits,
             } else .{
                 .decl = .decl_const,
-                .decl_abstract = .decl_abstract_const,
+                .decl_specification = .decl_specification_const,
                 .decl_instance = .decl_instance_const,
             }, &nav, inst_info.file, &decl);
             try wip_nav.strp(switch (decl.linkage) {
@@ -3245,11 +3245,11 @@ fn updateComptimeNavInner(dwarf: *Dwarf, pt: Zcu.PerThread, nav_index: InternPoo
             } else true;
             try wip_nav.declCommon(if (is_nullary) .{
                 .decl = .decl_nullary_func_generic,
-                .decl_abstract = .decl_abstract_func,
+                .decl_specification = .decl_specification_func,
                 .decl_instance = .decl_instance_nullary_func_generic,
             } else .{
                 .decl = .decl_func_generic,
-                .decl_abstract = .decl_abstract_func,
+                .decl_specification = .decl_specification_func,
                 .decl_instance = .decl_instance_func_generic,
             }, &nav, inst_info.file, &decl);
             try wip_nav.refType(.fromInterned(func_type.return_type));
@@ -3267,7 +3267,7 @@ fn updateComptimeNavInner(dwarf: *Dwarf, pt: Zcu.PerThread, nav_index: InternPoo
         .func_alias => |owner_nav| {
             try wip_nav.declCommon(.{
                 .decl = .decl_alias,
-                .decl_abstract = .decl_abstract_const,
+                .decl_specification = .decl_specification_const,
                 .decl_instance = .decl_instance_alias,
             }, &nav, inst_info.file, &decl);
             try wip_nav.refNav(owner_nav);
@@ -3463,7 +3463,7 @@ fn emitIncompleteContainerType(
         const decl = zcu.fileByIndex(file).zir.?.getDeclaration(decl_inst);
         try wip_nav.declCommon(.{
             .decl = .decl_namespace_struct,
-            .decl_abstract = .decl_abstract_const,
+            .decl_specification = .decl_specification_const,
             .decl_instance = .decl_instance_namespace_struct,
         }, &nav, file, &decl);
         try wip_nav.debug_info.writer.writeByte(@intFromBool(true));
@@ -3881,11 +3881,11 @@ fn updateConstInner(dwarf: *Dwarf, pt: Zcu.PerThread, debug_const_index: link.Co
                         const decl = zcu.fileByIndex(file).zir.?.getDeclaration(decl_inst);
                         try wip_nav.declCommon(if (loaded_struct.field_types.len == 0) .{
                             .decl = .decl_namespace_struct,
-                            .decl_abstract = .decl_abstract_const,
+                            .decl_specification = .decl_specification_const,
                             .decl_instance = .decl_instance_namespace_struct,
                         } else .{
                             .decl = .decl_struct,
-                            .decl_abstract = .decl_abstract_const,
+                            .decl_specification = .decl_specification_const,
                             .decl_instance = .decl_instance_struct,
                         }, &nav, file, &decl);
                     } else {
@@ -3960,7 +3960,7 @@ fn updateConstInner(dwarf: *Dwarf, pt: Zcu.PerThread, debug_const_index: link.Co
                         const decl = zcu.fileByIndex(file).zir.?.getDeclaration(decl_inst);
                         try wip_nav.declCommon(.{
                             .decl = .decl_packed_struct,
-                            .decl_abstract = .decl_abstract_const,
+                            .decl_specification = .decl_specification_const,
                             .decl_instance = .decl_instance_packed_struct,
                         }, &nav, file, &decl);
                         break :t true;
@@ -3997,7 +3997,7 @@ fn updateConstInner(dwarf: *Dwarf, pt: Zcu.PerThread, debug_const_index: link.Co
                         const decl = zcu.fileByIndex(file).zir.?.getDeclaration(decl_inst);
                         try wip_nav.declCommon(.{
                             .decl = .decl_union,
-                            .decl_abstract = .decl_abstract_const,
+                            .decl_specification = .decl_specification_const,
                             .decl_instance = .decl_instance_union,
                         }, &nav, file, &decl);
                         break :t true;
@@ -4059,7 +4059,7 @@ fn updateConstInner(dwarf: *Dwarf, pt: Zcu.PerThread, debug_const_index: link.Co
                         const decl = zcu.fileByIndex(file).zir.?.getDeclaration(decl_inst);
                         try wip_nav.declCommon(.{
                             .decl = .decl_packed_union,
-                            .decl_abstract = .decl_abstract_const,
+                            .decl_specification = .decl_specification_const,
                             .decl_instance = .decl_instance_packed_union,
                         }, &nav, file, &decl);
                         break :t true;
@@ -4092,11 +4092,11 @@ fn updateConstInner(dwarf: *Dwarf, pt: Zcu.PerThread, debug_const_index: link.Co
                     const decl = zcu.fileByIndex(file).zir.?.getDeclaration(decl_inst);
                     try wip_nav.declCommon(if (loaded_enum.field_names.len > 0) .{
                         .decl = .decl_enum,
-                        .decl_abstract = .decl_abstract_const,
+                        .decl_specification = .decl_specification_const,
                         .decl_instance = .decl_instance_enum,
                     } else .{
                         .decl = .decl_empty_enum,
-                        .decl_abstract = .decl_abstract_const,
+                        .decl_specification = .decl_specification_const,
                         .decl_instance = .decl_instance_empty_enum,
                     }, &nav, file, &decl);
                 } else {
@@ -4134,7 +4134,7 @@ fn updateConstInner(dwarf: *Dwarf, pt: Zcu.PerThread, debug_const_index: link.Co
                 const decl = zcu.fileByIndex(file).zir.?.getDeclaration(decl_inst);
                 try wip_nav.declCommon(.{
                     .decl = .decl_namespace_struct,
-                    .decl_abstract = .decl_abstract_const,
+                    .decl_specification = .decl_specification_const,
                     .decl_instance = .decl_instance_namespace_struct,
                 }, &nav, file, &decl);
             } else {
@@ -5136,9 +5136,9 @@ const AbbrevCode = enum {
     decl_func_generic,
     decl_extern_nullary_func,
     decl_extern_func,
-    decl_abstract_var,
-    decl_abstract_const,
-    decl_abstract_func,
+    decl_specification_var,
+    decl_specification_const,
+    decl_specification_func,
     decl_instance_alias,
     decl_instance_empty_enum,
     decl_instance_enum,
@@ -5262,7 +5262,7 @@ const AbbrevCode = enum {
         .{ .accessibility, .data1 },
         .{ .name, .strp },
     };
-    const decl_abstract_abbrev_common_attrs = decl_abbrev_common_attrs ++ &[_]Attr{
+    const decl_specification_abbrev_common_attrs = decl_abbrev_common_attrs ++ &[_]Attr{
         .{ .declaration, .flag_present },
     };
     const decl_instance_abbrev_common_attrs = &[_]Attr{
@@ -5447,17 +5447,17 @@ const AbbrevCode = enum {
                 .{ .noreturn, .flag },
             },
         },
-        .decl_abstract_var = .{
+        .decl_specification_var = .{
             .tag = .variable,
-            .attrs = decl_abstract_abbrev_common_attrs,
+            .attrs = decl_specification_abbrev_common_attrs,
         },
-        .decl_abstract_const = .{
+        .decl_specification_const = .{
             .tag = .constant,
-            .attrs = decl_abstract_abbrev_common_attrs,
+            .attrs = decl_specification_abbrev_common_attrs,
         },
-        .decl_abstract_func = .{
+        .decl_specification_func = .{
             .tag = .subprogram,
-            .attrs = decl_abstract_abbrev_common_attrs,
+            .attrs = decl_specification_abbrev_common_attrs,
         },
         .decl_instance_alias = .{
             .tag = .imported_declaration,

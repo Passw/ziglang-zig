@@ -134,7 +134,7 @@ pub fn updateContainerType(
         const gpa = pt.zcu.comp.gpa;
         try pool.complete_containers.put(gpa, container_ty, {});
     } else {
-        _ = pool.complete_containers.fetchSwapRemove(container_ty);
+        _ = pool.complete_containers.swapRemove(container_ty);
     }
     var opt_dep = pool.container_deps.get(container_ty);
     while (opt_dep) |dep| : (opt_dep = dep.ptr(pool).next.unwrap()) {

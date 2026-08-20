@@ -26,9 +26,10 @@ const target_util = @import("target.zig");
 const codegen = @import("codegen.zig");
 const crash_report = @import("crash_report.zig");
 
-pub const LdScript = @import("link/LdScript.zig");
-pub const Queue = @import("link/Queue.zig");
 pub const ConstPool = @import("link/ConstPool.zig");
+pub const LdScript = @import("link/LdScript.zig");
+pub const MappedFile = @import("link/MappedFile.zig");
+pub const Queue = @import("link/Queue.zig");
 
 pub const aarch64 = @import("link/aarch64.zig");
 pub const loongarch = @import("link/loongarch.zig");

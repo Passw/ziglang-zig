@@ -109,6 +109,20 @@ pub const Class = enum(u3) {
     /// Then, aggregates containing fully-comptime types may themselves be either fully-comptime or
     /// partially-comptime; see the doc comment on `.partially_comptime` for details.
     fully_comptime,
+
+    pub fn hasRuntimeBits(class: Class) bool {
+        return switch (class) {
+            .no_possible_value, .one_possible_value, .fully_comptime => false,
+            .runtime, .partially_comptime => true,
+        };
+    }
+
+    pub fn comptimeOnly(class: Class) bool {
+        return switch (class) {
+            .no_possible_value, .one_possible_value, .runtime => false,
+            .partially_comptime, .fully_comptime => true,
+        };
+    }
 };
 
 /// Returns the `Class` for the type `ty`. Asserts that the layout of `ty` is resolved.
@@ -761,10 +775,7 @@ pub fn toValue(self: Type) Value {
 ///
 /// * All other types contain some runtime state, so have runtime bits and a non-zero ABI size.
 pub fn hasRuntimeBits(ty: Type, zcu: *const Zcu) bool {
-    return switch (ty.classify(zcu)) {
-        .no_possible_value, .one_possible_value, .fully_comptime => false,
-        .runtime, .partially_comptime => true,
-    };
+    return ty.classify(zcu).hasRuntimeBits();
 }
 
 /// Returns `true` iff the memory layout of `ty` is defined by the Zig language specification.
@@ -2195,10 +2206,7 @@ pub fn onePossibleValue(ty: Type, pt: Zcu.PerThread) !?Value {
 pub fn comptimeOnly(ty: Type, zcu: *const Zcu) bool {
     if (ty.toIntern() == .generic_poison_type) return false;
     if (ty.zigTypeTag(zcu) == .error_union and ty.errorUnionPayload(zcu).toIntern() == .generic_poison_type) return false;
-    return switch (ty.classify(zcu)) {
-        .no_possible_value, .one_possible_value, .runtime => false,
-        .partially_comptime, .fully_comptime => true,
-    };
+    return ty.classify(zcu).comptimeOnly();
 }
 
 pub fn isVector(ty: Type, zcu: *const Zcu) bool {
