@@ -5332,7 +5332,7 @@ fn computeNodeElfOffset(elf: *Elf, ni: MappedFile.Node.Index) u64 {
 ///
 /// Asserts that `ni` must be a node which supports relocations (see `Elf.Node`). Does not support
 /// the special-case sections '.plt', '.dynamic', and '.eh_frame_hdr'.
-fn resetNodeRelocs(elf: *Elf, ni: MappedFile.Node.Index) void {
+pub fn resetNodeRelocs(elf: *Elf, ni: MappedFile.Node.Index) void {
     const opts: struct {
         first_symbol_reloc: ?*SymbolReloc.Index = null,
         skip_symbol_relocs: MappedFile.Node.Index.Optional = .none,

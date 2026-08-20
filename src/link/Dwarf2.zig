@@ -274,7 +274,7 @@ pub const Loc = union(enum) {
     stack_value: *const Loc,
     implicit_pointer: struct {
         node: MappedFile.Node.Index,
-        offset: i65,
+        offset: i65 = 0,
     },
     wasm_ext: union(enum) {
         local: u32,
@@ -299,7 +299,7 @@ pub const Loc = union(enum) {
         };
     }
 
-    fn writeReg(reg: u32, op0: u8, opx: u8, writer: *Writer) Writer.Error!void {
+    fn writeReg(reg: u32, op0: u8, opx: u8, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         if (std.math.cast(u5, reg)) |small_reg| {
             try writer.writeByte(op0 + small_reg);
         } else {
@@ -308,141 +308,156 @@ pub const Loc = union(enum) {
         }
     }
 
-    fn write(loc: Loc, adapter: anytype) link.EmitError!void {
-        const writer = adapter.writer();
+    fn write(loc: Loc, writer: union(enum) {
+        io: *std.Io.Writer,
+        mf: *MappedFile.Node.Writer,
+    }, dwarf: *Dwarf) link.EmitError!void {
+        const w = switch (writer) {
+            .io => |w| w,
+            .mf => |nw| &nw.interface,
+        };
         switch (loc) {
             .empty => {},
             .addr_reloc => |si| {
-                try writer.writeByte(DW.OP.addr);
-                try adapter.addrSym(si);
+                try w.writeByte(DW.OP.addr);
+                switch (writer) {
+                    .io => try dwarf.addrPlaceholder(w),
+                    .mf => |nw| try dwarf.addrSym(nw, si, 0),
+                }
             },
             .deref => |addr| {
-                try addr.write(adapter);
-                try writer.writeByte(DW.OP.deref);
+                try addr.write(writer, dwarf);
+                try w.writeByte(DW.OP.deref);
             },
             .constu => |constu| if (std.math.cast(u5, constu)) |lit| {
-                try writer.writeByte(@as(u8, DW.OP.lit0) + lit);
+                try w.writeByte(@as(u8, DW.OP.lit0) + lit);
             } else if (std.math.cast(u8, constu)) |const1u| {
-                try writer.writeAll(&.{ DW.OP.const1u, const1u });
+                try w.writeAll(&.{ DW.OP.const1u, const1u });
             } else if (std.math.cast(u16, constu)) |const2u| {
-                try writer.writeByte(DW.OP.const2u);
-                try writer.writeInt(u16, const2u, adapter.endian());
+                try w.writeByte(DW.OP.const2u);
+                try w.writeInt(u16, const2u, dwarf.endian);
             } else if (std.math.cast(u21, constu)) |const3u| {
-                try writer.writeByte(DW.OP.constu);
-                try writer.writeUleb128(const3u);
+                try w.writeByte(DW.OP.constu);
+                try w.writeUleb128(const3u);
             } else if (std.math.cast(u32, constu)) |const4u| {
-                try writer.writeByte(DW.OP.const4u);
-                try writer.writeInt(u32, const4u, adapter.endian());
+                try w.writeByte(DW.OP.const4u);
+                try w.writeInt(u32, const4u, dwarf.endian);
             } else if (std.math.cast(u49, constu)) |const7u| {
-                try writer.writeByte(DW.OP.constu);
-                try writer.writeUleb128(const7u);
+                try w.writeByte(DW.OP.constu);
+                try w.writeUleb128(const7u);
             } else {
-                try writer.writeByte(DW.OP.const8u);
-                try writer.writeInt(u64, constu, adapter.endian());
+                try w.writeByte(DW.OP.const8u);
+                try w.writeInt(u64, constu, dwarf.endian);
             },
             .consts => |consts| if (std.math.cast(i8, consts)) |const1s| {
-                try writer.writeAll(&.{ DW.OP.const1s, @bitCast(const1s) });
+                try w.writeAll(&.{ DW.OP.const1s, @bitCast(const1s) });
             } else if (std.math.cast(i16, consts)) |const2s| {
-                try writer.writeByte(DW.OP.const2s);
-                try writer.writeInt(i16, const2s, adapter.endian());
+                try w.writeByte(DW.OP.const2s);
+                try w.writeInt(i16, const2s, dwarf.endian);
             } else if (std.math.cast(i21, consts)) |const3s| {
-                try writer.writeByte(DW.OP.consts);
-                try writer.writeSleb128(const3s);
+                try w.writeByte(DW.OP.consts);
+                try w.writeSleb128(const3s);
             } else if (std.math.cast(i32, consts)) |const4s| {
-                try writer.writeByte(DW.OP.const4s);
-                try writer.writeInt(i32, const4s, adapter.endian());
+                try w.writeByte(DW.OP.const4s);
+                try w.writeInt(i32, const4s, dwarf.endian);
             } else if (std.math.cast(i49, consts)) |const7s| {
-                try writer.writeByte(DW.OP.consts);
-                try writer.writeSleb128(const7s);
+                try w.writeByte(DW.OP.consts);
+                try w.writeSleb128(const7s);
             } else {
-                try writer.writeByte(DW.OP.const8s);
-                try writer.writeInt(i64, consts, adapter.endian());
+                try w.writeByte(DW.OP.const8s);
+                try w.writeInt(i64, consts, dwarf.endian);
             },
             .plus => |plus| done: {
                 if (plus[0].getConst(u0)) |_| {
-                    try plus[1].write(adapter);
+                    try plus[1].write(writer, dwarf);
                     break :done;
                 }
                 if (plus[1].getConst(u0)) |_| {
-                    try plus[0].write(adapter);
+                    try plus[0].write(writer, dwarf);
                     break :done;
                 }
                 if (plus[0].getBaseReg()) |breg| {
                     if (plus[1].getConst(i65)) |offset| {
-                        try writeReg(breg, DW.OP.breg0, DW.OP.bregx, writer);
-                        try writer.writeSleb128(offset);
+                        try writeReg(breg, DW.OP.breg0, DW.OP.bregx, w);
+                        try w.writeSleb128(offset);
                         break :done;
                     }
                 }
                 if (plus[1].getBaseReg()) |breg| {
                     if (plus[0].getConst(i65)) |offset| {
-                        try writeReg(breg, DW.OP.breg0, DW.OP.bregx, writer);
-                        try writer.writeSleb128(offset);
+                        try writeReg(breg, DW.OP.breg0, DW.OP.bregx, w);
+                        try w.writeSleb128(offset);
                         break :done;
                     }
                 }
                 if (plus[0].getConst(u64)) |uconst| {
-                    try plus[1].write(adapter);
-                    try writer.writeByte(DW.OP.plus_uconst);
-                    try writer.writeUleb128(uconst);
+                    try plus[1].write(writer, dwarf);
+                    try w.writeByte(DW.OP.plus_uconst);
+                    try w.writeUleb128(uconst);
                     break :done;
                 }
                 if (plus[1].getConst(u64)) |uconst| {
-                    try plus[0].write(adapter);
-                    try writer.writeByte(DW.OP.plus_uconst);
-                    try writer.writeUleb128(uconst);
+                    try plus[0].write(writer, dwarf);
+                    try w.writeByte(DW.OP.plus_uconst);
+                    try w.writeUleb128(uconst);
                     break :done;
                 }
-                try plus[0].write(adapter);
-                try plus[1].write(adapter);
-                try writer.writeByte(DW.OP.plus);
+                try plus[0].write(writer, dwarf);
+                try plus[1].write(writer, dwarf);
+                try w.writeByte(DW.OP.plus);
             },
-            .reg => |reg| try writeReg(reg, DW.OP.reg0, DW.OP.regx, writer),
+            .reg => |reg| try writeReg(reg, DW.OP.reg0, DW.OP.regx, w),
             .breg => |breg| {
-                try writeReg(breg, DW.OP.breg0, DW.OP.bregx, writer);
-                try writer.writeSleb128(0);
+                try writeReg(breg, DW.OP.breg0, DW.OP.bregx, w);
+                try w.writeSleb128(0);
             },
-            .push_object_address => try writer.writeByte(DW.OP.push_object_address),
+            .push_object_address => try w.writeByte(DW.OP.push_object_address),
             .call => |call| {
-                for (call.args) |arg| try arg.write(adapter);
-                try writer.writeByte(DW.OP.call_ref);
-                try adapter.infoEntry(call.node);
+                for (call.args) |arg| try arg.write(writer, dwarf);
+                try w.writeByte(DW.OP.call_ref);
+                switch (writer) {
+                    .io => try dwarf.secOffsetPlaceholder(w),
+                    .mf => |nw| try dwarf.secOffset(nw, call.node, 0),
+                }
             },
             .form_tls_address => |addr| {
-                try addr.write(adapter);
-                try writer.writeByte(DW.OP.form_tls_address);
+                try addr.write(writer, dwarf);
+                try w.writeByte(DW.OP.form_tls_address);
             },
             .implicit_value => |value| {
-                try writer.writeByte(DW.OP.implicit_value);
-                try writer.writeUleb128(value.len);
-                try writer.writeAll(value);
+                try w.writeByte(DW.OP.implicit_value);
+                try w.writeUleb128(value.len);
+                try w.writeAll(value);
             },
             .stack_value => |value| {
-                try value.write(adapter);
-                try writer.writeByte(DW.OP.stack_value);
+                try value.write(writer, dwarf);
+                try w.writeByte(DW.OP.stack_value);
             },
             .implicit_pointer => |implicit_pointer| {
-                try writer.writeByte(DW.OP.implicit_pointer);
-                try adapter.infoEntry(implicit_pointer.node);
-                try writer.writeSleb128(implicit_pointer.offset);
+                try w.writeByte(DW.OP.implicit_pointer);
+                switch (writer) {
+                    .io => try dwarf.secOffsetPlaceholder(w),
+                    .mf => |nw| try dwarf.secOffset(nw, implicit_pointer.node, 0),
+                }
+                try w.writeSleb128(implicit_pointer.offset);
             },
             .wasm_ext => |wasm_ext| {
-                try writer.writeByte(DW.OP.WASM_location);
+                try w.writeByte(DW.OP.WASM_location);
                 switch (wasm_ext) {
                     .local => |local| {
-                        try writer.writeByte(DW.OP.WASM_local);
-                        try writer.writeUleb128(local);
+                        try w.writeByte(DW.OP.WASM_local);
+                        try w.writeUleb128(local);
                     },
                     .global => |global| if (std.math.cast(u21, global)) |global_u21| {
-                        try writer.writeByte(DW.OP.WASM_global);
-                        try writer.writeUleb128(global_u21);
+                        try w.writeByte(DW.OP.WASM_global);
+                        try w.writeUleb128(global_u21);
                     } else {
-                        try writer.writeByte(DW.OP.WASM_global_u32);
-                        try writer.writeInt(u32, global, adapter.endian());
+                        try w.writeByte(DW.OP.WASM_global_u32);
+                        try w.writeInt(u32, global, dwarf.endian);
                     },
                     .operand_stack => |operand_stack| {
-                        try writer.writeByte(DW.OP.WASM_operand_stack);
-                        try writer.writeUleb128(operand_stack);
+                        try w.writeByte(DW.OP.WASM_operand_stack);
+                        try w.writeUleb128(operand_stack);
                     },
                 }
             },
@@ -574,12 +589,12 @@ pub const Cfa = union(enum) {
             },
             .def_cfa_expression => |expr| {
                 try dfw.writeByte(DW.CFA.def_cfa_expression);
-                try wip_nav.frameExprLoc(expr);
+                try wip_nav.dwarf.exprLoc(&wip_nav.fde_writer, expr);
             },
             .expression => |reg_expr| {
                 try dfw.writeByte(DW.CFA.expression);
                 try dfw.writeUleb128(reg_expr.reg);
-                try wip_nav.frameExprLoc(reg_expr.expr);
+                try wip_nav.dwarf.exprLoc(&wip_nav.fde_writer, reg_expr.expr);
             },
             .val_offset => |reg_off| {
                 const factored_off =
@@ -597,7 +612,7 @@ pub const Cfa = union(enum) {
             .val_expression => |reg_expr| {
                 try dfw.writeByte(DW.CFA.val_expression);
                 try dfw.writeUleb128(reg_expr.reg);
-                try wip_nav.frameExprLoc(reg_expr.expr);
+                try wip_nav.dwarf.exprLoc(&wip_nav.fde_writer, reg_expr.expr);
             },
             .escape => |bytes| try dfw.writeAll(bytes),
         }
@@ -678,7 +693,7 @@ pub const WipNav = struct {
                 .@"extern", .@"export" => nav.name,
             }.toSlice(ip));
             try dwarf.refConst(pt, di_nw, .fromInterned(func_type.return_type));
-            try dwarf.symbolAddress(di_nw, debug.wip_nav.func_si, 0);
+            try dwarf.addrSym(di_nw, debug.wip_nav.func_si, 0);
             debug.info_func_length_offset = diw.end;
             try diw.writeInt(u32, undefined, dwarf.endian);
             try diw.writeUleb128(
@@ -706,9 +721,9 @@ pub const WipNav = struct {
             const dlw = &debug.line_writer.interface;
             try dlw.writeByte(DW.LNS.extended_op);
             if (zcu.comp.config.incremental) {
-                try dlw.writeUleb128(1 + dwarf.sectionOffsetSize());
+                try dlw.writeUleb128(1 + dwarf.secOffsetSize());
                 try dlw.writeByte(DW.LNE.ZIG_set_decl);
-                try dwarf.sectionOffset(&debug.line_writer, debug.info_writer.ni, 0);
+                try dwarf.secOffset(&debug.line_writer, debug.info_writer.ni, 0);
 
                 try dlw.writeByte(DW.LNS.set_column);
                 try dlw.writeUleb128(func.lbrace_column + 1);
@@ -717,7 +732,7 @@ pub const WipNav = struct {
             } else {
                 try dlw.writeUleb128(1 + @backingInt(dwarf.address_size));
                 try dlw.writeByte(DW.LNE.set_address);
-                try dwarf.symbolAddress(&debug.line_writer, debug.wip_nav.func_si, 0);
+                try dwarf.addrSym(&debug.line_writer, debug.wip_nav.func_si, 0);
 
                 const unit = dwarf.getUnit(zf.mod.?);
                 _, const fi = try unit.get(dwarf).getFile(zcu.gpa, unit, inst_info.file);
@@ -788,7 +803,7 @@ pub const WipNav = struct {
             }));
             if (opt_name) |name| try dwarf.strp(&dwarf.debug_str, di_nw, name);
             try dwarf.refConst(debug.pt, di_nw, ty.toValue());
-            try debug.infoExprLoc(loc);
+            try dwarf.exprLoc(&debug.info_writer, loc);
             debug.any_children = true;
         }
 
@@ -873,7 +888,7 @@ pub const WipNav = struct {
             delta_line: i33,
             delta_pc: u64,
             end: bool,
-        ) Writer.Error!void {
+        ) std.Io.Writer.Error!void {
             const dlw = &debug.line_writer.interface;
 
             const header = debug.wip_nav.dwarf.debug_line.header;
@@ -923,7 +938,7 @@ pub const WipNav = struct {
                 error.WriteFailed => return debug.wip_nav.dwarf.reportWriteError(&debug.line_writer),
             };
         }
-        fn setColumnInner(debug: *Debug, column: u32) Writer.Error!void {
+        fn setColumnInner(debug: *Debug, column: u32) std.Io.Writer.Error!void {
             const dlw = &debug.line_writer.interface;
             try dlw.writeByte(DW.LNS.set_column);
             try dlw.writeUleb128(column + 1);
@@ -934,7 +949,7 @@ pub const WipNav = struct {
                 error.WriteFailed => return debug.wip_nav.dwarf.reportWriteError(&debug.line_writer),
             };
         }
-        fn negateStmtInner(debug: *Debug) Writer.Error!void {
+        fn negateStmtInner(debug: *Debug) std.Io.Writer.Error!void {
             try debug.line_writer.interface.writeByte(DW.LNS.negate_stmt);
         }
 
@@ -943,7 +958,7 @@ pub const WipNav = struct {
                 error.WriteFailed => return debug.wip_nav.dwarf.reportWriteError(&debug.line_writer),
             };
         }
-        fn setPrologueEndInner(debug: *Debug) Writer.Error!void {
+        fn setPrologueEndInner(debug: *Debug) std.Io.Writer.Error!void {
             try debug.line_writer.interface.writeByte(DW.LNS.set_prologue_end);
         }
 
@@ -952,7 +967,7 @@ pub const WipNav = struct {
                 error.WriteFailed => return debug.wip_nav.dwarf.reportWriteError(&debug.line_writer),
             };
         }
-        fn setEpilogueBeginInner(debug: *Debug) Writer.Error!void {
+        fn setEpilogueBeginInner(debug: *Debug) std.Io.Writer.Error!void {
             try debug.line_writer.interface.writeByte(DW.LNS.set_epilogue_begin);
         }
 
@@ -970,7 +985,7 @@ pub const WipNav = struct {
             block.abbrev_code = @intCast(diw.end);
             try diw.writeUleb128(try dwarf.refAbbrevCode(.block));
             block.low_pc_off = code_off;
-            try debug.infoAddrSym(debug.wip_nav.func_si, code_off);
+            try dwarf.addrSym(&debug.info_writer, debug.wip_nav.func_si, code_off);
             block.high_pc = @intCast(diw.end);
             try diw.writeInt(u32, 0, dwarf.endian);
             debug.any_children = false;
@@ -1037,7 +1052,7 @@ pub const WipNav = struct {
             try diw.writeUleb128(line);
             try diw.writeUleb128(column + 1);
             block.low_pc_off = code_off;
-            try debug.infoAddrSym(debug.wip_nav.func_si, code_off);
+            try dwarf.addrSym(&debug.info_writer, debug.wip_nav.func_si, code_off);
             block.high_pc = @intCast(diw.end);
             try diw.writeInt(u32, 0, dwarf.endian);
             try debug.setInlineFunc(func);
@@ -1094,9 +1109,9 @@ pub const WipNav = struct {
             if (zcu.comp.config.incremental) {
                 const new_func = try dwarf.getFunc(new_owner_nav);
                 try dlw.writeByte(DW.LNS.extended_op);
-                try dlw.writeUleb128(1 + dwarf.sectionOffsetSize());
+                try dlw.writeUleb128(1 + dwarf.secOffsetSize());
                 try dlw.writeByte(DW.LNE.ZIG_set_decl);
-                try dwarf.sectionOffset(
+                try dwarf.secOffset(
                     &debug.line_writer,
                     new_func.get(dwarf).debug_info_ni.unwrap().?,
                     0,
@@ -1128,38 +1143,10 @@ pub const WipNav = struct {
             debug.wip_nav.func = func;
         }
 
-        fn infoExprLoc(debug: *Debug, loc: Loc) link.EmitError!void {
-            var buf: [64]u8 = undefined;
-            var counter: ExprLocCounter = .init(debug.wip_nav.dwarf, &buf);
-            try loc.write(&counter);
-
-            const adapter: struct {
-                debug: *Debug,
-                fn writer(ctx: @This()) *Writer {
-                    return &ctx.debug.info_writer.interface;
-                }
-                fn endian(ctx: @This()) std.lang.Endian {
-                    return ctx.debug.wip_nav.dwarf.endian;
-                }
-                fn addrSym(ctx: @This(), si: link.File.SymbolId) link.EmitError!void {
-                    try ctx.debug.infoAddrSym(si, 0);
-                }
-                fn infoEntry(ctx: @This(), ni: MappedFile.Node.Index) link.EmitError!void {
-                    try ctx.debug.wip_nav.dwarf.sectionOffset(&ctx.debug.info_writer, ni, 0);
-                }
-            } = .{ .debug = debug };
-            try adapter.writer().writeUleb128(counter.dw.fullCount());
-            try loc.write(adapter);
-        }
-
-        fn infoAddrSym(debug: *Debug, si: link.File.SymbolId, addend: usize) link.EmitError!void {
-            try debug.wip_nav.dwarf.symbolAddress(&debug.info_writer, si, addend);
-        }
-
         fn refFunc(debug: *Debug, func: InternPool.Index) link.EmitError!void {
             const dwarf = debug.wip_nav.dwarf;
             const fi = try dwarf.getFunc(debug.pt.zcu.funcInfo(func).owner_nav);
-            try debug.wip_nav.dwarf.sectionOffset(
+            try debug.wip_nav.dwarf.secOffset(
                 &debug.info_writer,
                 fi.get(dwarf).debug_info_ni.unwrap().?,
                 0,
@@ -1203,14 +1190,10 @@ pub const WipNav = struct {
                 try dfw.writeUleb128(0);
             },
             .debug_frame => {
-                try dwarf.sectionOffset(
-                    &wip_nav.fde_writer,
-                    wip_nav.unit.get(dwarf).cie_ni.unwrap().?,
-                    0,
-                );
-                try wip_nav.frameAddrSym(wip_nav.func_si, 0);
+                try dwarf.secOffset(&wip_nav.fde_writer, wip_nav.unit.get(dwarf).cie_ni.unwrap().?, 0);
+                try dwarf.addrSym(&wip_nav.fde_writer, wip_nav.func_si, 0);
                 wip_nav.frame_func_length = .{ .offset = dfw.end, .size = dwarf.address_size };
-                try dfw.splatByteAll(undefined, @backingInt(dwarf.address_size));
+                try dwarf.addrPlaceholder(dfw);
             },
         }
     }
@@ -1247,78 +1230,6 @@ pub const WipNav = struct {
             ),
         }
         @memset(dfw.unusedCapacitySlice(), DW.CFA.nop);
-    }
-
-    const ExprLocCounter = struct {
-        dw: Writer.Discarding,
-        section_offset_size: usize,
-        address_size: AddressSize,
-        fn init(dwarf: *Dwarf, buf: []u8) ExprLocCounter {
-            return .{
-                .dw = .init(buf),
-                .section_offset_size = dwarf.sectionOffsetSize(),
-                .address_size = dwarf.address_size,
-            };
-        }
-        fn writer(counter: *ExprLocCounter) *Writer {
-            return &counter.dw.writer;
-        }
-        fn endian(_: ExprLocCounter) std.lang.Endian {
-            return .native;
-        }
-        fn addrSym(counter: *ExprLocCounter, _: link.File.SymbolId) Writer.Error!void {
-            try counter.dw.writer.splatByteAll(undefined, @backingInt(counter.address_size));
-        }
-        fn infoEntry(counter: *ExprLocCounter, _: MappedFile.Node.Index) Writer.Error!void {
-            try counter.dw.writer.splatByteAll(undefined, counter.section_offset_size);
-        }
-    };
-
-    fn frameExprLoc(wip_nav: *WipNav, loc: Loc) link.EmitError!void {
-        var buf: [64]u8 = undefined;
-        var counter: ExprLocCounter = .init(wip_nav.dwarf, &buf);
-        try loc.write(&counter);
-
-        const adapter: struct {
-            wip_nav: *WipNav,
-            fn writer(ctx: @This()) *Writer {
-                return &ctx.wip_nav.fde_writer.interface;
-            }
-            fn endian(ctx: @This()) std.lang.Endian {
-                return ctx.wip_nav.dwarf.endian;
-            }
-            fn addrSym(ctx: @This(), si: link.File.SymbolId) link.EmitError!void {
-                try ctx.wip_nav.frameAddrSym(si, 0);
-            }
-            fn infoEntry(ctx: @This(), ni: MappedFile.Node.Index) link.EmitError!void {
-                try ctx.wip_nav.dwarf.sectionOffset(&ctx.wip_nav.fde_writer, ni, 0);
-            }
-        } = .{ .wip_nav = wip_nav };
-        try adapter.writer().writeUleb128(counter.dw.fullCount());
-        try loc.write(adapter);
-    }
-
-    fn frameAddrSym(
-        wip_nav: *WipNav,
-        si: link.File.SymbolId,
-        sym_off: u64,
-    ) link.EmitError!void {
-        const dwarf = wip_nav.dwarf;
-        const dfw = &wip_nav.fde_writer.interface;
-        const offset = dfw.end;
-        try dfw.splatByteAll(0, @backingInt(dwarf.address_size));
-        const elf = dwarf.lf.cast(.elf2).?;
-        try elf.addReloc(
-            @bitCast(wip_nav.fde_writer.ni),
-            offset,
-            si,
-            @bitCast(sym_off),
-            switch (dwarf.address_size) {
-                else => unreachable,
-                .@"32" => .abs32(elf),
-                .@"64" => .abs64(elf),
-            },
-        );
     }
 };
 
@@ -1632,13 +1543,7 @@ pub fn unitLengthSize(dwarf: *Dwarf) usize {
         .@"64" => 4 + 8,
     };
 }
-pub fn sectionOffsetSize(dwarf: *Dwarf) usize {
-    return switch (dwarf.format) {
-        .@"32" => 4,
-        .@"64" => 8,
-    };
-}
-pub fn genUnitLength(dwarf: *Dwarf, w: *Writer) Writer.Error!void {
+pub fn genUnitLength(dwarf: *Dwarf, w: *std.Io.Writer) std.Io.Writer.Error!void {
     switch (dwarf.format) {
         .@"32" => try w.writeInt(u32, undefined, dwarf.endian),
         .@"64" => {
@@ -1654,7 +1559,7 @@ pub fn updateUnitLength(dwarf: *Dwarf, header: []u8, unit_length: u64) void {
     }
 }
 
-pub fn genUnitPadding(dwarf: *Dwarf, w: *Writer) Writer.Error!void {
+pub fn genUnitPadding(dwarf: *Dwarf, w: *std.Io.Writer) std.Io.Writer.Error!void {
     try dwarf.genUnitLength(w);
     try w.writeInt(u16, 0, dwarf.endian);
 }
@@ -1691,11 +1596,11 @@ pub fn genEhFrameHdr(
 
 pub fn genDebugFrameCie(
     dwarf: *Dwarf,
-    dfw: *Writer,
+    dfw: *std.Io.Writer,
     /// `null` means to generate an architecture-agnostic padding cie
     arch: ?std.Target.Cpu.Arch,
     format: Frame.Format,
-) Writer.Error!void {
+) std.Io.Writer.Error!void {
     try dwarf.genUnitLength(dfw);
     switch (format) {
         .eh_frame => try dfw.writeInt(u32, 0, dwarf.endian),
@@ -1768,7 +1673,7 @@ pub fn genDebugInfoHeader(
     try dihw.writeInt(u16, 5, dwarf.endian);
     try dihw.writeByte(DW.UT.compile);
     try dihw.writeByte(@backingInt(dwarf.address_size));
-    try dwarf.sectionOffset(dih_nw, dwarf.debug_abbrev.ni.unwrap().?, 0);
+    try dwarf.secOffset(dih_nw, dwarf.debug_abbrev.ni.unwrap().?, 0);
     const compile_unit_offset = dihw.end;
     try dihw.writeUleb128(try dwarf.refAbbrevCode(.compile_unit));
     try dihw.writeByte(DW.LANG.Zig);
@@ -1777,17 +1682,13 @@ pub fn genDebugInfoHeader(
     defer comp.gpa.free(root_dir_path);
     try dwarf.strp(&dwarf.debug_line_str, dih_nw, root_dir_path);
     try dwarf.strp(&dwarf.debug_line_str, dih_nw, mod.root_src_path);
-    try dwarf.sectionOffset(
+    try dwarf.secOffset(
         dih_nw,
         dwarf.getUnit(zcu.root_mod).get(dwarf).debug_info_header_ni.unwrap().?,
         compile_unit_offset,
     );
-    try dwarf.sectionOffset(dih_nw, unit.debug_line_header_ni.unwrap().?, 0);
-    try dwarf.sectionOffset(
-        dih_nw,
-        unit.debug_rnglists_ni.unwrap().?,
-        Rnglists.offsetsTableOffset(dwarf),
-    );
+    try dwarf.secOffset(dih_nw, unit.debug_line_header_ni.unwrap().?, 0);
+    try dwarf.secOffset(dih_nw, unit.debug_rnglists_ni.unwrap().?, Rnglists.offsetsTableOffset(dwarf));
     try dihw.writeUleb128(0);
     const module_offset = dihw.end;
     try dihw.writeUleb128(try dwarf.refAbbrevCode(.module));
@@ -1819,10 +1720,10 @@ fn genModuleDependency(
     const diw = &di_nw.interface;
     try diw.writeUleb128(try dwarf.refAbbrevCode(.module_dependency));
     try dwarf.strp(&dwarf.debug_str, di_nw, name);
-    try dwarf.sectionOffset(di_nw, dep_unit.debug_info_header_ni.unwrap().?, module_offset);
+    try dwarf.secOffset(di_nw, dep_unit.debug_info_header_ni.unwrap().?, module_offset);
 }
 
-pub fn genDebugInfoPadding(dwarf: *Dwarf, diw: *Writer, size: u64) Writer.Error!void {
+pub fn genDebugInfoPadding(dwarf: *Dwarf, diw: *std.Io.Writer, size: u64) std.Io.Writer.Error!void {
     switch (size) {
         0 => {},
         1 => try diw.writeUleb128(dwarf.refAbbrevCodeIfExists(.pad_1).?),
@@ -1951,7 +1852,7 @@ pub fn genDebugLineHeader(
     try genDebugLinePadding(dlhw, dlhw.unusedCapacityLen());
 }
 
-pub fn genDebugLinePadding(dlw: *Writer, size: u64) Writer.Error!void {
+pub fn genDebugLinePadding(dlw: *std.Io.Writer, size: u64) std.Io.Writer.Error!void {
     switch (size) {
         0 => {},
         1 => try dlw.writeByte(DW.LNS.const_add_pc),
@@ -1980,7 +1881,7 @@ pub fn genDebugRnglistsHeader(
     dwarf: *Dwarf,
     unit: *Unit,
     drh_nw: *MappedFile.Node.Writer,
-) Writer.Error!void {
+) std.Io.Writer.Error!void {
     const drhw = &drh_nw.interface;
     try dwarf.genUnitLength(drhw);
     try drhw.writeInt(u16, 5, dwarf.endian);
@@ -2006,7 +1907,7 @@ pub fn genDebugRnglists(
     const drw = &dr_nw.interface;
     drw.end = unit.debug_rnglists_end;
     try drw.writeByte(DW.RLE.start_length);
-    try dwarf.symbolAddress(dr_nw, func_si, 0);
+    try dwarf.addrSym(dr_nw, func_si, 0);
     try drw.writeUleb128(func_length);
     unit.debug_rnglists_end = drw.end;
     try drw.writeByte(DW.RLE.end_of_list);
@@ -2063,9 +1964,12 @@ pub fn updateComptimeNav(
             const fi = try dwarf.getFunc(func.owner_nav);
             const f = fi.get(dwarf);
             if (f.fde_ni != .none or f.debug_line_ni != .none) return;
+            const elf = dwarf.lf.cast(.elf2).?;
+            const debug_info_ni = f.debug_info_ni.unwrap().?;
             var di_nw: MappedFile.Node.Writer = undefined;
-            f.debug_info_ni.unwrap().?.writer(zcu.gpa, &dwarf.lf.cast(.elf2).?.mf, &di_nw);
+            debug_info_ni.writer(zcu.gpa, &elf.mf, &di_nw);
             defer di_nw.deinit();
+            elf.resetNodeRelocs(debug_info_ni);
             dwarf.genDeclFuncGeneric(
                 pt,
                 &di_nw,
@@ -2221,17 +2125,17 @@ fn updateConstInner(
                 if (ptr_type.sentinel != .none) try dwarf.blockConst(pt, di_nw, .fromInterned(ptr_type.sentinel));
                 if (ptr_type.flags.alignment.toByteUnits()) |a| try diw.writeUleb128(a);
                 try diw.writeByte(@backingInt(ptr_type.flags.address_space));
-                if (ptr_type.flags.is_const or ptr_type.flags.is_volatile) try dwarf.sectionOffset(
+                if (ptr_type.flags.is_const or ptr_type.flags.is_volatile) try dwarf.secOffset(
                     di_nw,
                     di_nw.ni,
-                    diw.end + dwarf.sectionOffsetSize(),
+                    diw.end + dwarf.secOffsetSize(),
                 );
                 if (ptr_type.flags.is_const) {
                     try diw.writeUleb128(try dwarf.refAbbrevCode(.is_const));
-                    if (ptr_type.flags.is_volatile) try dwarf.sectionOffset(
+                    if (ptr_type.flags.is_volatile) try dwarf.secOffset(
                         di_nw,
                         di_nw.ni,
-                        diw.end + dwarf.sectionOffsetSize(),
+                        diw.end + dwarf.secOffsetSize(),
                     );
                 }
                 if (ptr_type.flags.is_volatile) try diw.writeUleb128(try dwarf.refAbbrevCode(.is_volatile));
@@ -2336,7 +2240,7 @@ fn updateConstInner(
                         try diw.writeUleb128(try dwarf.refAbbrevCode(
                             if (loaded_struct.field_types.len > 0) .decl_struct else .decl_namespace_struct,
                         ));
-                        try dwarf.sectionOffset(di_nw, parent_ni, 0);
+                        try dwarf.secOffset(di_nw, parent_ni, 0);
                         try diw.writeInt(u32, decl.src_line + 1, dwarf.endian);
                         try diw.writeUleb128(decl.src_column + 1);
                         try diw.writeByte(if (decl.is_pub) DW.ACCESS.public else DW.ACCESS.private);
@@ -2410,7 +2314,7 @@ fn updateConstInner(
                     try diw.writeUleb128(try dwarf.refAbbrevCode(
                         if (loaded_enum.field_names.len > 0) .decl_enum else .decl_empty_enum,
                     ));
-                    try dwarf.sectionOffset(di_nw, parent_ni, 0);
+                    try dwarf.secOffset(di_nw, parent_ni, 0);
                     try diw.writeInt(u32, decl.src_line + 1, dwarf.endian);
                     try diw.writeUleb128(decl.src_column + 1);
                     try diw.writeByte(if (decl.is_pub) DW.ACCESS.public else DW.ACCESS.private);
@@ -2486,7 +2390,11 @@ fn updateConstIncompleteInner(
                     else => break :container .{
                         src_inst,
                         zf,
-                        zf.zir.?.getStructDecl(src_inst.inst).capture_names,
+                        switch (zf.zir.?.instructions.items(.data)[@backingInt(src_inst.inst)].extended.opcode) {
+                            else => unreachable,
+                            .struct_decl => zf.zir.?.getStructDecl(src_inst.inst).capture_names,
+                            .reify_struct => &.{},
+                        },
                         loaded_struct.captures,
                         loaded_struct.fqn,
                         loaded_struct.name_nav,
@@ -2504,7 +2412,11 @@ fn updateConstIncompleteInner(
                 break :container .{
                     src_inst,
                     zf,
-                    zf.zir.?.getUnionDecl(src_inst.inst).capture_names,
+                    switch (zf.zir.?.instructions.items(.data)[@backingInt(src_inst.inst)].extended.opcode) {
+                        else => unreachable,
+                        .union_decl => zf.zir.?.getUnionDecl(src_inst.inst).capture_names,
+                        .reify_union => &.{},
+                    },
                     loaded_union.captures,
                     loaded_union.fqn,
                     loaded_union.name_nav,
@@ -2527,7 +2439,11 @@ fn updateConstIncompleteInner(
                 break :container .{
                     src_inst,
                     zf,
-                    zf.zir.?.getEnumDecl(src_inst.inst).capture_names,
+                    switch (zf.zir.?.instructions.items(.data)[@backingInt(src_inst.inst)].extended.opcode) {
+                        else => unreachable,
+                        .enum_decl => zf.zir.?.getEnumDecl(src_inst.inst).capture_names,
+                        .reify_enum => &.{},
+                    },
                     loaded_enum.captures,
                     loaded_enum.fqn,
                     loaded_enum.name_nav,
@@ -2565,11 +2481,7 @@ fn updateConstIncompleteInner(
                 },
             },
         };
-        const capturing = for (captures.get(ip)) |capture| switch (capture.tag) {
-            .@"comptime", .runtime => break true,
-            .nav_val, .nav_ref => {},
-        } else false;
-        const spec_di = if (false and capturing) try dwarf.getDecl(pt, val) else undefined;
+        const spec_di = if (false and captures.len > 0) try dwarf.getDecl(pt, val) else undefined;
         _ = spec_di;
         if (maybe_name_nav.unwrap()) |name_ni| {
             const name_nav = ip.getNav(name_ni);
@@ -2579,9 +2491,9 @@ fn updateConstIncompleteInner(
                 name_nav.analysis.?.namespace,
             ).owner_type);
             try diw.writeUleb128(try dwarf.refAbbrevCode(
-                if (capturing) .decl_capturing_namespace_struct else .decl_namespace_struct,
+                if (captures.len > 0) .decl_capturing_namespace_struct else .decl_namespace_struct,
             ));
-            try dwarf.sectionOffset(di_nw, parent_ni, 0);
+            try dwarf.secOffset(di_nw, parent_ni, 0);
             try diw.writeInt(u32, decl.src_line + 1, dwarf.endian);
             try diw.writeUleb128(decl.src_column + 1);
             try diw.writeByte(if (decl.is_pub) DW.ACCESS.public else DW.ACCESS.private);
@@ -2594,38 +2506,53 @@ fn updateConstIncompleteInner(
             ).owner_type);
             _ = parent_ni;
             try diw.writeUleb128(try dwarf.refAbbrevCode(
-                if (capturing) .capturing_empty_struct_type else .empty_struct_type,
+                if (captures.len > 0) .capturing_empty_struct_type else .empty_struct_type,
             ));
             try diw.writeUleb128(@backingInt(fi));
             try dwarf.strp(&dwarf.debug_str, di_nw, fqn.toSlice(ip));
         }
         try diw.writeByte(@intFromBool(true));
-        if (capturing) {
-            for (capture_names, captures.get(ip)) |capture_name, capture| switch (capture.unwrap()) {
-                .@"comptime" => |capture_val| {
-                    const ty: Type = .fromInterned(ip.typeOf(capture_val));
-                    const ty_class = ty.classify(zcu);
-                    try diw.writeUleb128(try dwarf.refAbbrevCode(switch (ty_class) {
-                        .no_possible_value => unreachable,
-                        .one_possible_value => .comptime_capture,
-                        .runtime => .comptime_capture_runtime,
-                        .partially_comptime => .comptime_capture_partially_comptime,
-                        .fully_comptime => .comptime_capture_fully_comptime,
-                    }));
-                    try dwarf.strp(&dwarf.debug_str, di_nw, zf.zir.?.nullTerminatedString(capture_name));
-                    try dwarf.refConst(pt, di_nw, ty.toValue());
-                    if (ty_class.hasRuntimeBits()) try dwarf.blockConst(pt, di_nw, .fromInterned(capture_val));
-                    if (ty_class.comptimeOnly()) try dwarf.refConst(pt, di_nw, .fromInterned(capture_val));
-                },
-                .runtime => |capture_ty| {
-                    try diw.writeUleb128(try dwarf.refAbbrevCode(.runtime_capture));
-                    try dwarf.strp(&dwarf.debug_str, di_nw, zf.zir.?.nullTerminatedString(capture_name));
-                    try dwarf.refConst(pt, di_nw, .fromInterned(capture_ty));
-                },
-                .nav_val, .nav_ref => {},
-            };
-            try diw.writeByte(@backingInt(AbbrevCode.null));
-        }
+        for (capture_names, captures.get(ip)) |capture_name, capture| switch (capture.unwrap()) {
+            .@"comptime" => |capture_val| {
+                const ty: Type = .fromInterned(ip.typeOf(capture_val));
+                const ty_class = ty.classify(zcu);
+                try diw.writeUleb128(try dwarf.refAbbrevCode(switch (ty_class) {
+                    .no_possible_value => unreachable,
+                    .one_possible_value => .comptime_capture,
+                    .runtime => .comptime_capture_runtime,
+                    .partially_comptime => .comptime_capture_partially_comptime,
+                    .fully_comptime => .comptime_capture_fully_comptime,
+                }));
+                try dwarf.strp(&dwarf.debug_str, di_nw, zf.zir.?.nullTerminatedString(capture_name));
+                try dwarf.refConst(pt, di_nw, ty.toValue());
+                if (ty_class.hasRuntimeBits()) try dwarf.blockConst(pt, di_nw, .fromInterned(capture_val));
+                if (ty_class.comptimeOnly()) try dwarf.refConst(pt, di_nw, .fromInterned(capture_val));
+            },
+            .runtime => |capture_ty| {
+                try diw.writeUleb128(try dwarf.refAbbrevCode(.runtime_capture));
+                try dwarf.strp(&dwarf.debug_str, di_nw, zf.zir.?.nullTerminatedString(capture_name));
+                try dwarf.refConst(pt, di_nw, .fromInterned(capture_ty));
+            },
+            .nav_val => |capture_nav| {
+                const gi = try dwarf.getGlobal(capture_nav);
+                try diw.writeUleb128(try dwarf.refAbbrevCode(.nav_capture));
+                try dwarf.strp(&dwarf.debug_str, di_nw, zf.zir.?.nullTerminatedString(capture_name));
+                try dwarf.exprLoc(di_nw, .{ .implicit_pointer = .{
+                    .node = gi.get(dwarf).debug_info_ni.unwrap().?,
+                } });
+            },
+            .nav_ref => |capture_nav| {
+                const gi = try dwarf.getGlobal(capture_nav);
+                const capture_name_slice = try zcu.gpa.print("&{s}", .{zf.zir.?.nullTerminatedString(capture_name)});
+                defer zcu.gpa.free(capture_name_slice);
+                try diw.writeUleb128(try dwarf.refAbbrevCode(.nav_capture));
+                try dwarf.strp(&dwarf.debug_str, di_nw, capture_name_slice);
+                try dwarf.exprLoc(di_nw, .{ .stack_value = &.{ .implicit_pointer = .{
+                    .node = gi.get(dwarf).debug_info_ni.unwrap().?,
+                } } });
+            },
+        };
+        if (captures.len > 0) try diw.writeByte(@backingInt(AbbrevCode.null));
     }
     try dwarf.genDebugInfoPadding(diw, diw.unusedCapacityLen());
 }
@@ -2657,7 +2584,7 @@ fn genDeclInner(
                 ip.namespacePtr(loaded_struct.namespace).parent.unwrap().?,
             ).owner_type);
             try diw.writeUleb128(try dwarf.refAbbrevCode(.decl_specification_struct));
-            try dwarf.sectionOffset(di_nw, parent_ni, 0);
+            try dwarf.secOffset(di_nw, parent_ni, 0);
             try diw.writeInt(u32, 0, dwarf.endian);
             try diw.writeUleb128(0);
             try diw.writeByte(DW.ACCESS.public);
@@ -2669,7 +2596,7 @@ fn genDeclInner(
                 ip.namespacePtr(loaded_enum.namespace).parent.unwrap().?,
             ).owner_type);
             try diw.writeUleb128(try dwarf.refAbbrevCode(.decl_specification_enum));
-            try dwarf.sectionOffset(di_nw, parent_ni, 0);
+            try dwarf.secOffset(di_nw, parent_ni, 0);
             try diw.writeInt(u32, 0, dwarf.endian);
             try diw.writeUleb128(0);
             try diw.writeByte(DW.ACCESS.public);
@@ -2681,7 +2608,7 @@ fn genDeclInner(
                 ip.namespacePtr(loaded_union.namespace).parent.unwrap().?,
             ).owner_type);
             try diw.writeUleb128(try dwarf.refAbbrevCode(.decl_specification_union));
-            try dwarf.sectionOffset(di_nw, parent_ni, 0);
+            try dwarf.secOffset(di_nw, parent_ni, 0);
             try diw.writeInt(u32, 0, dwarf.endian);
             try diw.writeUleb128(0);
             try diw.writeByte(DW.ACCESS.public);
@@ -2698,11 +2625,16 @@ pub fn updateLineNumber(
     line: u32,
 ) void {
     const di = dwarf.getDeclIfExists(inst) orelse return;
-    const decl_ni = di.get(dwarf).debug_info_ni.unwrap() orelse return;
-    std.mem.writeInt(u32, decl_ni.slice(mf)[AbbrevCode.decl_size..][0..4], line + 1, dwarf.endian);
+    const decl_ni = di.get(dwarf).debug_info_ni.unwrap().?;
+    std.mem.writeInt(
+        u32,
+        decl_ni.slice(mf)[AbbrevCode.decl_size..][0..4],
+        line + 1,
+        dwarf.endian,
+    );
 }
 
-pub fn lostTracking(dwarf: *Dwarf, diw: *Writer) link.EmitError!void {
+pub fn lostTracking(dwarf: *Dwarf, diw: *std.Io.Writer) link.EmitError!void {
     try diw.writeUleb128(try dwarf.refAbbrevCode(.decl_lost));
 }
 
@@ -2755,17 +2687,23 @@ fn genDebugAbbrev(
     dwarf.debug_abbrev.end = daw.end;
 }
 
-fn sectionOffset(
+pub fn secOffsetSize(dwarf: *Dwarf) usize {
+    return switch (dwarf.format) {
+        .@"32" => 4,
+        .@"64" => 8,
+    };
+}
+fn secOffsetPlaceholder(dwarf: *Dwarf, w: *std.Io.Writer) std.Io.Writer.Error!void {
+    @memset(try w.writableSlice(dwarf.secOffsetSize()), undefined);
+}
+fn secOffset(
     dwarf: *Dwarf,
     nw: *MappedFile.Node.Writer,
     target_ni: MappedFile.Node.Index,
     addend: usize,
 ) link.EmitError!void {
     const offset = nw.interface.end;
-    switch (dwarf.format) {
-        .@"32" => try nw.interface.writeInt(u32, 0, dwarf.endian),
-        .@"64" => try nw.interface.writeInt(u64, 0, dwarf.endian),
-    }
+    try dwarf.secOffsetPlaceholder(&nw.interface);
     const elf = dwarf.lf.cast(.elf2).?;
     try elf.addNodeReloc(nw.ni, offset, target_ni, @bitCast(@as(u64, addend)), switch (dwarf.format) {
         .@"32" => .abs32,
@@ -2773,23 +2711,27 @@ fn sectionOffset(
     });
 }
 
-fn symbolAddress(
+fn addrPlaceholder(dwarf: *Dwarf, w: *std.Io.Writer) std.Io.Writer.Error!void {
+    @memset(try w.writableSlice(@backingInt(dwarf.address_size)), undefined);
+}
+fn addrSym(
     dwarf: *Dwarf,
     nw: *MappedFile.Node.Writer,
     target_si: link.File.SymbolId,
     addend: usize,
 ) link.EmitError!void {
     const offset = nw.interface.end;
-    switch (dwarf.address_size) {
-        else => unreachable,
-        .@"32" => try nw.interface.writeInt(u32, 0, dwarf.endian),
-        .@"64" => try nw.interface.writeInt(u64, 0, dwarf.endian),
-    }
+    try dwarf.addrPlaceholder(&nw.interface);
     const elf = dwarf.lf.cast(.elf2).?;
     try elf.addReloc(@bitCast(nw.ni), offset, target_si, @bitCast(@as(u64, addend)), .absAddr(elf));
 }
 
-fn blockConst(dwarf: *Dwarf, pt: Zcu.PerThread, nw: *MappedFile.Node.Writer, val: Value) link.EmitError!void {
+fn blockConst(
+    dwarf: *Dwarf,
+    pt: Zcu.PerThread,
+    nw: *MappedFile.Node.Writer,
+    val: Value,
+) link.EmitError!void {
     const ty = val.typeOf(pt.zcu);
     const size = ty.abiSize(pt.zcu);
     try nw.interface.writeUleb128(size);
@@ -2804,11 +2746,21 @@ fn blockConst(dwarf: *Dwarf, pt: Zcu.PerThread, nw: *MappedFile.Node.Writer, val
     assert(start + size == nw.interface.end);
 }
 
-fn refConst(dwarf: *Dwarf, pt: Zcu.PerThread, nw: *MappedFile.Node.Writer, val: Value) link.EmitError!void {
-    try dwarf.sectionOffset(nw, Const.get(try dwarf.getConst(pt, val), dwarf).debug_info_ni.unwrap().?, 0);
+fn refConst(
+    dwarf: *Dwarf,
+    pt: Zcu.PerThread,
+    nw: *MappedFile.Node.Writer,
+    val: Value,
+) link.EmitError!void {
+    try dwarf.secOffset(nw, Const.get(try dwarf.getConst(pt, val), dwarf).debug_info_ni.unwrap().?, 0);
 }
 
-fn bigIntConstValue(dwarf: *Dwarf, diw: *Writer, ty: Type, big_int: std.math.big.int.Const) link.EmitError!void {
+fn bigIntConstValue(
+    dwarf: *Dwarf,
+    diw: *std.Io.Writer,
+    ty: Type,
+    big_int: std.math.big.int.Const,
+) link.EmitError!void {
     const zcu = dwarf.lf.comp.zcu.?;
     const signedness = switch (ty.toIntern()) {
         .comptime_int_type => .signed,
@@ -2849,7 +2801,12 @@ fn bigIntConstValue(dwarf: *Dwarf, diw: *Writer, ty: Type, big_int: std.math.big
     }
 }
 
-fn enumConstValue(dwarf: *Dwarf, diw: *Writer, loaded_enum: InternPool.LoadedEnumType, field_index: usize) link.EmitError!void {
+fn enumConstValue(
+    dwarf: *Dwarf,
+    diw: *std.Io.Writer,
+    loaded_enum: InternPool.LoadedEnumType,
+    field_index: usize,
+) link.EmitError!void {
     const zcu = dwarf.lf.comp.zcu.?;
     var big_int_space: Value.BigIntSpace = undefined;
     try dwarf.bigIntConstValue(diw, .fromInterned(loaded_enum.int_tag_type), if (loaded_enum.field_values.len > 0)
@@ -2858,10 +2815,19 @@ fn enumConstValue(dwarf: *Dwarf, diw: *Writer, loaded_enum: InternPool.LoadedEnu
         std.math.big.int.Mutable.init(&big_int_space.limbs, field_index).toConst());
 }
 
+fn exprLoc(dwarf: *Dwarf, nw: *MappedFile.Node.Writer, loc: Loc) link.EmitError!void {
+    var buf: [@max(8, std.atomic.cache_line)]u8 = undefined;
+    var dw: std.Io.Writer.Discarding = .init(&buf);
+    try loc.write(.{ .io = &dw.writer }, dwarf);
+
+    try nw.interface.writeUleb128(dw.fullCount());
+    try loc.write(.{ .mf = nw }, dwarf);
+}
+
 fn strp(dwarf: *Dwarf, s: *Str, nw: *MappedFile.Node.Writer, str: []const u8) link.EmitError!void {
     const comp = dwarf.lf.comp;
     const mf = &dwarf.lf.cast(.elf2).?.mf;
-    try dwarf.sectionOffset(nw, s.ni.unwrap().?, s.get(comp.gpa, mf, str) catch |err| switch (err) {
+    try dwarf.secOffset(nw, s.ni.unwrap().?, s.get(comp.gpa, mf, str) catch |err| switch (err) {
         error.MappedFileIo => return comp.link_diags.fail("failed to write output file: {t}", .{
             mf.io_err.?,
         }),
@@ -3013,6 +2979,7 @@ pub const AbbrevCode = enum {
     comptime_capture_partially_comptime,
     comptime_capture_fully_comptime,
     runtime_capture,
+    nav_capture,
     builtin_extern_nullary_func,
     builtin_extern_func,
     builtin_extern_var,
@@ -3080,6 +3047,7 @@ pub const AbbrevCode = enum {
         children: bool = false,
         attrs: []const Attr = &.{},
     }).init(.{
+        .null = undefined,
         .pad_1 = .{
             .tag = .ZIG_padding,
         },
@@ -3937,6 +3905,13 @@ pub const AbbrevCode = enum {
                 .{ .type, .ref_addr },
             },
         },
+        .nav_capture = .{
+            .tag = .template_value_parameter,
+            .attrs = &.{
+                .{ .name, .strp },
+                .{ .location, .exprloc },
+            },
+        },
         .builtin_extern_nullary_func = .{
             .tag = .subprogram,
             .attrs = &.{
@@ -4204,20 +4179,19 @@ pub const AbbrevCode = enum {
                 .{ .ZIG_comptime_value, .ref_addr },
             },
         },
-        .null = undefined,
     });
 };
 
 pub fn uleb128Size(value: anytype) u32 {
-    var buf: [64]u8 = undefined;
-    var dw: Writer.Discarding = .init(&buf);
+    var buf: [std.atomic.cache_line]u8 = undefined;
+    var dw: std.Io.Writer.Discarding = .init(&buf);
     dw.writer.writeUleb128(value) catch unreachable;
     return @intCast(dw.fullCount());
 }
 
 pub fn sleb128Size(value: anytype) u32 {
-    var buf: [64]u8 = undefined;
-    var dw: Writer.Discarding = .init(&buf);
+    var buf: [std.atomic.cache_line]u8 = undefined;
+    var dw: std.Io.Writer.Discarding = .init(&buf);
     dw.writer.writeSleb128(value) catch unreachable;
     return @intCast(dw.fullCount());
 }
@@ -4237,5 +4211,4 @@ const std = @import("std");
 const target_info = @import("../target.zig");
 const Type = @import("../Type.zig");
 const Value = @import("../Value.zig");
-const Writer = std.Io.Writer;
 const Zcu = @import("../Zcu.zig");
