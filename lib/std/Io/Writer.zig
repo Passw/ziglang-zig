@@ -1231,6 +1231,18 @@ pub fn printValue(
                 },
                 else => {},
             },
+            'q' => switch (fmt[1]) {
+                'f' => {
+                    try w.writeByte('"');
+                    var buffer: [64]u8 = undefined;
+                    var escaping_writer: std.zig.StringEscapeWriter = .init(w, &buffer);
+                    try value.format(&escaping_writer.writer);
+                    try escaping_writer.writer.flush();
+                    try w.writeByte('"');
+                    return;
+                },
+                else => {},
+            },
             else => {},
         },
         3 => if (fmt[0] == 'b' and fmt[1] == '6' and fmt[2] == '4') switch (@typeInfo(T)) {
@@ -2141,6 +2153,11 @@ test "printFloat with comptime_float" {
 test "{q} format string" {
     const data: []const u8 = "i\tlike\"cheese\x00\x05cheese";
     try testing.expectFmt("hello \"i\\tlike\\\"cheese\\x00\\x05cheese\" world", "hello {q} world", .{data});
+}
+
+test "{qf} format string" {
+    const data: []const u8 = "😎";
+    try testing.expectFmt("hello \"@\\\"😎\\\"\" world", "hello {qf} world", .{std.zig.fmtId(data)});
 }
 
 fn testPrintIntCase(expected: []const u8, value: anytype, base: u8, case: std.fmt.Case, options: std.fmt.Options) !void {
