@@ -668,6 +668,41 @@ fn offsetPointer(cg: *CodeGen, ptr: WValue, offset: u64) InnerError!WValue {
     };
 }
 
+const PointerOffsetOp = enum { add, sub };
+
+/// The offset may only be known at runtime. Base pointer must be already on the stack. Result is left on it also.
+fn emitScaledPointerOffset(cg: *CodeGen, offset: WValue, scale: u64, op: PointerOffsetOp) InnerError!void {
+    if (scale == 0 or switch (offset) {
+        .imm32 => |imm| imm == 0,
+        .imm64 => |imm| imm == 0,
+        else => false,
+    }) return;
+
+    try cg.emitWValue(offset);
+    switch (cg.ptr_size) {
+        .wasm32 => {
+            if (scale != 1) {
+                try cg.addImm32(@intCast(scale));
+                try cg.addTag(.i32_mul);
+            }
+            try cg.addTag(switch (op) {
+                .add => .i32_add,
+                .sub => .i32_sub,
+            });
+        },
+        .wasm64 => {
+            if (scale != 1) {
+                try cg.addImm64(scale);
+                try cg.addTag(.i64_mul);
+            }
+            try cg.addTag(switch (op) {
+                .add => .i64_add,
+                .sub => .i64_sub,
+            });
+        },
+    }
+}
+
 /// Writes the bytecode depending on the given `WValue` in `val`
 fn emitWValue(cg: *CodeGen, value: WValue) InnerError!void {
     switch (value) {
@@ -1187,7 +1222,7 @@ fn emitMemoryCopy(cg: *CodeGen, dst: WValue, src: WValue, len: WValue) !void {
 }
 
 fn memcpy(cg: *CodeGen, dst: WValue, src: WValue, len: WValue) !void {
-    if (cg.target.cpu.has(.wasm, .bulk_memory)) {
+    if (cg.target.cpu.has(.wasm, .bulk_memory_opt)) {
         try cg.emitMemoryCopy(dst, src, len);
         return;
     }
@@ -1200,7 +1235,7 @@ fn memcpy(cg: *CodeGen, dst: WValue, src: WValue, len: WValue) !void {
 }
 
 fn memmove(cg: *CodeGen, dst: WValue, src: WValue, len: WValue) !void {
-    if (cg.target.cpu.has(.wasm, .bulk_memory)) {
+    if (cg.target.cpu.has(.wasm, .bulk_memory_opt)) {
         try cg.emitMemoryCopy(dst, src, len);
         return;
     }
@@ -1309,10 +1344,7 @@ fn genInst(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
             const elem_size = elem_ty.abiSize(zcu);
 
             try cg.emitWValue(vec_ptr);
-            try cg.emitWValue(elem_idx);
-            try cg.addImm32(@intCast(elem_size));
-            try cg.addTag(.i32_mul);
-            try cg.addTag(.i32_add);
+            try cg.emitScaledPointerOffset(elem_idx, elem_size, .add);
             const ptr = try WValue.toLocal(.stack, cg, Type.usize);
 
             try cg.store(ptr, elem_val, elem_ty, .{});
@@ -2258,14 +2290,16 @@ fn airStore(cg: *CodeGen, inst: Air.Inst.Index, safety: bool) InnerError!void {
     const bin_op = cg.air.instructions.items(.data)[@backingInt(inst)].bin_op;
 
     const lhs = try cg.resolveInst(bin_op.lhs);
-    const rhs = try cg.resolveInst(bin_op.rhs);
     const ptr_ty = cg.typeOf(bin_op.lhs);
     const ptr_info = ptr_ty.ptrInfo(zcu);
     const elem_ty = ptr_ty.childType(zcu);
+    const rhs_is_undef = if (bin_op.rhs.toInterned()) |i| Value.fromInterned(i).isUndef(zcu) else false;
 
-    if (!safety and bin_op.rhs == .undef) {
+    if (!safety and rhs_is_undef) {
         return cg.finishAir(inst, .none, &.{ bin_op.lhs, bin_op.rhs });
     }
+
+    const rhs = try cg.resolveInst(bin_op.rhs);
 
     const offset: u64 = switch (ptr_info.flags.vector_index) {
         .none => offset: {
@@ -2274,6 +2308,13 @@ fn airStore(cg: *CodeGen, inst: Air.Inst.Index, safety: bool) InnerError!void {
         },
         else => |index| @backingInt(index) * elem_ty.abiSize(zcu),
     };
+
+    if (safety and rhs_is_undef and isByRef(elem_ty, zcu, cg.target)) {
+        const dst = try cg.offsetPointer(lhs, offset);
+        try cg.memset(.u8, dst, .{ .imm32 = @intCast(elem_ty.abiSize(zcu)) }, .{ .imm32 = 0xaa });
+        return cg.finishAir(inst, .none, &.{ bin_op.lhs, bin_op.rhs });
+    }
+
     try cg.store(lhs, rhs, elem_ty, .{
         .offset = offset,
         .alignment = ptr_ty.ptrAlignment(zcu),
@@ -6368,10 +6409,7 @@ fn airSliceElemVal(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     _ = try cg.load(slice, .usize, .{});
 
     // calculate index into slice
-    try cg.emitWValue(index);
-    try cg.addImm32(@intCast(elem_size));
-    try cg.addTag(.i32_mul);
-    try cg.addTag(.i32_add);
+    try cg.emitScaledPointerOffset(index, elem_size, .add);
 
     const elem_result = try cg.load(.stack, elem_ty, .{});
 
@@ -6392,10 +6430,7 @@ fn airSliceElemPtr(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     _ = try cg.load(slice, .usize, .{});
 
     // calculate index into slice
-    try cg.emitWValue(index);
-    try cg.addImm32(@intCast(elem_size));
-    try cg.addTag(.i32_mul);
-    try cg.addTag(.i32_add);
+    try cg.emitScaledPointerOffset(index, elem_size, .add);
 
     return cg.finishAir(inst, .stack, &.{ bin_op.lhs, bin_op.rhs });
 }
@@ -6454,10 +6489,7 @@ fn airPtrElemVal(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     }
 
     // calculate index into slice
-    try cg.emitWValue(index);
-    try cg.addImm32(@intCast(elem_size));
-    try cg.addTag(.i32_mul);
-    try cg.addTag(.i32_add);
+    try cg.emitScaledPointerOffset(index, elem_size, .add);
 
     const elem_result = try cg.load(.stack, elem_ty, .{});
 
@@ -6484,15 +6516,12 @@ fn airPtrElemPtr(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     }
 
     // calculate index into ptr
-    try cg.emitWValue(index);
-    try cg.addImm32(@intCast(elem_size));
-    try cg.addTag(.i32_mul);
-    try cg.addTag(.i32_add);
+    try cg.emitScaledPointerOffset(index, elem_size, .add);
 
     return cg.finishAir(inst, .stack, &.{ bin_op.lhs, bin_op.rhs });
 }
 
-fn airPtrBinOp(cg: *CodeGen, inst: Air.Inst.Index, op: enum { add, sub }) InnerError!void {
+fn airPtrBinOp(cg: *CodeGen, inst: Air.Inst.Index, op: PointerOffsetOp) InnerError!void {
     const zcu = cg.pt.zcu;
     const ty_pl = cg.air.instructions.items(.data)[@backingInt(inst)].ty_pl;
     const bin_op = cg.air.extraData(Air.Bin, ty_pl.payload).data;
@@ -6506,26 +6535,7 @@ fn airPtrBinOp(cg: *CodeGen, inst: Air.Inst.Index, op: enum { add, sub }) InnerE
     };
 
     try cg.emitWValue(ptr);
-    try cg.emitWValue(offset);
-
-    switch (cg.ptr_size) {
-        .wasm32 => {
-            try cg.addImm32(@intCast(pointee_ty.abiSize(zcu)));
-            try cg.addTag(.i32_mul);
-            try cg.addTag(switch (op) {
-                .add => .i32_add,
-                .sub => .i32_sub,
-            });
-        },
-        .wasm64 => {
-            try cg.addImm64(pointee_ty.abiSize(zcu));
-            try cg.addTag(.i64_mul);
-            try cg.addTag(switch (op) {
-                .add => .i64_add,
-                .sub => .i64_sub,
-            });
-        },
-    }
+    try cg.emitScaledPointerOffset(offset, pointee_ty.abiSize(zcu), op);
 
     return cg.finishAir(inst, .stack, &.{ bin_op.lhs, bin_op.rhs });
 }
@@ -6559,19 +6569,24 @@ fn airMemset(cg: *CodeGen, inst: Air.Inst.Index, safety: bool) InnerError!void {
 }
 
 /// Sets a region of memory at `ptr` to the value of `value`
-/// When the user has enabled the bulk_memory feature, we lower
+/// When the user has enabled the bulk_memory_opt feature, we lower
 /// this to wasm's memset instruction. When the feature is not present,
 /// we implement it manually.
 fn memset(cg: *CodeGen, elem_ty: Type, ptr: WValue, len: WValue, value: WValue) InnerError!void {
     const zcu = cg.pt.zcu;
     const abi_size = @as(u32, @intCast(elem_ty.abiSize(zcu)));
-
-    // When bulk_memory is enabled, we lower it to wasm's memset instruction.
+    const len_known_neq_0 = switch (len) {
+        .imm32 => |imm| if (imm != 0) true else return,
+        .imm64 => |imm| if (imm != 0) true else return,
+        else => false,
+    };
+    // When bulk_memory_opt is enabled, we lower it to wasm's memset instruction.
     // If not, we lower it ourselves.
-    if (cg.target.cpu.has(.wasm, .bulk_memory) and abi_size == 1) {
+    if (cg.target.cpu.has(.wasm, .bulk_memory_opt) and abi_size == 1) {
         const len0_ok = cg.target.cpu.has(.wasm, .nontrapping_bulk_memory_len0);
+        const emit_check = !(len0_ok or len_known_neq_0);
 
-        if (!len0_ok) {
+        if (emit_check) {
             try cg.startBlock(.block, .empty);
 
             // Even if `len` is zero, the spec requires an implementation to trap if `ptr + len` is
@@ -6592,7 +6607,7 @@ fn memset(cg: *CodeGen, elem_ty: Type, ptr: WValue, len: WValue, value: WValue) 
         try cg.emitWValue(len);
         try cg.addExtended(.memory_fill);
 
-        if (!len0_ok) {
+        if (emit_check) {
             try cg.endBlock();
         }
 
@@ -6684,10 +6699,7 @@ fn airArrayElemVal(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
 
     if (isByRef(array_ty, zcu, cg.target)) {
         try cg.emitWValue(array);
-        try cg.emitWValue(index);
-        try cg.addImm32(@intCast(elem_size));
-        try cg.addTag(.i32_mul);
-        try cg.addTag(.i32_add);
+        try cg.emitScaledPointerOffset(index, elem_size, .add);
     } else {
         assert(array_ty.zigTypeTag(zcu) == .vector);
 
@@ -6717,10 +6729,7 @@ fn airArrayElemVal(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
 
                 // Is a non-unrolled vector (v128)
                 try cg.emitWValue(stack_vec);
-                try cg.emitWValue(index);
-                try cg.addImm32(@intCast(elem_size));
-                try cg.addTag(.i32_mul);
-                try cg.addTag(.i32_add);
+                try cg.emitScaledPointerOffset(index, elem_size, .add);
             },
         }
     }
@@ -7249,19 +7258,7 @@ fn airErrorName(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     // Lowers to a i32.const or i64.const with the error table memory address.
     cg.error_name_table_ref_count += 1;
     try cg.addTag(.error_name_table_ref);
-    try cg.emitWValue(operand);
-    switch (cg.ptr_size) {
-        .wasm32 => {
-            try cg.addImm32(@intCast(abi_size));
-            try cg.addTag(.i32_mul);
-            try cg.addTag(.i32_add);
-        },
-        .wasm64 => {
-            try cg.addImm64(abi_size);
-            try cg.addTag(.i64_mul);
-            try cg.addTag(.i64_add);
-        },
-    }
+    try cg.emitScaledPointerOffset(operand, abi_size, .add);
 
     return cg.finishAir(inst, .stack, &.{un_op});
 }
@@ -7427,19 +7424,7 @@ fn airTagName(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     try cg.addInst(.{ .tag = .enum_tag_name_table_ref, .data = .{ .ip_index = enum_ty.toIntern() } });
     try cg.emitWValue(operand);
     try cg.addInst(.{ .tag = .call_tag_index, .data = .{ .ip_index = enum_ty.toIntern() } });
-
-    switch (cg.ptr_size) {
-        .wasm32 => {
-            try cg.addImm32(@intCast(8));
-            try cg.addTag(.i32_mul);
-            try cg.addTag(.i32_add);
-        },
-        .wasm64 => {
-            try cg.addImm64(8);
-            try cg.addTag(.i64_mul);
-            try cg.addTag(.i64_add);
-        },
-    }
+    try cg.emitScaledPointerOffset(.stack, 8, .add);
 
     return cg.finishAir(inst, .stack, &.{un_op});
 }
