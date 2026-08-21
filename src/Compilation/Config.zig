@@ -487,6 +487,7 @@ pub fn resolve(options: Options) ResolveError!Config {
     const root_strip = b: {
         if (options.root_strip) |x| break :b x;
         if (root_optimize_mode == .small) break :b true;
+        if (target.cpu.arch == .spork8) break :b true;
         if (!target_util.hasDebugInfo(target)) break :b true;
         break :b false;
     };

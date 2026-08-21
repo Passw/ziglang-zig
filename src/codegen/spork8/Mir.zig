@@ -27,6 +27,8 @@ pub const Inst = struct {
         load_i = 0x11,
         /// index
         jump = 0x68,
+        /// nothing
+        halt = 0xE3,
     };
 
     /// All instructions contain a 4-byte payload, which is contained within
@@ -35,6 +37,7 @@ pub const Inst = struct {
     pub const Data = union {
         imm8: u8,
         index: Index,
+        nothing: void,
 
         comptime {
             switch (builtin.mode) {

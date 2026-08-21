@@ -189,8 +189,6 @@ fn genInst(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     return switch (air_tags[@intFromEnum(inst)]) {
         .inferred_alloc, .inferred_alloc_comptime => unreachable,
 
-        .unreach => cg.airUnreachable(inst),
-
         .add,
         .add_sat,
         .add_wrap,
@@ -257,7 +255,6 @@ fn genInst(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
         .alloc,
         .arg,
         .block,
-        .trap,
         .breakpoint,
         .br,
         .repeat,
@@ -436,6 +433,9 @@ fn genInst(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
         .legalize_compiler_rt_call,
         => |tag| return cg.fail("TODO: implement spork8 inst: {s}", .{@tagName(tag)}),
 
+        .unreach => cg.airUnreachable(inst),
+        .trap => cg.airTrap(inst),
+
         .work_item_id,
         .work_group_size,
         .work_group_id,
@@ -446,6 +446,19 @@ fn genInst(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
 fn airUnreachable(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     _ = cg;
     _ = inst;
+}
+
+fn airTrap(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
+    _ = inst;
+    try cg.addTag(.halt);
+}
+
+pub fn addInst(cg: *CodeGen, inst: Mir.Inst) error{OutOfMemory}!void {
+    try cg.mir_instructions.append(cg.gpa, inst);
+}
+
+pub fn addTag(cg: *CodeGen, tag: Mir.Inst.Tag) error{OutOfMemory}!void {
+    try cg.addInst(.{ .tag = tag, .data = .{ .nothing = {} } });
 }
 
 fn fail(cg: *CodeGen, comptime fmt: []const u8, args: anytype) error{ OutOfMemory, AlreadyReported } {

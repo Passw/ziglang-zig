@@ -26,6 +26,8 @@ base: link.File,
 mir_instructions: std.MultiArrayList(Mir.Inst) = .{},
 /// Corresponds to `mir_instructions`.
 mir_extra: std.ArrayListUnmanaged(u32) = .empty,
+/// When the key is an enum type, this represents a `@tagName` function.
+zcu_funcs: std.array_hash_map.Auto(InternPool.Index, ZcuFunc) = .empty,
 
 pub fn open(
     arena: Allocator,
@@ -88,17 +90,73 @@ pub fn updateFunc(
     any_mir: *const codegen.AnyMir,
 ) !void {
     dev.check(.spork8_backend);
-    // This linker implementation only works with codegen backend `.stage2_wasm`.
+    // This linker implementation only works with codegen backend `.stage2_spork8`.
     const mir = &any_mir.spork8;
     const zcu = pt.zcu;
     const gpa = zcu.gpa;
     const ip = &zcu.intern_pool;
     const owner_nav = zcu.funcInfo(func_index).owner_nav;
-    _ = gpa;
-    _ = mir;
-    _ = spork8;
+
     log.debug("updateFunc {f}", .{ip.getNav(owner_nav).fqn.fmt(ip)});
+
+    // For Spork8, we do not lower the MIR to code just yet. That lowering happens during `flush`,
+    // after garbage collection, which can affect function and global indexes, which affects the
+    // LEB integer encoding, which affects the output binary size.
+
+    // However, we do move the MIR into a more efficient in-memory representation, where the arrays
+    // for all functions are packed together rather than keeping them each in their own `Mir`.
+    const mir_instructions_off: u32 = @intCast(spork8.mir_instructions.len);
+    const mir_extra_off: u32 = @intCast(spork8.mir_extra.items.len);
+    {
+        // Copying MultiArrayList data is a little non-trivial. Resize, then memcpy both slices.
+        const old_len = spork8.mir_instructions.len;
+        try spork8.mir_instructions.resize(gpa, old_len + mir.instructions.len);
+        const dest_slice = spork8.mir_instructions.slice().subslice(old_len, mir.instructions.len);
+        const src_slice = mir.instructions;
+        @memcpy(dest_slice.items(.tag), src_slice.items(.tag));
+        @memcpy(dest_slice.items(.data), src_slice.items(.data));
+    }
+    try spork8.mir_extra.appendSlice(gpa, mir.extra);
+
+    try spork8.zcu_funcs.ensureUnusedCapacity(gpa, 1);
+
+    // This converts AIR to MIR but does not yet lower to Spork8 code.
+    spork8.zcu_funcs.putAssumeCapacity(func_index, .{ .function = .{
+        .instructions_off = mir_instructions_off,
+        .instructions_len = @intCast(mir.instructions.len),
+        .extra_off = mir_extra_off,
+        .extra_len = @intCast(mir.extra.len),
+    } });
 }
+
+pub const ZcuFunc = union {
+    function: Function,
+
+    pub const Function = extern struct {
+        /// Index into `Spork8.mir_instructions`.
+        instructions_off: u32,
+        /// This is unused except for as a safety slice bound and could be removed.
+        instructions_len: u32,
+        /// Index into `Spork8.mir_extra`.
+        extra_off: u32,
+        /// This is unused except for as a safety slice bound and could be removed.
+        extra_len: u32,
+    };
+
+    /// Index into `Spork8.zcu_funcs`.
+    /// Note that swapRemove is sometimes performed on `zcu_funcs`.
+    pub const Index = enum(u32) {
+        _,
+
+        pub fn key(i: @This(), spork8: *const Spork8) *InternPool.Index {
+            return &spork8.zcu_funcs.keys()[@backingInt(i)];
+        }
+
+        pub fn value(i: @This(), spork8: *const Spork8) *ZcuFunc {
+            return &spork8.zcu_funcs.values()[@backingInt(i)];
+        }
+    };
+};
 
 // Generate code for the "Nav", storing it in memory to be later written to
 // the file on flush().
@@ -172,11 +230,34 @@ pub fn flush(
 ) link.Error!void {
     const sub_prog_node = prog_node.start("Spork8 Flush", 0);
     defer sub_prog_node.end();
+    const io = spork8.base.comp.io;
+    const diags = &spork8.base.comp.link_diags;
 
-    _ = spork8;
     _ = arena;
     _ = tid;
-    log.debug("TODO implement flush", .{});
+
+    // Finally, write the entire binary into the file.
+    var buffer: [1000]u8 = undefined;
+    var file_writer = spork8.base.file.?.writer(io, &buffer);
+    mirToMC(spork8, &file_writer.interface) catch |err| switch (err) {
+        error.WriteFailed => return diags.fail("failed writing to file: {t}", .{file_writer.err.?}),
+    };
+    file_writer.end() catch |err| switch (err) {
+        error.WriteFailed => return diags.fail("failed writing to file: {t}", .{file_writer.err.?}),
+        else => |e| return diags.fail("failed writing to file: {t}", .{e}),
+    };
+}
+
+fn mirToMC(spork8: *Spork8, w: *Io.Writer) !void {
+    for (spork8.mir_instructions.items(.tag)) |tag| {
+        switch (tag) {
+            .set_page_i => @panic("TODO"),
+            .set_addr_i => @panic("TODO"),
+            .load_i => @panic("TODO"),
+            .jump => @panic("TODO"),
+            .halt => try w.writeByte(@backingInt(tag)),
+        }
+    }
 }
 
 pub fn prelink(spork8: *Spork8, prog_node: std.Progress.Node) link.Error!void {
