@@ -988,9 +988,7 @@ pub fn lower(emit: *Emit) Error!void {
 /// Asserts 20 unused capacity.
 fn encodeMemArg(code: *ArrayList(u8), mem_arg: Mir.MemArg) void {
     assert(code.unusedCapacitySlice().len >= 20);
-    // Wasm encodes alignment as power of 2, rather than natural alignment.
-    const encoded_alignment = @ctz(mem_arg.alignment);
-    writeUleb128(code, encoded_alignment);
+    writeUleb128(code, @backingInt(mem_arg.alignment));
     writeUleb128(code, mem_arg.offset);
 }
 
