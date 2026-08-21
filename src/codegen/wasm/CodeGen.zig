@@ -271,23 +271,16 @@ const WValue = union(enum) {
     /// pointing to where the value lives.
     stack_offset: struct {
         /// Contains the actual value of the offset
-        value: u32,
-        /// The amount of instructions referencing this `WValue`
-        references: u32,
+        value: u64,
     },
 
-    /// Returns the offset from the bottom of the stack. This is useful when
-    /// we use the load or store instruction to ensure we retrieve the value
-    /// from the correct position, rather than the value that lives at the
-    /// bottom of the stack. For instances where `WValue` is not `stack_value`
-    /// this will return 0, which allows us to simply call this function for all
-    /// loads and stores without requiring checks everywhere.
-    fn offset(value: WValue) u32 {
-        switch (value) {
-            .stack_offset => |stack_offset| return stack_offset.value,
+    /// Returns the offset from the bottom of the stack.
+    fn memOffset(value: WValue) u64 {
+        return switch (value) {
+            .stack_offset => |stack_offset| stack_offset.value,
             .dead => unreachable,
-            else => return 0,
-        }
+            else => 0,
+        };
     }
 
     /// Promotes a `WValue` to a local when given value is on top of the stack.
@@ -651,6 +644,30 @@ fn genBlockType(ty: Type, zcu: *const Zcu, target: *const std.Target) std.wasm.B
     };
 }
 
+/// Returns `ptr` with `offset` applied.
+fn offsetPointer(cg: *CodeGen, ptr: WValue, offset: u64) InnerError!WValue {
+    if (offset == 0) return ptr;
+    return switch (ptr) {
+        .stack_offset => |stack_offset| .{ .stack_offset = .{
+            .value = stack_offset.value + offset,
+        } },
+        else => result: {
+            try cg.emitWValue(ptr);
+            switch (cg.ptr_size) {
+                .wasm32 => {
+                    try cg.addImm32(@intCast(offset));
+                    try cg.addTag(.i32_add);
+                },
+                .wasm64 => {
+                    try cg.addImm64(offset);
+                    try cg.addTag(.i64_add);
+                },
+            }
+            break :result .stack;
+        },
+    };
+}
+
 /// Writes the bytecode depending on the given `WValue` in `val`
 fn emitWValue(cg: *CodeGen, value: WValue) InnerError!void {
     switch (value) {
@@ -718,7 +735,18 @@ fn emitWValue(cg: *CodeGen, value: WValue) InnerError!void {
                 });
             }
         },
-        .stack_offset => try cg.addLocal(.local_get, cg.bottom_stack_value.local.value), // caller must ensure to address the offset
+        .stack_offset => |stack_offset| {
+            try cg.emitWValue(cg.bottom_stack_value);
+            _ = try cg.offsetPointer(.stack, stack_offset.value);
+        },
+    }
+}
+
+/// Emits the base address for a memory instruction.
+fn emitMemBase(cg: *CodeGen, ptr: WValue) InnerError!void {
+    switch (ptr) {
+        .stack_offset => try cg.addLocal(.local_get, cg.bottom_stack_value.local.value),
+        else => try cg.emitWValue(ptr),
     }
 }
 
@@ -989,7 +1017,7 @@ pub fn firstParamSRet(
 /// it matches the ABI.
 fn lowerArg(cg: *CodeGen, cc: std.lang.CallingConvention, ty: Type, value: WValue) !void {
     if (cc != .wasm_mvp) {
-        return cg.lowerToStack(value);
+        return cg.emitWValue(value);
     }
 
     const zcu = cg.pt.zcu;
@@ -997,7 +1025,7 @@ fn lowerArg(cg: *CodeGen, cc: std.lang.CallingConvention, ty: Type, value: WValu
     switch (abi.classifyType(ty, zcu, cg.target)) {
         .direct => |scalar_ty| {
             if (!isByRef(ty, zcu, cg.target)) {
-                return cg.lowerToStack(value);
+                return cg.emitWValue(value);
             } else {
                 _ = try cg.load(value, scalar_ty, .{});
             }
@@ -1005,15 +1033,16 @@ fn lowerArg(cg: *CodeGen, cc: std.lang.CallingConvention, ty: Type, value: WValu
         .double_i64 => {
             assert(ty.abiSize(zcu) == 16);
             // in this case we have an integer or float that must be lowered as 2 i64's.
-            try cg.emitWValue(value);
-            try cg.addMemArg(.i64_load, .{ .offset = value.offset(), .alignment = .@"8" });
-            try cg.emitWValue(value);
-            try cg.addMemArg(.i64_load, .{ .offset = value.offset() + 8, .alignment = .@"8" });
+            const base_offset = value.memOffset();
+            try cg.emitMemBase(value);
+            try cg.addMemArg(.i64_load, .{ .offset = base_offset, .alignment = .@"8" });
+            try cg.emitMemBase(value);
+            try cg.addMemArg(.i64_load, .{ .offset = base_offset + 8, .alignment = .@"8" });
         },
         .indirect => {
             const stack_copy = try cg.allocStack(ty);
             try cg.store(stack_copy, value, ty, .{});
-            return cg.lowerToStack(stack_copy);
+            return cg.emitWValue(stack_copy);
         },
         .unrolled => |vector| {
             const elem_size = vector.elem_type.abiSize(zcu);
@@ -1021,30 +1050,6 @@ fn lowerArg(cg: *CodeGen, cc: std.lang.CallingConvention, ty: Type, value: WValu
                 _ = try cg.load(value, vector.elem_type, .{ .offset = index * elem_size });
             }
         },
-    }
-}
-
-/// Lowers a `WValue` to the stack. This means when the `value` results in
-/// `.stack_offset` we calculate the pointer of this offset and use that.
-/// The value is left on the stack, and not stored in any temporary.
-fn lowerToStack(cg: *CodeGen, value: WValue) !void {
-    switch (value) {
-        .stack_offset => |offset| {
-            try cg.emitWValue(value);
-            if (offset.value > 0) {
-                switch (cg.ptr_size) {
-                    .wasm32 => {
-                        try cg.addImm32(offset.value);
-                        try cg.addTag(.i32_add);
-                    },
-                    .wasm64 => {
-                        try cg.addImm64(offset.value);
-                        try cg.addTag(.i64_add);
-                    },
-                }
-            }
-        },
-        else => try cg.emitWValue(value),
     }
 }
 
@@ -1113,7 +1118,7 @@ fn allocStackBytes(cg: *CodeGen, size: u32, alignment: Alignment) !WValue {
     const offset: u32 = @intCast(alignment.forward(cg.stack_size));
     defer cg.stack_size = offset + size;
 
-    return .{ .stack_offset = .{ .value = offset, .references = 1 } };
+    return .{ .stack_offset = .{ .value = offset } };
 }
 
 /// From a given AIR instruction generates a pointer to the stack where
@@ -1141,7 +1146,7 @@ fn allocStackPtr(cg: *CodeGen, inst: Air.Inst.Index) !WValue {
     const offset: u32 = @intCast(abi_alignment.forward(cg.stack_size));
     defer cg.stack_size = offset + abi_size;
 
-    return .{ .stack_offset = .{ .value = offset, .references = 1 } };
+    return .{ .stack_offset = .{ .value = offset } };
 }
 
 fn emitMemoryCopy(cg: *CodeGen, dst: WValue, src: WValue, len: WValue) !void {
@@ -1171,8 +1176,8 @@ fn emitMemoryCopy(cg: *CodeGen, dst: WValue, src: WValue, len: WValue) !void {
         try cg.addLabel(.br_if, 0);
     }
 
-    try cg.lowerToStack(dst);
-    try cg.lowerToStack(src);
+    try cg.emitWValue(dst);
+    try cg.emitWValue(src);
     try cg.emitWValue(len);
     try cg.addExtended(.memory_copy);
 
@@ -1187,8 +1192,8 @@ fn memcpy(cg: *CodeGen, dst: WValue, src: WValue, len: WValue) !void {
         return;
     }
 
-    try cg.lowerToStack(dst);
-    try cg.lowerToStack(src);
+    try cg.emitWValue(dst);
+    try cg.emitWValue(src);
     try cg.emitWValue(len);
     try cg.addCallIntrinsic(.memcpy);
     try cg.addTag(.drop);
@@ -1200,8 +1205,8 @@ fn memmove(cg: *CodeGen, dst: WValue, src: WValue, len: WValue) !void {
         return;
     }
 
-    try cg.lowerToStack(dst);
-    try cg.lowerToStack(src);
+    try cg.emitWValue(dst);
+    try cg.emitWValue(src);
     try cg.emitWValue(len);
     try cg.addCallIntrinsic(.memmove);
     try cg.addTag(.drop);
@@ -1283,34 +1288,6 @@ pub fn determineSimdStoreStrategy(ty: Type, zcu: *const Zcu, target: *const std.
     return .unrolled;
 }
 
-/// Creates a new local for a pointer that points to memory with given offset.
-/// This can be used to get a pointer to a struct field, error payload, etc.
-/// By providing `modify` as action, it will modify the given `ptr_value` instead of making a new
-/// local value to store the pointer. This allows for local re-use and improves binary size.
-fn buildPointerOffset(cg: *CodeGen, ptr_value: WValue, offset: u64, action: enum { modify, new }) InnerError!WValue {
-    // do not perform arithmetic when offset is 0.
-    if (offset == 0 and ptr_value.offset() == 0 and action == .modify) return ptr_value;
-    const result_ptr: WValue = switch (action) {
-        .new => try cg.ensureAllocLocal(Type.usize),
-        .modify => ptr_value,
-    };
-    try cg.emitWValue(ptr_value);
-    if (offset + ptr_value.offset() > 0) {
-        switch (cg.ptr_size) {
-            .wasm32 => {
-                try cg.addImm32(@intCast(offset + ptr_value.offset()));
-                try cg.addTag(.i32_add);
-            },
-            .wasm64 => {
-                try cg.addImm64(offset + ptr_value.offset());
-                try cg.addTag(.i64_add);
-            },
-        }
-    }
-    try cg.addLocal(.local_set, result_ptr.local.value);
-    return result_ptr;
-}
-
 fn genInst(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     const zcu = cg.pt.zcu;
     const air_tags = cg.air.instructions.items(.tag);
@@ -1331,7 +1308,7 @@ fn genInst(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
             const elem_ty = cg.typeOf(bin_op.rhs);
             const elem_size = elem_ty.abiSize(zcu);
 
-            try cg.lowerToStack(vec_ptr);
+            try cg.emitWValue(vec_ptr);
             try cg.emitWValue(elem_idx);
             try cg.addImm32(@intCast(elem_size));
             try cg.addTag(.i32_mul);
@@ -2108,7 +2085,7 @@ fn airCall(cg: *CodeGen, inst: Air.Inst.Index, modifier: std.lang.CallModifier) 
     } else .none;
 
     if (first_param_sret) {
-        try cg.lowerToStack(sret);
+        try cg.emitWValue(sret);
     }
 
     for (args, 0..) |arg, arg_i| {
@@ -2122,7 +2099,7 @@ fn airCall(cg: *CodeGen, inst: Air.Inst.Index, modifier: std.lang.CallModifier) 
     }
 
     if (fn_info.is_var_args) {
-        try cg.lowerToStack(varargs_buf);
+        try cg.emitWValue(varargs_buf);
     }
 
     if (callee) |nav_index| {
@@ -2243,8 +2220,8 @@ fn airVaArg(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
 
     try cg.addLocal(.local_set, arg_ptr.local.value);
 
-    try cg.lowerToStack(operand);
-    try cg.lowerToStack(arg_ptr);
+    try cg.emitWValue(operand);
+    try cg.emitWValue(arg_ptr);
     switch (cg.ptr_size) {
         .wasm32 => {
             try cg.addImm32(abi_size);
@@ -2325,28 +2302,22 @@ fn store(cg: *CodeGen, lhs: WValue, rhs: WValue, ty: Type, memarg: MemArg) Inner
         natural_alignment.minStrict(memarg.alignment);
 
     if (isByRef(ty, zcu, cg.target)) {
-        const offset_ptr: WValue = switch (memarg.offset + lhs.offset()) {
-            0 => lhs,
-            else => |total_offset| ptr: {
-                try cg.emitWValue(lhs);
-                try cg.addImm32(@intCast(total_offset));
-                try cg.addTag(.i32_add);
-                break :ptr .stack;
-            },
-        };
+        const offset_ptr = try cg.offsetPointer(lhs, memarg.offset);
         return cg.memcpy(offset_ptr, rhs, .{ .imm32 = @intCast(abi_size) });
     }
 
+    const base_offset = lhs.memOffset();
+    try cg.emitMemBase(lhs);
+
     if (ty.zigTypeTag(zcu) == .vector) {
-        try cg.emitWValue(lhs);
-        try cg.lowerToStack(rhs);
+        try cg.emitWValue(rhs);
         // TODO: Add helper functions for simd opcodes
         const extra_index: u32 = @intCast(cg.mir_extra.items.len);
         // stores as := opcode, offset, alignment (opcode::memarg)
         try cg.mir_extra.ensureUnusedCapacity(cg.gpa, 4);
         cg.mir_extra.appendAssumeCapacity(@backingInt(std.wasm.SimdOpcode.v128_store));
         _ = try cg.addExtraAssumeCapacity(Mir.MemArg{
-            .offset = memarg.offset + lhs.offset(),
+            .offset = base_offset + memarg.offset,
             .alignment = alignment.toStdMem(),
         });
         return cg.addInst(.{ .tag = .simd_prefix, .data = .{ .payload = extra_index } });
@@ -2371,13 +2342,12 @@ fn store(cg: *CodeGen, lhs: WValue, rhs: WValue, ty: Type, memarg: MemArg) Inner
         }
     };
 
-    try cg.emitWValue(lhs);
-    try cg.lowerToStack(rhs);
+    try cg.emitWValue(rhs);
 
     try cg.addMemArg(
         store_opcode,
         .{
-            .offset = memarg.offset + lhs.offset(),
+            .offset = base_offset + memarg.offset,
             .alignment = alignment.toStdMem(),
         },
     );
@@ -2421,23 +2391,18 @@ fn load(cg: *CodeGen, operand: WValue, ty: Type, memarg: MemArg) InnerError!WVal
         natural_alignment.minStrict(memarg.alignment);
 
     if (isByRef(ty, zcu, cg.target)) {
-        const src_ptr_maybe_stack: WValue = switch (memarg.offset + operand.offset()) {
-            0 => operand,
-            else => |total_offset| ptr: {
-                try cg.emitWValue(operand);
-                try cg.addImm32(@intCast(total_offset));
-                try cg.addTag(.i32_add);
-                break :ptr .stack;
-            },
-        };
-        const src_ptr = try src_ptr_maybe_stack.toLocal(cg, .usize);
+        var src_ptr = try cg.offsetPointer(operand, memarg.offset);
+        const owns_src_ptr = src_ptr == .stack;
+        src_ptr = try src_ptr.toLocal(cg, .usize);
+        defer if (owns_src_ptr) src_ptr.free(cg);
+
         const new_ptr = try cg.allocStack(ty);
-        try cg.store(new_ptr, src_ptr, ty, .{});
+        try cg.memcpy(new_ptr, src_ptr, .{ .imm32 = @intCast(ty.abiSize(zcu)) });
         return new_ptr;
     }
 
-    // load local's value from memory by its stack position
-    try cg.emitWValue(operand);
+    const base_offset = operand.memOffset();
+    try cg.emitMemBase(operand);
 
     if (ty.zigTypeTag(zcu) == .vector) {
         // TODO: Add helper functions for simd opcodes
@@ -2446,7 +2411,7 @@ fn load(cg: *CodeGen, operand: WValue, ty: Type, memarg: MemArg) InnerError!WVal
         try cg.mir_extra.ensureUnusedCapacity(cg.gpa, 4);
         cg.mir_extra.appendAssumeCapacity(@backingInt(std.wasm.SimdOpcode.v128_load));
         _ = try cg.addExtraAssumeCapacity(Mir.MemArg{
-            .offset = memarg.offset + operand.offset(),
+            .offset = base_offset + memarg.offset,
             .alignment = alignment.toStdMem(),
         });
         try cg.addInst(.{ .tag = .simd_prefix, .data = .{ .payload = extra_index } });
@@ -2477,7 +2442,7 @@ fn load(cg: *CodeGen, operand: WValue, ty: Type, memarg: MemArg) InnerError!WVal
     try cg.addMemArg(
         load_opcode,
         .{
-            .offset = memarg.offset + operand.offset(),
+            .offset = base_offset + memarg.offset,
             .alignment = alignment.toStdMem(),
         },
     );
@@ -2647,9 +2612,9 @@ fn intAdd(cg: *CodeGen, ty: IntType, lhs: WValue, rhs: WValue) InnerError!WValue
         else => {
             const result = try cg.allocInt(ty);
 
-            try cg.lowerToStack(result);
-            try cg.lowerToStack(lhs);
-            try cg.lowerToStack(rhs);
+            try cg.emitWValue(result);
+            try cg.emitWValue(lhs);
+            try cg.emitWValue(rhs);
             try cg.addImm32(@intFromBool(ty.is_signed));
             try cg.addImm32(ty.bits);
             try cg.addCallIntrinsic(.__addo_limb64);
@@ -2700,9 +2665,9 @@ fn intSub(cg: *CodeGen, ty: IntType, lhs: WValue, rhs: WValue) InnerError!WValue
         else => {
             const result = try cg.allocInt(ty);
 
-            try cg.lowerToStack(result);
-            try cg.lowerToStack(lhs);
-            try cg.lowerToStack(rhs);
+            try cg.emitWValue(result);
+            try cg.emitWValue(lhs);
+            try cg.emitWValue(rhs);
             try cg.addImm32(@intFromBool(ty.is_signed));
             try cg.addImm32(ty.bits);
             try cg.addCallIntrinsic(.__subo_limb64);
@@ -2732,9 +2697,9 @@ fn intMul(cg: *CodeGen, ty: IntType, lhs: WValue, rhs: WValue) InnerError!WValue
         else => {
             const result = try cg.allocInt(ty);
 
-            try cg.lowerToStack(result);
-            try cg.lowerToStack(lhs);
-            try cg.lowerToStack(rhs);
+            try cg.emitWValue(result);
+            try cg.emitWValue(lhs);
+            try cg.emitWValue(rhs);
             try cg.addImm32(@intFromBool(ty.is_signed));
             try cg.addImm32(ty.bits);
             try cg.addCallIntrinsic(.__mulo_limb64);
@@ -3041,9 +3006,9 @@ fn intAnd(cg: *CodeGen, ty: IntType, lhs: WValue, rhs: WValue) InnerError!WValue
         else => {
             const result = try cg.allocInt(ty);
 
-            try cg.lowerToStack(result);
-            try cg.lowerToStack(lhs);
-            try cg.lowerToStack(rhs);
+            try cg.emitWValue(result);
+            try cg.emitWValue(lhs);
+            try cg.emitWValue(rhs);
             try cg.addImm32(ty.bits);
             try cg.addCallIntrinsic(.__and_limb64);
 
@@ -3085,9 +3050,9 @@ fn intOr(cg: *CodeGen, ty: IntType, lhs: WValue, rhs: WValue) InnerError!WValue 
         else => {
             const result = try cg.allocInt(ty);
 
-            try cg.lowerToStack(result);
-            try cg.lowerToStack(lhs);
-            try cg.lowerToStack(rhs);
+            try cg.emitWValue(result);
+            try cg.emitWValue(lhs);
+            try cg.emitWValue(rhs);
             try cg.addImm32(ty.bits);
             try cg.addCallIntrinsic(.__or_limb64);
 
@@ -3129,9 +3094,9 @@ fn intXor(cg: *CodeGen, ty: IntType, lhs: WValue, rhs: WValue) InnerError!WValue
         else => {
             const result = try cg.allocInt(ty);
 
-            try cg.lowerToStack(result);
-            try cg.lowerToStack(lhs);
-            try cg.lowerToStack(rhs);
+            try cg.emitWValue(result);
+            try cg.emitWValue(lhs);
+            try cg.emitWValue(rhs);
             try cg.addImm32(ty.bits);
             try cg.addCallIntrinsic(.__xor_limb64);
 
@@ -3176,13 +3141,14 @@ fn intNot(cg: *CodeGen, ty: IntType, operand: WValue) InnerError!WValue {
         65...128 => {
             const result = try cg.allocStack(Type.u128);
 
-            try cg.emitWValue(result);
+            const result_offset = result.memOffset();
+            try cg.emitMemBase(result);
             _ = try cg.load(operand, .u64, .{});
             try cg.addImm64(~@as(u64, 0));
             try cg.addTag(.i64_xor);
-            try cg.store(.stack, .stack, .u64, .{ .offset = result.offset() });
+            try cg.store(.stack, .stack, .u64, .{ .offset = result_offset });
 
-            try cg.emitWValue(result);
+            try cg.emitMemBase(result);
             _ = try cg.load(operand, .u64, .{ .offset = 8 });
             const high_mask: u64 = if (ty.is_signed)
                 ~@as(u64, 0)
@@ -3190,15 +3156,15 @@ fn intNot(cg: *CodeGen, ty: IntType, operand: WValue) InnerError!WValue {
                 ~@as(u64, 0) >> @intCast(128 - ty.bits);
             try cg.addImm64(high_mask);
             try cg.addTag(.i64_xor);
-            try cg.store(.stack, .stack, .u64, .{ .offset = result.offset() + 8 });
+            try cg.store(.stack, .stack, .u64, .{ .offset = result_offset + 8 });
 
             return result;
         },
         else => {
             const result = try cg.allocInt(ty);
 
-            try cg.lowerToStack(result);
-            try cg.lowerToStack(operand);
+            try cg.emitWValue(result);
+            try cg.emitWValue(operand);
             try cg.addImm32(@intFromBool(ty.is_signed));
             try cg.addImm32(ty.bits);
             try cg.addCallIntrinsic(.__not_limb64);
@@ -3230,9 +3196,9 @@ fn intShl(cg: *CodeGen, ty: IntType, lhs: WValue, rhs: WValue) InnerError!WValue
         else => {
             const result = try cg.allocInt(ty);
 
-            try cg.lowerToStack(result);
-            try cg.lowerToStack(lhs);
-            try cg.lowerToStack(rhs);
+            try cg.emitWValue(result);
+            try cg.emitWValue(lhs);
+            try cg.emitWValue(rhs);
             try cg.addImm32(@intFromBool(ty.is_signed));
             try cg.addImm32(ty.bits);
             try cg.addCallIntrinsic(.__shlo_limb64);
@@ -3270,9 +3236,9 @@ fn intShr(cg: *CodeGen, ty: IntType, lhs: WValue, rhs: WValue) InnerError!WValue
         else => {
             const result = try cg.allocInt(ty);
 
-            try cg.lowerToStack(result);
-            try cg.lowerToStack(lhs);
-            try cg.lowerToStack(rhs);
+            try cg.emitWValue(result);
+            try cg.emitWValue(lhs);
+            try cg.emitWValue(rhs);
             try cg.addImm32(@intFromBool(ty.is_signed));
             try cg.addImm32(ty.bits);
             try cg.addCallIntrinsic(.__shr_limb64);
@@ -3320,8 +3286,9 @@ fn intAbs(cg: *CodeGen, ty: IntType, operand: WValue) InnerError!WValue {
             const u128_ty: IntType = .{ .is_signed = false, .bits = 128 };
 
             const mask = try cg.allocStack(Type.u128);
-            try cg.emitWValue(mask);
-            try cg.emitWValue(mask);
+            const mask_offset = mask.memOffset();
+            try cg.emitMemBase(mask);
+            try cg.emitMemBase(mask);
 
             _ = try cg.load(operand, .u64, .{ .offset = 8 });
             try cg.addImm64(63);
@@ -3330,9 +3297,9 @@ fn intAbs(cg: *CodeGen, ty: IntType, operand: WValue) InnerError!WValue {
             var tmp = try cg.allocLocal(Type.u64);
             defer tmp.free(cg);
             try cg.addLocal(.local_tee, tmp.local.value);
-            try cg.store(.stack, .stack, .u64, .{ .offset = mask.offset() + 0 });
+            try cg.store(.stack, .stack, .u64, .{ .offset = mask_offset });
             try cg.emitWValue(tmp);
-            try cg.store(.stack, .stack, .u64, .{ .offset = mask.offset() + 8 });
+            try cg.store(.stack, .stack, .u64, .{ .offset = mask_offset + 8 });
 
             const a = try cg.intXor(u128_ty, operand, mask);
             const b = try cg.intSub(u128_ty, a, mask);
@@ -3341,8 +3308,8 @@ fn intAbs(cg: *CodeGen, ty: IntType, operand: WValue) InnerError!WValue {
         else => {
             const result = try cg.allocInt(ty);
 
-            try cg.lowerToStack(result);
-            try cg.lowerToStack(operand);
+            try cg.emitWValue(result);
+            try cg.emitWValue(operand);
             try cg.addImm32(ty.bits);
             try cg.addCallIntrinsic(.__abs_limb64);
 
@@ -3352,16 +3319,16 @@ fn intAbs(cg: *CodeGen, ty: IntType, operand: WValue) InnerError!WValue {
 }
 
 fn intMax(cg: *CodeGen, ty: IntType, lhs: WValue, rhs: WValue) InnerError!WValue {
-    try cg.lowerToStack(lhs);
-    try cg.lowerToStack(rhs);
+    try cg.emitWValue(lhs);
+    try cg.emitWValue(rhs);
     _ = try cg.intCmp(ty, .gt, lhs, rhs);
     try cg.addTag(.select);
     return .stack;
 }
 
 fn intMin(cg: *CodeGen, ty: IntType, lhs: WValue, rhs: WValue) InnerError!WValue {
-    try cg.lowerToStack(lhs);
-    try cg.lowerToStack(rhs);
+    try cg.emitWValue(lhs);
+    try cg.emitWValue(rhs);
     _ = try cg.intCmp(ty, .lt, lhs, rhs);
     try cg.addTag(.select);
     return .stack;
@@ -3427,7 +3394,7 @@ fn intClz(cg: *CodeGen, ty: IntType, operand: WValue) InnerError!WValue {
             return .stack;
         },
         else => {
-            try cg.lowerToStack(operand);
+            try cg.emitWValue(operand);
             try cg.addImm32(ty.bits);
             try cg.addCallIntrinsic(.__clz_limb64);
 
@@ -3479,7 +3446,7 @@ fn intCtz(cg: *CodeGen, ty: IntType, operand: WValue) InnerError!WValue {
             return .stack;
         },
         else => {
-            try cg.lowerToStack(operand);
+            try cg.emitWValue(operand);
             try cg.addImm32(ty.bits);
             try cg.addCallIntrinsic(.__ctz_limb64);
 
@@ -3525,7 +3492,7 @@ fn intPopCount(cg: *CodeGen, ty: IntType, operand: WValue) InnerError!WValue {
             return .stack;
         },
         else => {
-            try cg.lowerToStack(operand);
+            try cg.emitWValue(operand);
             try cg.addImm32(ty.bits);
             try cg.addCallIntrinsic(.__popcount_limb64);
 
@@ -3560,7 +3527,8 @@ fn intBitReverse(cg: *CodeGen, ty: IntType, operand: WValue) InnerError!WValue {
         65...128 => {
             const tmp = try cg.allocStack(Type.u128);
 
-            try cg.emitWValue(tmp);
+            const tmp_offset = tmp.memOffset();
+            try cg.emitMemBase(tmp);
             const hi = try cg.load(operand, .u64, .{ .offset = 8 });
             const hi_rev = try cg.callIntrinsic(
                 .__bitreversedi2,
@@ -3569,9 +3537,9 @@ fn intBitReverse(cg: *CodeGen, ty: IntType, operand: WValue) InnerError!WValue {
                 &.{hi},
             );
             try cg.emitWValue(hi_rev);
-            try cg.store(.stack, .stack, .u64, .{ .offset = tmp.offset() });
+            try cg.store(.stack, .stack, .u64, .{ .offset = tmp_offset });
 
-            try cg.emitWValue(tmp);
+            try cg.emitMemBase(tmp);
             const lo = try cg.load(operand, .u64, .{});
             const lo_rev = try cg.callIntrinsic(
                 .__bitreversedi2,
@@ -3580,7 +3548,7 @@ fn intBitReverse(cg: *CodeGen, ty: IntType, operand: WValue) InnerError!WValue {
                 &.{lo},
             );
             try cg.emitWValue(lo_rev);
-            try cg.store(.stack, .stack, .u64, .{ .offset = tmp.offset() + 8 });
+            try cg.store(.stack, .stack, .u64, .{ .offset = tmp_offset + 8 });
 
             if (ty.bits < 128) {
                 const shift_ty: IntType = .{ .is_signed = ty.is_signed, .bits = 128 };
@@ -3592,8 +3560,8 @@ fn intBitReverse(cg: *CodeGen, ty: IntType, operand: WValue) InnerError!WValue {
         else => {
             const result = try cg.allocInt(ty);
 
-            try cg.lowerToStack(result);
-            try cg.lowerToStack(operand);
+            try cg.emitWValue(result);
+            try cg.emitWValue(operand);
             try cg.addImm32(@intFromBool(ty.is_signed));
             try cg.addImm32(ty.bits);
             try cg.addCallIntrinsic(.__bitreverse_limb64);
@@ -3629,7 +3597,8 @@ fn intByteSwap(cg: *CodeGen, ty: IntType, operand: WValue) InnerError!WValue {
         65...128 => {
             const result = try cg.allocStack(Type.u128);
 
-            try cg.emitWValue(result);
+            const result_offset = result.memOffset();
+            try cg.emitMemBase(result);
 
             const low = try cg.load(operand, .u64, .{});
             const swap_low = try cg.callIntrinsic(
@@ -3638,9 +3607,9 @@ fn intByteSwap(cg: *CodeGen, ty: IntType, operand: WValue) InnerError!WValue {
                 Type.u64,
                 &.{low},
             );
-            try cg.store(.stack, swap_low, .u64, .{ .offset = result.offset() + 8 });
+            try cg.store(.stack, swap_low, .u64, .{ .offset = result_offset + 8 });
 
-            try cg.emitWValue(result);
+            try cg.emitMemBase(result);
 
             const high = try cg.load(operand, .u64, .{ .offset = 8 });
             const swap_high = try cg.callIntrinsic(
@@ -3649,7 +3618,7 @@ fn intByteSwap(cg: *CodeGen, ty: IntType, operand: WValue) InnerError!WValue {
                 Type.u64,
                 &.{high},
             );
-            try cg.store(.stack, swap_high, .u64, .{ .offset = result.offset() });
+            try cg.store(.stack, swap_high, .u64, .{ .offset = result_offset });
 
             if (ty.bits < 128) {
                 const shift_ty: IntType = .{ .is_signed = ty.is_signed, .bits = 128 };
@@ -3661,8 +3630,8 @@ fn intByteSwap(cg: *CodeGen, ty: IntType, operand: WValue) InnerError!WValue {
         else => {
             const result = try cg.allocInt(ty);
 
-            try cg.lowerToStack(result);
-            try cg.lowerToStack(operand);
+            try cg.emitWValue(result);
+            try cg.emitWValue(operand);
             try cg.addImm32(@intFromBool(ty.is_signed));
             try cg.addImm32(ty.bits);
             try cg.addCallIntrinsic(.__byteswap_limb64);
@@ -3706,11 +3675,12 @@ fn intWrap(cg: *CodeGen, ty: IntType, operand: WValue) InnerError!WValue {
         65...127 => {
             const result = try cg.allocStack(Type.u128);
 
-            try cg.emitWValue(result);
+            const result_offset = result.memOffset();
+            try cg.emitMemBase(result);
             _ = try cg.load(operand, .u64, .{});
-            try cg.store(.stack, .stack, .u64, .{ .offset = result.offset() });
+            try cg.store(.stack, .stack, .u64, .{ .offset = result_offset });
 
-            try cg.emitWValue(result);
+            try cg.emitMemBase(result);
             _ = try cg.load(operand, .u64, .{ .offset = 8 });
             if (ty.is_signed) {
                 try cg.addImm64(128 - ty.bits);
@@ -3721,7 +3691,7 @@ fn intWrap(cg: *CodeGen, ty: IntType, operand: WValue) InnerError!WValue {
                 try cg.addImm64(~@as(u64, 0) >> @intCast(128 - ty.bits));
                 try cg.addTag(.i64_and);
             }
-            try cg.store(.stack, .stack, .u64, .{ .offset = result.offset() + 8 });
+            try cg.store(.stack, .stack, .u64, .{ .offset = result_offset + 8 });
 
             return result;
         },
@@ -3738,7 +3708,7 @@ fn intWrap(cg: *CodeGen, ty: IntType, operand: WValue) InnerError!WValue {
                 try cg.memcpy(result, operand, .{ .imm32 = used_len - 8 });
                 const pad = 64 - ty.bits % 64;
 
-                try cg.emitWValue(result);
+                try cg.emitMemBase(result);
                 _ = try cg.load(operand, .u64, .{ .offset = used_len - 8 });
                 if (ty.is_signed) {
                     try cg.addImm64(pad);
@@ -3749,14 +3719,14 @@ fn intWrap(cg: *CodeGen, ty: IntType, operand: WValue) InnerError!WValue {
                     try cg.addImm64(~@as(u64, 0) >> @intCast(pad));
                     try cg.addTag(.i64_and);
                 }
-                try cg.store(.stack, .stack, .u64, .{ .offset = result.offset() + used_len - 8 });
+                try cg.store(.stack, .stack, .u64, .{ .offset = result.memOffset() + used_len - 8 });
             } else {
                 try cg.memcpy(result, operand, .{ .imm32 = used_len });
             }
 
             const full_len = @divExact(bits, 8);
             if (used_len + 8 == full_len) { // last limb needs sign extended
-                try cg.emitWValue(result);
+                try cg.emitMemBase(result);
                 if (ty.is_signed) {
                     _ = try cg.load(result, .u64, .{ .offset = used_len - 8 });
                     try cg.addImm64(63);
@@ -3764,7 +3734,7 @@ fn intWrap(cg: *CodeGen, ty: IntType, operand: WValue) InnerError!WValue {
                 } else {
                     try cg.addImm64(0);
                 }
-                try cg.store(.stack, .stack, .u64, .{ .offset = result.offset() + used_len });
+                try cg.store(.stack, .stack, .u64, .{ .offset = result.memOffset() + used_len });
             }
 
             return result;
@@ -3858,20 +3828,20 @@ fn intAddSat(cg: *CodeGen, int_ty: IntType, lhs: WValue, rhs: WValue) InnerError
         defer rhs_is_neg.free(cg);
         const min_val = try cg.intMinValue(int_ty);
 
-        try cg.lowerToStack(min_val);
-        try cg.lowerToStack(max_val);
+        try cg.emitWValue(min_val);
+        try cg.emitWValue(max_val);
         try cg.emitWValue(rhs_is_neg);
         try cg.addTag(.select);
 
-        try cg.lowerToStack(op_val);
+        try cg.emitWValue(op_val);
         const overflow_cmp = try cg.intCmp(int_ty, .lt, op_val, lhs);
         const is_overflow = try cg.intCmp(.u32, .neq, rhs_is_neg, overflow_cmp);
         try cg.emitWValue(is_overflow);
         try cg.addTag(.select);
         return .stack;
     } else {
-        try cg.lowerToStack(max_val);
-        try cg.lowerToStack(op_val);
+        try cg.emitWValue(max_val);
+        try cg.emitWValue(op_val);
 
         const is_overflow = try cg.intCmp(int_ty, .lt, op_val, lhs);
         try cg.emitWValue(is_overflow);
@@ -3892,12 +3862,12 @@ fn intSubSat(cg: *CodeGen, int_ty: IntType, lhs: WValue, rhs: WValue) InnerError
         const max_val = try cg.intMaxValue(int_ty);
         const min_val = try cg.intMinValue(int_ty);
 
-        try cg.lowerToStack(max_val);
-        try cg.lowerToStack(min_val);
+        try cg.emitWValue(max_val);
+        try cg.emitWValue(min_val);
         try cg.emitWValue(rhs_is_neg);
         try cg.addTag(.select);
 
-        try cg.lowerToStack(op_val);
+        try cg.emitWValue(op_val);
         const overflow_cmp = try cg.intCmp(int_ty, .gt, op_val, lhs);
         const is_overflow = try cg.intCmp(.u32, .neq, rhs_is_neg, overflow_cmp);
         try cg.emitWValue(is_overflow);
@@ -3906,8 +3876,8 @@ fn intSubSat(cg: *CodeGen, int_ty: IntType, lhs: WValue, rhs: WValue) InnerError
     } else {
         const zero = try cg.intZeroValue(int_ty);
 
-        try cg.lowerToStack(zero);
-        try cg.lowerToStack(op_val);
+        try cg.emitWValue(zero);
+        try cg.emitWValue(op_val);
         const is_overflow = try cg.intCmp(int_ty, .lt, lhs, rhs);
         try cg.emitWValue(is_overflow);
         try cg.addTag(.select);
@@ -3931,10 +3901,10 @@ fn intMulSat(cg: *CodeGen, int_ty: IntType, lhs: WValue, rhs: WValue) InnerError
     if (int_ty.is_signed) {
         const min_val = try cg.intMinValue(int_ty);
 
-        try cg.lowerToStack(min_val);
+        try cg.emitWValue(min_val);
 
-        try cg.lowerToStack(max_val);
-        try cg.lowerToStack(op_val);
+        try cg.emitWValue(max_val);
+        try cg.emitWValue(op_val);
         const max_ext = try cg.intCast(ext_ty, int_ty, max_val);
         const ov_pos = try cg.intCmp(ext_ty, .lt, max_ext, mul_ext);
         try cg.emitWValue(ov_pos);
@@ -3942,12 +3912,12 @@ fn intMulSat(cg: *CodeGen, int_ty: IntType, lhs: WValue, rhs: WValue) InnerError
 
         const min_ext = try cg.intCast(ext_ty, int_ty, min_val);
         const ov_neg = try cg.intCmp(ext_ty, .gt, min_ext, mul_ext);
-        try cg.lowerToStack(ov_neg);
+        try cg.emitWValue(ov_neg);
         try cg.addTag(.select);
         return .stack;
     } else {
-        try cg.lowerToStack(max_val);
-        try cg.lowerToStack(op_val);
+        try cg.emitWValue(max_val);
+        try cg.emitWValue(op_val);
         const max_ext = try cg.intCast(ext_ty, int_ty, max_val);
         const is_overflow = try cg.intCmp(ext_ty, .lt, max_ext, mul_ext);
         try cg.emitWValue(is_overflow);
@@ -3970,20 +3940,20 @@ fn intShlSat(cg: *CodeGen, int_ty: IntType, lhs: WValue, rhs: WValue) InnerError
         const zero = try cg.intZeroValue(int_ty);
         const min_val = try cg.intMinValue(int_ty);
 
-        try cg.lowerToStack(min_val);
-        try cg.lowerToStack(max_val);
+        try cg.emitWValue(min_val);
+        try cg.emitWValue(max_val);
         const lhs_is_neg = try cg.intCmp(int_ty, .lt, lhs, zero);
         try cg.emitWValue(lhs_is_neg);
         try cg.addTag(.select);
 
-        try cg.lowerToStack(op_val);
+        try cg.emitWValue(op_val);
         const is_overflow = try cg.intCmp(int_ty, .neq, check_val, lhs);
         try cg.emitWValue(is_overflow);
         try cg.addTag(.select);
         return .stack;
     } else {
-        try cg.lowerToStack(max_val);
-        try cg.lowerToStack(op_val);
+        try cg.emitWValue(max_val);
+        try cg.emitWValue(op_val);
         const is_overflow = try cg.intCmp(int_ty, .neq, check_val, lhs);
         try cg.emitWValue(is_overflow);
         try cg.addTag(.select);
@@ -4055,9 +4025,9 @@ fn intAddOverflow(cg: *CodeGen, ty: IntType, lhs: WValue, rhs: WValue) InnerErro
         else => {
             const result = try cg.allocInt(ty);
 
-            try cg.lowerToStack(result);
-            try cg.lowerToStack(lhs);
-            try cg.lowerToStack(rhs);
+            try cg.emitWValue(result);
+            try cg.emitWValue(lhs);
+            try cg.emitWValue(rhs);
             try cg.addImm32(@intFromBool(ty.is_signed));
             try cg.addImm32(ty.bits);
             try cg.addCallIntrinsic(.__addo_limb64);
@@ -4087,9 +4057,9 @@ fn intSubOverflow(cg: *CodeGen, ty: IntType, lhs: WValue, rhs: WValue) InnerErro
         else => {
             const result = try cg.allocInt(ty);
 
-            try cg.lowerToStack(result);
-            try cg.lowerToStack(lhs);
-            try cg.lowerToStack(rhs);
+            try cg.emitWValue(result);
+            try cg.emitWValue(lhs);
+            try cg.emitWValue(rhs);
             try cg.addImm32(@intFromBool(ty.is_signed));
             try cg.addImm32(ty.bits);
             try cg.addCallIntrinsic(.__subo_limb64);
@@ -4145,9 +4115,9 @@ fn intMulOverflow(cg: *CodeGen, int_ty: IntType, lhs: WValue, rhs: WValue) Inner
     } else {
         const result = try cg.allocInt(int_ty);
 
-        try cg.lowerToStack(result);
-        try cg.lowerToStack(lhs);
-        try cg.lowerToStack(rhs);
+        try cg.emitWValue(result);
+        try cg.emitWValue(lhs);
+        try cg.emitWValue(rhs);
         try cg.addImm32(@intFromBool(int_ty.is_signed));
         try cg.addImm32(int_ty.bits);
         try cg.addCallIntrinsic(.__mulo_limb64);
@@ -4174,9 +4144,9 @@ fn intShlOverflow(cg: *CodeGen, ty: IntType, lhs: WValue, rhs: WValue) InnerErro
         else => {
             const result = try cg.allocInt(ty);
 
-            try cg.lowerToStack(result);
-            try cg.lowerToStack(lhs);
-            try cg.lowerToStack(rhs);
+            try cg.emitWValue(result);
+            try cg.emitWValue(lhs);
+            try cg.emitWValue(rhs);
             try cg.addImm32(@intFromBool(ty.is_signed));
             try cg.addImm32(ty.bits);
             try cg.addCallIntrinsic(.__shlo_limb64);
@@ -4213,15 +4183,15 @@ fn intCast(cg: *CodeGen, dest_ty: IntType, src_ty: IntType, operand: WValue) Inn
         } else {
             var src_len: u32 = undefined;
             if (src_bits == 32) {
-                try cg.emitWValue(result);
+                try cg.emitMemBase(result);
                 try cg.emitWValue(operand);
                 try cg.addTag(if (src_ty.is_signed) .i64_extend_i32_s else .i64_extend_i32_u);
-                try cg.store(.stack, .stack, .u64, .{ .offset = result.offset() });
+                try cg.store(.stack, .stack, .u64, .{ .offset = result.memOffset() });
                 src_len = 8;
             } else if (src_bits == 64) {
-                try cg.emitWValue(result);
+                try cg.emitMemBase(result);
                 try cg.emitWValue(operand);
-                try cg.store(.stack, .stack, .u64, .{ .offset = result.offset() });
+                try cg.store(.stack, .stack, .u64, .{ .offset = result.memOffset() });
                 src_len = 8;
             } else {
                 src_len = src_bits / 8;
@@ -4230,7 +4200,7 @@ fn intCast(cg: *CodeGen, dest_ty: IntType, src_ty: IntType, operand: WValue) Inn
 
             if (dest_bits == 128) {
                 if (src_ty.is_signed) {
-                    try cg.emitWValue(result);
+                    try cg.emitMemBase(result);
                     if (src_bits == 32) {
                         try cg.emitWValue(operand);
                         try cg.addTag(if (dest_ty.is_signed) .i64_extend_i32_s else .i64_extend_i32_u);
@@ -4238,7 +4208,7 @@ fn intCast(cg: *CodeGen, dest_ty: IntType, src_ty: IntType, operand: WValue) Inn
                         try cg.emitWValue(operand);
                     } else unreachable;
                     const shr = try cg.intShr(IntType.i64, .stack, .{ .imm32 = 63 });
-                    try cg.store(.stack, shr, .u64, .{ .offset = 8 + result.offset() });
+                    try cg.store(.stack, shr, .u64, .{ .offset = result.memOffset() + 8 });
                 } else {
                     try cg.store(result, .{ .imm64 = 0 }, .u64, .{ .offset = 8 });
                 }
@@ -4642,20 +4612,22 @@ fn floatNeg(cg: *CodeGen, ty: FloatType, arg: WValue) InnerError!WValue {
         },
         .f80, .f128 => {
             const result = try cg.allocStack(Type.f128);
-            try cg.emitWValue(result);
-            try cg.emitWValue(arg);
-            try cg.addMemArg(.i64_load, .{ .offset = 0 + arg.offset(), .alignment = .@"2" });
-            try cg.addMemArg(.i64_store, .{ .offset = 0 + result.offset(), .alignment = .@"2" });
-            try cg.emitWValue(result);
-            try cg.emitWValue(arg);
-            try cg.addMemArg(.i64_load, .{ .offset = 8 + arg.offset(), .alignment = .@"2" });
+            const result_offset = result.memOffset();
+            const arg_offset = arg.memOffset();
+            try cg.emitMemBase(result);
+            try cg.emitMemBase(arg);
+            try cg.addMemArg(.i64_load, .{ .offset = arg_offset, .alignment = .@"2" });
+            try cg.addMemArg(.i64_store, .{ .offset = result_offset, .alignment = .@"2" });
+            try cg.emitMemBase(result);
+            try cg.emitMemBase(arg);
+            try cg.addMemArg(.i64_load, .{ .offset = arg_offset + 8, .alignment = .@"2" });
             if (ty == .f80) {
                 try cg.addImm64(0x8000);
             } else {
                 try cg.addImm64(0x8000000000000000);
             }
             try cg.addTag(.i64_xor);
-            try cg.addMemArg(.i64_store, .{ .offset = 8 + result.offset(), .alignment = .@"2" });
+            try cg.addMemArg(.i64_store, .{ .offset = result_offset + 8, .alignment = .@"2" });
             return result;
         },
     }
@@ -4681,20 +4653,22 @@ fn floatAbs(cg: *CodeGen, ty: FloatType, arg: WValue) InnerError!WValue {
         },
         .f80, .f128 => {
             const result = try cg.allocStack(Type.f128);
-            try cg.emitWValue(result);
-            try cg.emitWValue(arg);
-            try cg.addMemArg(.i64_load, .{ .offset = 0 + arg.offset(), .alignment = .@"2" });
-            try cg.addMemArg(.i64_store, .{ .offset = 0 + result.offset(), .alignment = .@"2" });
-            try cg.emitWValue(result);
-            try cg.emitWValue(arg);
-            try cg.addMemArg(.i64_load, .{ .offset = 8 + arg.offset(), .alignment = .@"2" });
+            const result_offset = result.memOffset();
+            const arg_offset = arg.memOffset();
+            try cg.emitMemBase(result);
+            try cg.emitMemBase(arg);
+            try cg.addMemArg(.i64_load, .{ .offset = arg_offset, .alignment = .@"2" });
+            try cg.addMemArg(.i64_store, .{ .offset = result_offset, .alignment = .@"2" });
+            try cg.emitMemBase(result);
+            try cg.emitMemBase(arg);
+            try cg.addMemArg(.i64_load, .{ .offset = arg_offset + 8, .alignment = .@"2" });
             if (ty == .f80) {
                 try cg.addImm64(0x7FFF);
             } else {
                 try cg.addImm64(0x7FFFFFFFFFFFFFFF);
             }
             try cg.addTag(.i64_and);
-            try cg.addMemArg(.i64_store, .{ .offset = 8 + result.offset(), .alignment = .@"2" });
+            try cg.addMemArg(.i64_store, .{ .offset = result_offset + 8, .alignment = .@"2" });
             return result;
         },
     }
@@ -5377,8 +5351,8 @@ fn intCmp(cg: *CodeGen, ty: IntType, op: std.math.CompareOperator, lhs: WValue, 
         0 => unreachable,
         1...32 => {
             // lhs or rhs could be stack pointers
-            try cg.lowerToStack(lhs);
-            try cg.lowerToStack(rhs);
+            try cg.emitWValue(lhs);
+            try cg.emitWValue(rhs);
             const opcode: Mir.Inst.Tag = switch (op) {
                 .eq => .i32_eq,
                 .neq => .i32_ne,
@@ -5392,8 +5366,8 @@ fn intCmp(cg: *CodeGen, ty: IntType, op: std.math.CompareOperator, lhs: WValue, 
         },
         33...64 => {
             // lhs or rhs could be stack pointers
-            try cg.lowerToStack(lhs);
-            try cg.lowerToStack(rhs);
+            try cg.emitWValue(lhs);
+            try cg.emitWValue(rhs);
             const opcode: Mir.Inst.Tag = switch (op) {
                 .eq => .i64_eq,
                 .neq => .i64_ne,
@@ -5442,8 +5416,8 @@ fn intCmp(cg: *CodeGen, ty: IntType, op: std.math.CompareOperator, lhs: WValue, 
             return .stack;
         },
         else => {
-            try cg.lowerToStack(lhs);
-            try cg.lowerToStack(rhs);
+            try cg.emitWValue(lhs);
+            try cg.emitWValue(rhs);
             try cg.addImm32(@intFromBool(ty.is_signed));
             try cg.addImm32(ty.bits);
             try cg.addCallIntrinsic(.__cmp_limb64);
@@ -5554,7 +5528,7 @@ fn airBr(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     // if operand has codegen bits we should break with a value
     if (block.value != .none) {
         const operand = try cg.resolveInst(br.operand);
-        try cg.lowerToStack(operand);
+        try cg.emitWValue(operand);
         try cg.addLocal(.local_set, block.value.local.value);
     }
 
@@ -5618,11 +5592,12 @@ fn airIntFromPtr(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     assert(operand_ty.abiAlignment(zcu) == dest_ty.abiAlignment(zcu));
 
     const operand = try cg.resolveInst(ty_op.operand);
-    const result = switch (operand) {
-        .stack_offset => try cg.buildPointerOffset(operand, 0, .new),
-        else => operand,
-    };
-    return cg.finishAir(inst, result, &.{ty_op.operand});
+    if (operand == .stack_offset) {
+        // materialize operand, we assume precomputed value is more efficient
+        try cg.emitWValue(operand);
+        return cg.finishAir(inst, .stack, &.{ty_op.operand});
+    }
+    return cg.finishAir(inst, operand, &.{ty_op.operand});
 }
 
 fn airUnionFromEnum(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
@@ -5801,16 +5776,7 @@ fn structFieldPtr(
         },
         else => struct_ty.structFieldOffset(index, zcu),
     };
-    // save a load and store when we can simply reuse the operand
-    if (offset == 0) {
-        return struct_ptr;
-    }
-    switch (struct_ptr) {
-        .stack_offset => |stack_offset| {
-            return .{ .stack_offset = .{ .value = stack_offset.value + @as(u32, @intCast(offset)), .references = 1 } };
-        },
-        else => return cg.buildPointerOffset(struct_ptr, offset, .new),
-    }
+    return cg.offsetPointer(struct_ptr, offset);
 }
 
 fn airAggFieldVal(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
@@ -5832,12 +5798,7 @@ fn airAggFieldVal(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
                 return cg.fail("Field type '{f}' too big to fit into stack frame", .{field_ty.fmt(pt)});
             };
             if (isByRef(field_ty, zcu, cg.target)) {
-                switch (operand) {
-                    .stack_offset => |stack_offset| {
-                        break :result .{ .stack_offset = .{ .value = stack_offset.value + offset, .references = 1 } };
-                    },
-                    else => break :result try cg.buildPointerOffset(operand, offset, .new),
-                }
+                break :result try cg.offsetPointer(operand, offset);
             }
             break :result try cg.load(operand, field_ty, .{ .offset = offset });
         },
@@ -5859,7 +5820,7 @@ fn airSwitchBr(cg: *CodeGen, inst: Air.Inst.Index, is_dispatch_loop: bool) Inner
     const target = if (is_dispatch_loop) target: {
         const initial_target = try cg.resolveInst(switch_br.operand);
         const target: WValue = try cg.allocLocal(target_ty);
-        try cg.lowerToStack(initial_target);
+        try cg.emitWValue(initial_target);
         try cg.addLocal(.local_set, target.local.value);
 
         try cg.startBlock(.loop, .empty); // dispatch loop start
@@ -6052,7 +6013,7 @@ fn airSwitchDispatch(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     const switch_loop = cg.blocks.get(br.block_inst).?;
 
     const operand = try cg.resolveInst(br.operand);
-    try cg.lowerToStack(operand);
+    try cg.emitWValue(operand);
     try cg.addLocal(.local_set, switch_loop.value.local.value);
 
     const idx: u32 = cg.block_depth - switch_loop.label;
@@ -6080,12 +6041,14 @@ fn airIsErr(cg: *CodeGen, inst: Air.Inst.Index, opcode: std.wasm.Opcode, op_kind
             }
         }
 
-        try cg.emitWValue(operand);
         if (op_kind == .ptr or pl_ty.hasRuntimeBits(zcu)) {
+            try cg.emitMemBase(operand);
             try cg.addMemArg(.i32_load16_u, .{
-                .offset = operand.offset() + @as(u32, @intCast(errUnionErrorOffset(pl_ty, zcu))),
+                .offset = operand.memOffset() + errUnionErrorOffset(pl_ty, zcu),
                 .alignment = Type.anyerror.abiAlignment(zcu).toStdMem(),
             });
+        } else {
+            try cg.emitWValue(operand);
         }
 
         // Compare the error value with '0'
@@ -6116,9 +6079,9 @@ fn airUnwrapErrUnionPayload(cg: *CodeGen, inst: Air.Inst.Index, op_is_ptr: bool)
             }
         }
 
-        const pl_offset: u32 = @intCast(errUnionPayloadOffset(payload_ty, zcu));
+        const pl_offset = errUnionPayloadOffset(payload_ty, zcu);
         if (op_is_ptr or isByRef(payload_ty, zcu, cg.target)) {
-            break :result try cg.buildPointerOffset(operand, pl_offset, .new);
+            break :result try cg.offsetPointer(operand, pl_offset);
         } else {
             assert(isByRef(eu_ty, zcu, cg.target));
             break :result try cg.load(operand, payload_ty, .{ .offset = pl_offset });
@@ -6169,15 +6132,14 @@ fn airWrapErrUnionPayload(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
         }
 
         const err_union = try cg.allocStack(err_ty);
-        const payload_ptr = try cg.buildPointerOffset(err_union, @as(u32, @intCast(errUnionPayloadOffset(pl_ty, zcu))), .new);
-        try cg.store(payload_ptr, operand, pl_ty, .{});
+        try cg.store(err_union, operand, pl_ty, .{ .offset = errUnionPayloadOffset(pl_ty, zcu) });
 
         // ensure we also write '0' to the error part, so any present stack value gets overwritten by it.
-        try cg.emitWValue(err_union);
+        try cg.emitMemBase(err_union);
         try cg.addImm32(0);
-        const err_val_offset: u32 = @intCast(errUnionErrorOffset(pl_ty, zcu));
+        const err_val_offset = errUnionErrorOffset(pl_ty, zcu);
         try cg.addMemArg(.i32_store16, .{
-            .offset = err_union.offset() + err_val_offset,
+            .offset = err_union.memOffset() + err_val_offset,
             .alignment = .@"2",
         });
         break :result err_union;
@@ -6203,7 +6165,7 @@ fn airWrapErrUnionErr(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
         try cg.store(err_union, operand, .anyerror, .{ .offset = errUnionErrorOffset(pl_ty, zcu) });
 
         // write 'undefined' to the payload
-        const payload_ptr = try cg.buildPointerOffset(err_union, @as(u32, @intCast(errUnionPayloadOffset(pl_ty, zcu))), .new);
+        const payload_ptr = try cg.offsetPointer(err_union, errUnionPayloadOffset(pl_ty, zcu));
         const len = @as(u32, @intCast(err_ty.errorUnionPayload(zcu).abiSize(zcu)));
         try cg.memset(Type.u8, payload_ptr, .{ .imm32 = len }, .{ .imm32 = 0xaa });
 
@@ -6228,7 +6190,6 @@ fn airIsNull(cg: *CodeGen, inst: Air.Inst.Index, opcode: std.wasm.Opcode, op_kin
 fn isNull(cg: *CodeGen, operand: WValue, op_ty: Type, opcode: std.wasm.Opcode, op_kind: OpKind) InnerError!WValue {
     const pt = cg.pt;
     const zcu = pt.zcu;
-    try cg.emitWValue(operand);
     const optional_ty = switch (op_kind) {
         .value => op_ty,
         .ptr => op_ty.childType(zcu),
@@ -6241,19 +6202,27 @@ fn isNull(cg: *CodeGen, operand: WValue, op_ty: Type, opcode: std.wasm.Opcode, o
             const offset = std.math.cast(u32, payload_ty.abiSize(zcu)) orelse {
                 return cg.fail("Optional type {f} too big to fit into stack frame", .{optional_ty.fmt(pt)});
             };
-            try cg.addMemArg(.i32_load8_u, .{ .offset = operand.offset() + offset, .alignment = .@"1" });
+            try cg.emitMemBase(operand);
+            try cg.addMemArg(.i32_load8_u, .{ .offset = operand.memOffset() + offset, .alignment = .@"1" });
+        } else {
+            try cg.emitWValue(operand);
         }
     } else if (payload_ty.isSlice(zcu)) {
+        const base_offset = operand.memOffset();
+        try cg.emitMemBase(operand);
         switch (cg.ptr_size) {
-            .wasm32 => try cg.addMemArg(.i32_load, .{ .offset = operand.offset(), .alignment = .@"4" }),
-            .wasm64 => try cg.addMemArg(.i64_load, .{ .offset = operand.offset(), .alignment = .@"8" }),
+            .wasm32 => try cg.addMemArg(.i32_load, .{ .offset = base_offset, .alignment = .@"4" }),
+            .wasm64 => try cg.addMemArg(.i64_load, .{ .offset = base_offset, .alignment = .@"8" }),
         }
     } else {
         if (op_kind == .ptr) {
+            try cg.emitMemBase(operand);
             try cg.addMemArg(.i32_load, .{
-                .offset = operand.offset(),
+                .offset = operand.memOffset(),
                 .alignment = .@"4",
             });
+        } else {
+            try cg.emitWValue(operand);
         }
     }
 
@@ -6278,7 +6247,7 @@ fn airOptionalPayload(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
         if (opt_ty.optionalReprIsPayload(zcu)) break :result operand;
 
         if (isByRef(payload_ty, zcu, cg.target)) {
-            break :result try cg.buildPointerOffset(operand, 0, .new);
+            break :result operand;
         }
 
         break :result try cg.load(operand, payload_ty, .{});
@@ -6298,7 +6267,7 @@ fn airOptionalPayloadPtr(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
             break :result operand;
         }
 
-        break :result try cg.buildPointerOffset(operand, 0, .new);
+        break :result operand;
     };
     return cg.finishAir(inst, result, &.{ty_op.operand});
 }
@@ -6319,12 +6288,11 @@ fn airOptionalPayloadPtrSet(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void 
         return cg.fail("Optional type {f} too big to fit into stack frame", .{opt_ty.fmt(pt)});
     };
 
-    try cg.emitWValue(operand);
+    try cg.emitMemBase(operand);
     try cg.addImm32(1);
-    try cg.addMemArg(.i32_store8, .{ .offset = operand.offset() + offset, .alignment = .@"1" });
+    try cg.addMemArg(.i32_store8, .{ .offset = operand.memOffset() + offset, .alignment = .@"1" });
 
-    const result = try cg.buildPointerOffset(operand, 0, .new);
-    return cg.finishAir(inst, result, &.{ty_op.operand});
+    return cg.finishAir(inst, operand, &.{ty_op.operand});
 }
 
 fn airWrapOptional(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
@@ -6336,9 +6304,9 @@ fn airWrapOptional(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     const result = result: {
         if (!payload_ty.hasRuntimeBits(zcu)) {
             const non_null_bit = try cg.allocStack(Type.u1);
-            try cg.emitWValue(non_null_bit);
+            try cg.emitMemBase(non_null_bit);
             try cg.addImm32(1);
-            try cg.addMemArg(.i32_store8, .{ .offset = non_null_bit.offset(), .alignment = .@"1" });
+            try cg.addMemArg(.i32_store8, .{ .offset = non_null_bit.memOffset(), .alignment = .@"1" });
             break :result non_null_bit;
         }
 
@@ -6353,12 +6321,11 @@ fn airWrapOptional(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
 
         // Create optional type, set the non-null bit, and store the operand inside the optional type
         const result_ptr = try cg.allocStack(op_ty);
-        try cg.emitWValue(result_ptr);
+        try cg.emitMemBase(result_ptr);
         try cg.addImm32(1);
-        try cg.addMemArg(.i32_store8, .{ .offset = result_ptr.offset() + offset, .alignment = .@"1" });
+        try cg.addMemArg(.i32_store8, .{ .offset = result_ptr.memOffset() + offset, .alignment = .@"1" });
 
-        const payload_ptr = try cg.buildPointerOffset(result_ptr, 0, .new);
-        try cg.store(payload_ptr, operand, payload_ty, .{});
+        try cg.store(result_ptr, operand, payload_ty, .{});
         break :result result_ptr;
     };
 
@@ -6483,7 +6450,7 @@ fn airPtrElemVal(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     if (ptr_ty.isSlice(zcu)) {
         _ = try cg.load(ptr, .usize, .{});
     } else {
-        try cg.lowerToStack(ptr);
+        try cg.emitWValue(ptr);
     }
 
     // calculate index into slice
@@ -6513,7 +6480,7 @@ fn airPtrElemPtr(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     if (ptr_ty.isSlice(zcu)) {
         _ = try cg.load(ptr, .usize, .{});
     } else {
-        try cg.lowerToStack(ptr);
+        try cg.emitWValue(ptr);
     }
 
     // calculate index into ptr
@@ -6538,7 +6505,7 @@ fn airPtrBinOp(cg: *CodeGen, inst: Air.Inst.Index, op: enum { add, sub }) InnerE
         else => ptr_ty.childType(zcu),
     };
 
-    try cg.lowerToStack(ptr);
+    try cg.emitWValue(ptr);
     try cg.emitWValue(offset);
 
     switch (cg.ptr_size) {
@@ -6620,7 +6587,7 @@ fn memset(cg: *CodeGen, elem_ty: Type, ptr: WValue, len: WValue, value: WValue) 
             try cg.addLabel(.br_if, 0);
         }
 
-        try cg.lowerToStack(ptr);
+        try cg.emitWValue(ptr);
         try cg.emitWValue(value);
         try cg.emitWValue(len);
         try cg.addExtended(.memory_fill);
@@ -6655,11 +6622,13 @@ fn memset(cg: *CodeGen, elem_ty: Type, ptr: WValue, len: WValue, value: WValue) 
 
     var end_ptr = try cg.allocLocal(Type.usize);
     defer end_ptr.free(cg);
-    var new_ptr = try cg.buildPointerOffset(ptr, 0, .new);
+    var new_ptr = try cg.allocLocal(Type.usize);
     defer new_ptr.free(cg);
+    try cg.emitWValue(ptr);
+    try cg.addLocal(.local_set, new_ptr.local.value);
 
     // get the loop conditional: if current pointer address equals final pointer's address
-    try cg.lowerToStack(ptr);
+    try cg.emitWValue(ptr);
     try cg.emitWValue(final_len);
     switch (cg.ptr_size) {
         .wasm32 => try cg.addTag(.i32_add),
@@ -6714,7 +6683,7 @@ fn airArrayElemVal(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     const elem_size = elem_ty.abiSize(zcu);
 
     if (isByRef(array_ty, zcu, cg.target)) {
-        try cg.lowerToStack(array);
+        try cg.emitWValue(array);
         try cg.emitWValue(index);
         try cg.addImm32(@intCast(elem_size));
         try cg.addTag(.i32_mul);
@@ -6747,7 +6716,7 @@ fn airArrayElemVal(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
                 try cg.store(stack_vec, array, array_ty, .{});
 
                 // Is a non-unrolled vector (v128)
-                try cg.lowerToStack(stack_vec);
+                try cg.emitWValue(stack_vec);
                 try cg.emitWValue(index);
                 try cg.addImm32(@intCast(elem_size));
                 try cg.addTag(.i32_mul);
@@ -6783,13 +6752,13 @@ fn airSplat(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
                     64 => @backingInt(std.wasm.SimdOpcode.v128_load64_splat),
                     else => break :blk, // Cannot make use of simd-instructions
                 };
-                try cg.emitWValue(operand);
+                try cg.emitMemBase(operand);
                 const extra_index: u32 = @intCast(cg.mir_extra.items.len);
                 // stores as := opcode, offset, alignment (opcode::memarg)
                 try cg.mir_extra.ensureUnusedCapacity(cg.gpa, 4);
                 cg.mir_extra.appendAssumeCapacity(opcode);
                 _ = try cg.addExtraAssumeCapacity(Mir.MemArg{
-                    .offset = operand.offset(),
+                    .offset = operand.memOffset(),
                     .alignment = elem_ty.abiAlignment(zcu).toStdMem(),
                 });
                 try cg.addInst(.{ .tag = .simd_prefix, .data = .{ .payload = extra_index } });
@@ -6856,12 +6825,12 @@ fn airShuffleOne(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
 
     const dest_alloc = try cg.allocStack(result_ty);
     for (mask, 0..) |mask_elem, out_idx| {
-        try cg.emitWValue(dest_alloc);
+        try cg.emitMemBase(dest_alloc);
         const elem_val = switch (mask_elem.unwrap()) {
             .elem => |idx| try cg.load(operand, elem_ty, .{ .offset = elem_size * idx }),
             .value => |val| try cg.lowerConstant(.fromInterned(val)),
         };
-        try cg.store(.stack, elem_val, elem_ty, .{ .offset = dest_alloc.offset() + elem_size * out_idx });
+        try cg.store(.stack, elem_val, elem_ty, .{ .offset = dest_alloc.memOffset() + elem_size * out_idx });
     }
     return cg.finishAir(inst, dest_alloc, &.{unwrapped.operand});
 }
@@ -6924,13 +6893,13 @@ fn airShuffleTwo(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
 
     const dest_alloc = try cg.allocStack(result_ty);
     for (mask, 0..) |mask_elem, out_idx| {
-        try cg.emitWValue(dest_alloc);
+        try cg.emitMemBase(dest_alloc);
         const elem_val = switch (mask_elem.unwrap()) {
             .a_elem => |idx| try cg.load(operand_a, elem_ty, .{ .offset = elem_size * idx }),
             .b_elem => |idx| try cg.load(operand_b, elem_ty, .{ .offset = elem_size * idx }),
             .undef => try cg.emitUndefined(elem_ty),
         };
-        try cg.store(.stack, elem_val, elem_ty, .{ .offset = dest_alloc.offset() + elem_size * out_idx });
+        try cg.store(.stack, elem_val, elem_ty, .{ .offset = dest_alloc.memOffset() + elem_size * out_idx });
     }
     return cg.finishAir(inst, dest_alloc, &.{ unwrapped.operand_a, unwrapped.operand_b });
 }
@@ -6956,39 +6925,18 @@ fn airAggregateInit(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
             .array, .vector => {
                 const result = try cg.allocStack(result_ty);
                 const elem_ty = result_ty.childType(zcu);
-                const elem_size = @as(u32, @intCast(elem_ty.abiSize(zcu)));
+                const elem_size = elem_ty.abiSize(zcu);
                 const sentinel = result_ty.sentinel(zcu);
 
-                // When the element type is by reference, we must copy the entire
-                // value. It is therefore safer to move the offset pointer and store
-                // each value individually, instead of using store offsets.
-                if (isByRef(elem_ty, zcu, cg.target)) {
-                    // copy stack pointer into a temporary local, which is
-                    // moved for each element to store each value in the right position.
-                    const offset = try cg.buildPointerOffset(result, 0, .new);
-                    for (elements, 0..) |elem, elem_index| {
-                        const elem_val = try cg.resolveInst(elem);
-                        try cg.store(offset, elem_val, elem_ty, .{});
-
-                        if (elem_index < elements.len - 1 or sentinel != null) {
-                            _ = try cg.buildPointerOffset(offset, elem_size, .modify);
-                        }
-                    }
-                    if (sentinel) |s| {
-                        const val = try cg.resolveValue(s);
-                        try cg.store(offset, val, elem_ty, .{});
-                    }
-                } else {
-                    var offset: u32 = 0;
-                    for (elements) |elem| {
-                        const elem_val = try cg.resolveInst(elem);
-                        try cg.store(result, elem_val, elem_ty, .{ .offset = offset });
-                        offset += elem_size;
-                    }
-                    if (sentinel) |s| {
-                        const val = try cg.resolveValue(s);
-                        try cg.store(result, val, elem_ty, .{ .offset = offset });
-                    }
+                var offset: u64 = 0;
+                for (elements) |elem| {
+                    const elem_val = try cg.resolveInst(elem);
+                    try cg.store(result, elem_val, elem_ty, .{ .offset = offset });
+                    offset += elem_size;
+                }
+                if (sentinel) |s| {
+                    const val = try cg.resolveValue(s);
+                    try cg.store(result, val, elem_ty, .{ .offset = offset });
                 }
                 break :result_value result;
             },
@@ -7001,10 +6949,9 @@ fn airAggregateInit(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
 
                         const elem_ty = result_ty.fieldType(elem_index, zcu);
                         const field_offset = result_ty.structFieldOffset(elem_index, zcu);
-                        const offset = try cg.buildPointerOffset(result, field_offset, .new);
 
                         const value = try cg.resolveInst(elem);
-                        try cg.store(offset, value, elem_ty, .{});
+                        try cg.store(result, value, elem_ty, .{ .offset = field_offset });
                     }
 
                     break :result_value result;
@@ -7051,12 +6998,7 @@ fn airUnionInit(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
             const result_ptr = try cg.allocStack(union_ty);
             const payload = try cg.resolveInst(extra.init);
             if (layout.tag_align.compare(.gte, layout.payload_align)) {
-                if (isByRef(field_ty, zcu, cg.target)) {
-                    const payload_ptr = try cg.buildPointerOffset(result_ptr, layout.tag_size, .new);
-                    try cg.store(payload_ptr, payload, field_ty, .{});
-                } else {
-                    try cg.store(result_ptr, payload, field_ty, .{ .offset = layout.tag_size });
-                }
+                try cg.store(result_ptr, payload, field_ty, .{ .offset = layout.tag_size });
 
                 if (layout.tag_size > 0) {
                     try cg.store(result_ptr, tag_int, .fromInterned(union_obj.enum_tag_type), .{});
@@ -7163,13 +7105,11 @@ fn airErrUnionPayloadPtrSet(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void 
         .{ .offset = errUnionErrorOffset(payload_ty, zcu) },
     );
 
-    const result = result: {
-        if (!payload_ty.hasRuntimeBits(zcu)) {
-            break :result operand;
-        }
+    if (!payload_ty.hasRuntimeBits(zcu)) {
+        return cg.finishAir(inst, operand, &.{ty_op.operand});
+    }
 
-        break :result try cg.buildPointerOffset(operand, @as(u32, @intCast(errUnionPayloadOffset(payload_ty, zcu))), .new);
-    };
+    const result = try cg.offsetPointer(operand, errUnionPayloadOffset(payload_ty, zcu));
     return cg.finishAir(inst, result, &.{ty_op.operand});
 }
 
@@ -7194,16 +7134,23 @@ fn airFieldParentPtr(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
         },
     };
 
-    const result = if (field_offset != 0) result: {
-        const base = try cg.buildPointerOffset(field_ptr, 0, .new);
-        try cg.addLocal(.local_get, base.local.value);
-        try cg.addImm32(@intCast(field_offset));
-        try cg.addTag(.i32_sub);
-        try cg.addLocal(.local_set, base.local.value);
-        break :result base;
-    } else field_ptr;
+    if (field_offset == 0) {
+        return cg.finishAir(inst, field_ptr, &.{extra.field_ptr});
+    }
 
-    return cg.finishAir(inst, result, &.{extra.field_ptr});
+    // maybe use offsetPointer? sub looks better in disasm
+    try cg.emitWValue(field_ptr);
+    switch (cg.ptr_size) {
+        .wasm32 => {
+            try cg.addImm32(@intCast(field_offset));
+            try cg.addTag(.i32_sub);
+        },
+        .wasm64 => {
+            try cg.addImm64(field_offset);
+            try cg.addTag(.i64_sub);
+        },
+    }
+    return cg.finishAir(inst, .stack, &.{extra.field_ptr});
 }
 
 fn sliceOrArrayPtr(cg: *CodeGen, ptr: WValue, ptr_ty: Type) InnerError!WValue {
@@ -7322,7 +7269,7 @@ fn airErrorName(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
 fn airPtrSliceFieldPtr(cg: *CodeGen, inst: Air.Inst.Index, offset: u32) InnerError!void {
     const ty_op = cg.air.instructions.items(.data)[@backingInt(inst)].ty_op;
     const slice_ptr = try cg.resolveInst(ty_op.operand);
-    const result = try cg.buildPointerOffset(slice_ptr, offset, .new);
+    const result = try cg.offsetPointer(slice_ptr, offset);
     return cg.finishAir(inst, result, &.{ty_op.operand});
 }
 
@@ -7392,13 +7339,15 @@ fn lowerTry(
         try cg.startBlock(.block, .empty);
 
         // check if the error tag is set for the error union.
-        try cg.emitWValue(err_union);
         if (pl_has_bits or operand_is_ptr) {
-            const err_offset: u32 = @intCast(errUnionErrorOffset(pl_ty, zcu));
+            try cg.emitMemBase(err_union);
+            const err_offset = errUnionErrorOffset(pl_ty, zcu);
             try cg.addMemArg(.i32_load16_u, .{
-                .offset = err_union.offset() + err_offset,
+                .offset = err_union.memOffset() + err_offset,
                 .alignment = Type.anyerror.abiAlignment(zcu).toStdMem(),
             });
+        } else {
+            try cg.emitWValue(err_union);
         }
         try cg.addTag(.i32_eqz);
         try cg.addLabel(.br_if, 0); // jump out of block when error is '0'
@@ -7417,9 +7366,9 @@ fn lowerTry(
         return .none;
     }
 
-    const pl_offset: u32 = @intCast(errUnionPayloadOffset(pl_ty, zcu));
+    const pl_offset = errUnionPayloadOffset(pl_ty, zcu);
     if (operand_is_ptr or isByRef(pl_ty, zcu, cg.target)) {
-        return buildPointerOffset(cg, err_union, pl_offset, .new);
+        return cg.offsetPointer(err_union, pl_offset);
     }
     const payload = try cg.load(err_union, pl_ty, .{ .offset = pl_offset });
     return payload.toLocal(cg, pl_ty);
@@ -7448,7 +7397,7 @@ fn callIntrinsic(
     // and emit it as our first argument
     const sret = if (want_sret_param) blk: {
         const sret_local = try cg.allocStack(return_type);
-        try cg.lowerToStack(sret_local);
+        try cg.emitWValue(sret_local);
         break :blk sret_local;
     } else .none;
 
@@ -7476,7 +7425,7 @@ fn airTagName(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     const enum_ty = cg.typeOf(un_op);
 
     try cg.addInst(.{ .tag = .enum_tag_name_table_ref, .data = .{ .ip_index = enum_ty.toIntern() } });
-    try cg.lowerToStack(operand);
+    try cg.emitWValue(operand);
     try cg.addInst(.{ .tag = .call_tag_index, .data = .{ .ip_index = enum_ty.toIntern() } });
 
     switch (cg.ptr_size) {
@@ -7500,7 +7449,7 @@ fn airIsNamedEnumValue(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     const operand = try cg.resolveInst(un_op);
     const enum_ty = cg.typeOf(un_op);
 
-    try cg.lowerToStack(operand);
+    try cg.emitWValue(operand);
     try cg.addInst(.{ .tag = .call_tag_index, .data = .{ .ip_index = enum_ty.toIntern() } });
     try cg.addImm32(~@as(u32, 0));
     try cg.addTag(.i32_ne);
@@ -7614,9 +7563,9 @@ fn airCmpxchg(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
 
     const ptr_val = if (cg.useAtomicFeature()) val: {
         const val_local = try cg.allocLocal(ty);
-        try cg.emitWValue(ptr_operand);
-        try cg.lowerToStack(expected_val);
-        try cg.lowerToStack(new_val);
+        try cg.emitMemBase(ptr_operand);
+        try cg.emitWValue(expected_val);
+        try cg.emitWValue(new_val);
         try cg.addAtomicMemArg(switch (ty.abiSize(zcu)) {
             1 => .i32_atomic_rmw8_cmpxchg_u,
             2 => .i32_atomic_rmw16_cmpxchg_u,
@@ -7624,7 +7573,7 @@ fn airCmpxchg(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
             8 => .i32_atomic_rmw_cmpxchg,
             else => |size| return cg.fail("TODO: implement `@cmpxchg` for types with abi size '{d}'", .{size}),
         }, .{
-            .offset = ptr_operand.offset(),
+            .offset = ptr_operand.memOffset(),
             .alignment = ty.abiAlignment(zcu).toStdMem(),
         });
         try cg.addLocal(.local_tee, val_local.local.value);
@@ -7637,13 +7586,13 @@ fn airCmpxchg(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
         }
         const ptr_val = try WValue.toLocal(try cg.load(ptr_operand, ty, .{}), cg, ty);
 
-        try cg.lowerToStack(ptr_operand);
-        try cg.lowerToStack(new_val);
+        try cg.emitMemBase(ptr_operand);
+        try cg.emitWValue(new_val);
         try cg.emitWValue(ptr_val);
         _ = try cg.intCmp(int_ty, .eq, ptr_val, expected_val);
         try cg.addLocal(.local_tee, cmp_result.local.value);
         try cg.addTag(.select);
-        try cg.store(.stack, .stack, ty, .{});
+        try cg.store(.stack, .stack, ty, .{ .offset = ptr_operand.memOffset() });
 
         break :val ptr_val;
     };
@@ -7684,9 +7633,9 @@ fn airAtomicLoad(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
             8 => .i64_atomic_load,
             else => |size| return cg.fail("TODO: @atomicLoad for types with abi size {d}", .{size}),
         };
-        try cg.emitWValue(ptr);
+        try cg.emitMemBase(ptr);
         try cg.addAtomicMemArg(tag, .{
-            .offset = ptr.offset(),
+            .offset = ptr.memOffset(),
             .alignment = ty.abiAlignment(zcu).toStdMem(),
         });
     } else {
@@ -7719,7 +7668,7 @@ fn airAtomicRmw(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
                 // create a loop to cmpxchg the new value
                 try cg.startBlock(.loop, .empty);
 
-                try cg.emitWValue(ptr);
+                try cg.emitMemBase(ptr);
                 try cg.emitWValue(value);
                 if (op == .Nand) {
                     const and_res = try cg.intAnd(int_ty, value, operand);
@@ -7746,7 +7695,7 @@ fn airAtomicRmw(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
                         else => return cg.fail("TODO: implement `@atomicRmw` with operation `{s}` for types larger than 64 bits", .{@tagName(op)}),
                     },
                     .{
-                        .offset = ptr.offset(),
+                        .offset = ptr.memOffset(),
                         .alignment = ty.abiAlignment(zcu).toStdMem(),
                     },
                 );
@@ -7764,7 +7713,7 @@ fn airAtomicRmw(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
 
             // the other operations have their own instructions for Wasm.
             else => {
-                try cg.emitWValue(ptr);
+                try cg.emitMemBase(ptr);
                 try cg.emitWValue(operand);
                 const tag: std.wasm.AtomicsOpcode = switch (ty.abiSize(zcu)) {
                     1 => switch (op) {
@@ -7806,7 +7755,7 @@ fn airAtomicRmw(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
                     else => |size| return cg.fail("TODO: Implement `@atomicRmw` for types with abi size {d}", .{size}),
                 };
                 try cg.addAtomicMemArg(tag, .{
-                    .offset = ptr.offset(),
+                    .offset = ptr.memOffset(),
                     .alignment = ty.abiAlignment(zcu).toStdMem(),
                 });
                 return cg.finishAir(inst, .stack, &.{ pl_op.operand, extra.operand });
@@ -7825,23 +7774,23 @@ fn airAtomicRmw(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
             => {
                 if (ty.isAnyFloat()) {
                     const float_ty: FloatType = .fromType(cg, ty);
-                    try cg.emitWValue(ptr);
+                    try cg.emitMemBase(ptr);
                     _ = switch (op) {
                         .Add => try cg.floatAdd(float_ty, result, operand),
                         .Sub => try cg.floatSub(float_ty, result, operand),
                         else => unreachable,
                     };
-                    try cg.store(.stack, .stack, ty, .{ .offset = ptr.offset() });
+                    try cg.store(.stack, .stack, ty, .{ .offset = ptr.memOffset() });
                 } else {
                     const int_ty: IntType = .fromType(cg, ty);
-                    try cg.emitWValue(ptr);
+                    try cg.emitMemBase(ptr);
                     _ = switch (op) {
                         .Add => try cg.intAdd(int_ty, result, operand),
                         .Sub => try cg.intSub(int_ty, result, operand),
                         else => unreachable,
                     };
                     _ = try cg.intWrap(int_ty, .stack);
-                    try cg.store(.stack, .stack, ty, .{ .offset = ptr.offset() });
+                    try cg.store(.stack, .stack, ty, .{ .offset = ptr.memOffset() });
                 }
             },
             .And,
@@ -7849,39 +7798,39 @@ fn airAtomicRmw(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
             .Xor,
             => {
                 const int_ty: IntType = .fromType(cg, ty);
-                try cg.emitWValue(ptr);
+                try cg.emitMemBase(ptr);
                 _ = switch (op) {
                     .And => try cg.intAnd(int_ty, result, operand),
                     .Or => try cg.intOr(int_ty, result, operand),
                     .Xor => try cg.intXor(int_ty, result, operand),
                     else => unreachable,
                 };
-                try cg.store(.stack, .stack, ty, .{ .offset = ptr.offset() });
+                try cg.store(.stack, .stack, ty, .{ .offset = ptr.memOffset() });
             },
             .Max,
             .Min,
             => {
                 if (ty.isAnyFloat()) {
                     const float_ty: FloatType = .fromType(cg, ty);
-                    try cg.emitWValue(ptr);
+                    try cg.emitMemBase(ptr);
                     try cg.emitWValue(result);
                     try cg.emitWValue(operand);
                     _ = try cg.floatCmp(float_ty, if (op == .Max) .gt else .lt, result, operand);
                     try cg.addTag(.select);
-                    try cg.store(.stack, .stack, ty, .{ .offset = ptr.offset() });
+                    try cg.store(.stack, .stack, ty, .{ .offset = ptr.memOffset() });
                 } else {
                     const int_ty: IntType = .fromType(cg, ty);
-                    try cg.emitWValue(ptr);
+                    try cg.emitMemBase(ptr);
                     try cg.emitWValue(result);
                     try cg.emitWValue(operand);
                     _ = try cg.intCmp(int_ty, if (op == .Max) .gt else .lt, result, operand);
                     try cg.addTag(.select);
-                    try cg.store(.stack, .stack, ty, .{ .offset = ptr.offset() });
+                    try cg.store(.stack, .stack, ty, .{ .offset = ptr.memOffset() });
                 }
             },
             .Nand => {
                 const int_ty: IntType = .fromType(cg, ty);
-                try cg.emitWValue(ptr);
+                try cg.emitMemBase(ptr);
                 const and_res = try cg.intAnd(int_ty, result, operand);
                 if (int_ty.bits <= 32) {
                     try cg.addImm32(~@as(u32, 0));
@@ -7891,7 +7840,7 @@ fn airAtomicRmw(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
                     return cg.fail("TODO: `@atomicRmw` with operator `Nand` for types larger than 64 bits", .{});
                 }
                 _ = try cg.intXor(int_ty, and_res, .stack);
-                try cg.store(.stack, .stack, ty, .{ .offset = ptr.offset() });
+                try cg.store(.stack, .stack, ty, .{ .offset = ptr.memOffset() });
             },
         }
 
@@ -7916,10 +7865,10 @@ fn airAtomicStore(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
             8 => .i64_atomic_store,
             else => |size| return cg.fail("TODO: @atomicLoad for types with abi size {d}", .{size}),
         };
-        try cg.emitWValue(ptr);
-        try cg.lowerToStack(operand);
+        try cg.emitMemBase(ptr);
+        try cg.emitWValue(operand);
         try cg.addAtomicMemArg(tag, .{
-            .offset = ptr.offset(),
+            .offset = ptr.memOffset(),
             .alignment = ty.abiAlignment(zcu).toStdMem(),
         });
     } else {
@@ -7996,7 +7945,7 @@ fn airAsm(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
                     return cg.fail("Self-hosted wasm backend requires input constraint to be equal \"r\"", .{});
                 }
 
-                try cg.lowerToStack(operand);
+                try cg.emitWValue(operand);
                 const op_local = try WValue.toLocal(.stack, cg, cg.typeOf(input.operand));
 
                 const gop = try local_map.getOrPutValue(cg.gpa, name, op_local.local.value);
