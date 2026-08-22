@@ -56,13 +56,15 @@ pub fn lower(emit: *Emit) Error!void {
         writeSleb128(code, aligned_stack);
         // subtract it from the current stack pointer
         code.appendAssumeCapacity(@backingInt(std.wasm.Opcode.i32_sub));
-        // Get negative stack alignment
-        const neg_stack_align = @as(i32, @intCast(align_bytes)) * -1;
-        code.appendAssumeCapacity(@backingInt(std.wasm.Opcode.i32_const));
-        writeSleb128(code, neg_stack_align);
-        // Bitwise-and the value to get the new stack pointer to ensure the
-        // pointers are aligned with the abi alignment.
-        code.appendAssumeCapacity(@backingInt(std.wasm.Opcode.i32_and));
+        if (align_bytes != 16) {
+            // Get negative stack alignment
+            const neg_stack_align = @as(i32, @intCast(align_bytes)) * -1;
+            code.appendAssumeCapacity(@backingInt(std.wasm.Opcode.i32_const));
+            writeSleb128(code, neg_stack_align);
+            // Bitwise-and the value to get the new stack pointer to ensure the
+            // pointers are aligned with the abi alignment.
+            code.appendAssumeCapacity(@backingInt(std.wasm.Opcode.i32_and));
+        }
         // The bottom will be used to calculate all stack pointer offsets.
         code.appendAssumeCapacity(@backingInt(std.wasm.Opcode.local_tee));
         writeUleb128(code, mir.prologue.bottom_stack_local);
