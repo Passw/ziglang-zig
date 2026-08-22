@@ -249,11 +249,14 @@ pub fn flush(
 }
 
 fn mirToMC(spork8: *Spork8, w: *Io.Writer) !void {
-    for (spork8.mir_instructions.items(.tag)) |tag| {
+    for (spork8.mir_instructions.items(.tag), spork8.mir_instructions.items(.data)) |tag, data| {
         switch (tag) {
             .set_page_i => @panic("TODO"),
             .set_addr_i => @panic("TODO"),
-            .load_i => @panic("TODO"),
+            .load_i_outa => {
+                try w.writeByte(@backingInt(tag));
+                try w.writeByte(data.imm8);
+            },
             .jump => @panic("TODO"),
             .halt => try w.writeByte(@backingInt(tag)),
         }

@@ -1,4 +1,5 @@
 const std = @import("std");
+const mem = std.mem;
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
@@ -360,7 +361,6 @@ fn genInst(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
         .error_set_has_value,
         .frame_addr,
 
-        .assembly,
         .is_err_ptr,
         .is_non_err_ptr,
 
@@ -434,6 +434,7 @@ fn genInst(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
         => |tag| return cg.fail("TODO: implement spork8 inst: {s}", .{@tagName(tag)}),
 
         .unreach => cg.airUnreachable(inst),
+        .assembly => cg.airAssembly(inst),
         .trap => cg.airTrap(inst),
 
         .work_item_id,
@@ -453,12 +454,87 @@ fn airTrap(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     try cg.addTag(.halt);
 }
 
+fn airAssembly(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
+    const unwrapped_asm = cg.air.unwrapAsm(inst);
+    const outputs = unwrapped_asm.outputs;
+    // const inputs = unwrapped_asm.inputs;
+
+    const zcu = cg.pt.zcu;
+    // const output_ty = cg.typeOfIndex(inst);
+
+    if (outputs.len != 0) {
+        @panic("TODO: Support assembly outputs");
+    }
+
+    var constValues: std.array_hash_map.String(u8) = .empty;
+    defer constValues.deinit(zcu.gpa);
+    {
+        var it = unwrapped_asm.iterateInputs();
+        while (it.next()) |input| {
+            const constraint = input.constraint;
+            if (!mem.eql(u8, constraint, "I")) {
+                return cg.fail("Assembly constraint {q} not supported", .{constraint});
+            }
+            const operand = input.operand.toInterned() orelse {
+                return cg.fail("Immediate argument to inline assembly must be compile-time value", .{});
+            };
+            const name = input.name;
+
+            const value = switch (zcu.intern_pool.indexToKey(operand)) {
+                .int => |val| v: {
+                    if (val.ty != .u8_type) {
+                        return cg.fail("Non-u8 type used in inline assembly value: {}", .{val.ty});
+                    }
+                    break :v val.storage.u64;
+                },
+                else => return cg.fail("Non-int operands not supported", .{}),
+            };
+
+            try constValues.put(zcu.gpa, name, @intCast(value));
+
+            // return cg.fail("TODO: Constraint={q}, name={q}, value={}", .{ constraint, name, value });
+        }
+    }
+
+    {
+        var lines = mem.tokenizeScalar(u8, unwrapped_asm.source, '\n');
+        while (lines.next()) |line| {
+            var tokens = mem.tokenizeScalar(u8, line, ' ');
+            const op = tokens.next().?;
+            const instType = std.meta.stringToEnum(AsmInstType, op) orelse return cg.fail("Invalid asm instruction: {q}", .{op});
+            switch (instType) {
+                .LoadI => {
+                    const register = std.meta.stringToEnum(Register, tokens.next().?).?;
+                    const value = tokens.next().?;
+                    const intValue = v: {
+                        if (mem.startsWith(u8, value, "%[")) {
+                            const name = value[2 .. value.len - 1];
+                            break :v constValues.get(name).?;
+                        } else {
+                            break :v std.fmt.parseInt(u8, value, 0) catch unreachable;
+                        }
+                    };
+                    if (register != .OutA) {
+                        return cg.fail("TODO: other variants of LoadI", .{});
+                    }
+                    try cg.addTagImm8(.load_i_outa, intValue);
+                },
+                else => return cg.fail("TODO: support asm instruction: {t}", .{instType}),
+            }
+        }
+    }
+}
+
 pub fn addInst(cg: *CodeGen, inst: Mir.Inst) error{OutOfMemory}!void {
     try cg.mir_instructions.append(cg.gpa, inst);
 }
 
 pub fn addTag(cg: *CodeGen, tag: Mir.Inst.Tag) error{OutOfMemory}!void {
     try cg.addInst(.{ .tag = tag, .data = .{ .nothing = {} } });
+}
+
+pub fn addTagImm8(cg: *CodeGen, tag: Mir.Inst.Tag, imm8: u8) error{OutOfMemory}!void {
+    try cg.addInst(.{ .tag = tag, .data = .{ .imm8 = imm8 } });
 }
 
 fn fail(cg: *CodeGen, comptime fmt: []const u8, args: anytype) error{ OutOfMemory, AlreadyReported } {
@@ -470,3 +546,74 @@ fn fail(cg: *CodeGen, comptime fmt: []const u8, args: anytype) error{ OutOfMemor
 fn extraLen(cg: *const CodeGen) u32 {
     return @intCast(cg.mir_extra.items.len - cg.start_mir_extra_off);
 }
+
+const AsmInstType = enum(u8) {
+    SetPageReg, // Set the memory address high byte to a register value.
+    SetPageI, // Set the memory address high byte to a constant value.
+    SetAddrReg, // Set the memory address low byte to a register value.
+    SetAddrI, // Set the memory address low byte to a constant value.
+    Load, // Load a value from a constant address into a register.
+    LoadI, // Load a constant value into a register.
+    LoadP, // Load a value from a constant address (setting low byte only) into a register.
+    LoadInc, // Load a value from the currently set memory address into a register, and increment the address n times.
+    LoadStck, // Load a value from an offset on the current stack frame into a register.
+    Store, // Store a value to a constant address from a register.
+    StoreI, // Store a constant value into a constant address.
+    StoreP, // Store a value to a constant address (low byte only) from a register.
+    StoreInc, // Store a value from the currently set memory address from a register, and increment the address n times.
+    StoreStck, // Store a value to an offset on the current stack frame, from a register.
+    StoreNStck, // Store a value to an offset on the next stack frame, from a register.
+    StorePStck, // Store a value to an offset on the previous stack frame, from a register.
+    StoreStckI, // Store a constant value to an offset on the current stack frame.
+    StoreNStckI, // Store a constant value to an offset on the next stack frame.
+    StorePStckI, // Store a constant value to an offset on the previous stack frame.
+    Copy, // Copy a value from one register to another register.
+    Jump, // Jump to a constant location.
+    JumpReg, // Jump to a register A (high byte) + register B (low byte).
+    JumpMem, // Jump to a location pointed to by memory at the current memory address (high byte first).
+    Call, // Call a function.
+    Return, // Return from a function.
+    CmpI, // Compare A to a constant value (sets flags, but discards result).
+    CmpAndI, // Compare A to a constant value with bitwise AND (sets flags, but discards result).
+    Cmp, // Compare A to a value from memory (sets flags, but discards result).
+    CmpAnd, // Compare A to a value in memory with bitwise AND (sets flags, but discards result).
+    CmpReg, // Compare A to a value from a register (sets flags, but discards result).
+    CmpAndReg, // Compare A to a value from a register with bitwise AND (sets flags, but discards result).
+    ShiftL, // Shift B left by 1.
+    ShiftR, // Shift B right by 1.
+    RotateL, // Rotate B left by 1.
+    RotateR, // Rotate B right by 1.
+    AddI, // Add a constant value to A.
+    SubI, // Subtract a constant value from A.
+    AndI, // Bitwise-AND A with a constant value.
+    AddINF, // Add a constant value to A, without updating flags.
+    SubINF, // Subtract a constant value from A, without updating flags.
+    AndINF, // Bitwise-AND A with a constant value, without updating flags.
+    AccumulateAdd, // Add register B to A -> A.
+    AccumulateSub, // Subtract register B from A -> A.
+    AccumulateAnd, // A & B -> A.
+    OrI, // Bitwise OR B with A -> A.
+    XorI, // Bitwise OR a constant value with A -> A.
+    Not, // Invert register A.
+    Add, // Add a value from memory to A.
+    Sub, // Subtract a value from memory from A.
+    And, // AND A with a value from memory.
+    Or, // OR A with a value from memory.
+    Xor, // XOR A with a value from memory.
+    Nop, // No-op.
+    Nop1, // No-op with 1 extra clock cycle.
+    Nop2, // No-op with 2 extra clock cycles.
+    Halt, // Halt - stop the program forever (until reset).
+};
+
+const Register = enum(u8) {
+    A,
+    B,
+    C,
+    PCnt,
+    MAdr,
+    Stack,
+    OutA,
+    Shift,
+    Swap,
+};
