@@ -491,8 +491,6 @@ fn airAssembly(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
             };
 
             try constValues.put(zcu.gpa, name, @intCast(value));
-
-            // return cg.fail("TODO: Constraint={q}, name={q}, value={}", .{ constraint, name, value });
         }
     }
 
@@ -500,22 +498,24 @@ fn airAssembly(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
         var lines = mem.tokenizeScalar(u8, unwrapped_asm.source, '\n');
         while (lines.next()) |line| {
             var tokens = mem.tokenizeScalar(u8, line, ' ');
-            const op = tokens.next().?;
+            // If there's no tokens, then it must be a blank line, so just skip it.
+            const op = tokens.next() orelse continue;
             const instType = std.meta.stringToEnum(AsmInstType, op) orelse return cg.fail("Invalid asm instruction: {q}", .{op});
             switch (instType) {
                 .LoadI => {
-                    const register = std.meta.stringToEnum(Register, tokens.next().?).?;
-                    const value = tokens.next().?;
+                    const registerString = tokens.next() orelse return cg.fail("Missing register for LoadI instruction", .{});
+                    const register = std.meta.stringToEnum(Register, registerString) orelse return cg.fail("Invalid register: {q}", .{registerString});
+                    const value = tokens.next() orelse return cg.fail("Missing immediate value for LoadI", .{});
                     const intValue = v: {
                         if (mem.startsWith(u8, value, "%[")) {
                             const name = value[2 .. value.len - 1];
-                            break :v constValues.get(name).?;
+                            break :v constValues.get(name) orelse return cg.fail("Constraint name {q} not included in constraints for inline asm", .{name});
                         } else {
-                            break :v std.fmt.parseInt(u8, value, 0) catch unreachable;
+                            break :v std.fmt.parseInt(u8, value, 0) catch return cg.fail("Couldn't parse u8 from LoadI immediate value", .{});
                         }
                     };
                     if (register != .OutA) {
-                        return cg.fail("TODO: other variants of LoadI", .{});
+                        return cg.fail("TODO: support other variants of LoadI", .{});
                     }
                     try cg.addTagImm8(.load_i_outa, intValue);
                 },
