@@ -1110,7 +1110,7 @@ pub fn toElfMachine(target: *const Target) std.elf.EM {
         .riscv32, .riscv32be, .riscv64, .riscv64be => .RISCV,
         .s390x => .S390,
         .sh, .sheb => .SH,
-        .sparc => if (target.cpu.has(.sparc, .v9)) .SPARC32PLUS else .SPARC,
+        .sparc => if (target.cpu.hasAny(.sparc, &.{ .v8plus, .v9 })) .SPARC32PLUS else .SPARC,
         .sparc64 => .SPARCV9,
         .ve => .VE,
         .x86_16, .x86 => .@"386",
