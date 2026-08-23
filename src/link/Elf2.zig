@@ -203,6 +203,8 @@ const Node = union(enum) {
     archive,
     /// This includes the archive magic and long file member.
     archive_header,
+    /// This is a footer of the `.elf` node, and contains the next archive entry's file header.
+    archive_elf_footer,
     elf,
     ehdr,
     shdr,
@@ -2952,6 +2954,7 @@ pub fn symbolForAtom(elf: *Elf, atom: link.File.AtomId) link.File.SymbolId {
     const lsi: Symbol.LocalIndex = switch (elf.getNode(Node.fromAtom(atom))) {
         .archive,
         .archive_header,
+        .archive_elf_footer,
         .elf,
         .ehdr,
         .shdr,
@@ -3599,8 +3602,8 @@ fn initHeaders(
         }, phnum };
     };
 
-    const expected_nodes_len = @as(usize, if (is_archive) 2 else 0) + // .archive, .archive_header
-        3 + // `.file`, `.ehdr`, and `.shdr` nodes
+    const expected_nodes_len = @as(usize, if (is_archive) 3 else 0) + // .archive, .archive_header, .archive_elf_footer
+        3 + // `.elf`, `.ehdr`, and `.shdr` nodes
         (shnum - 1) + // -1 because the SHN_UNDEF shdr does not have a `.section` node
         (phnum -| 1); // -1 because the GNU_STACK phdr does not have a `.segment` node
 
@@ -3643,6 +3646,12 @@ fn initHeaders(
             .enable_next_moved = true,
         });
         elf.nodes.appendAssumeCapacity(.elf);
+
+        _ = try elf.ni.elf.addOnlyFooterChild(&elf.mf, gpa, .{
+            .alignment = .@"2",
+            .size = @sizeOf(std.elf.ar_hdr),
+        });
+        elf.nodes.appendAssumeCapacity(.archive_elf_footer);
     } else {
         elf.ni.elf = .root;
         elf.nodes.appendAssumeCapacity(.elf);
@@ -3729,6 +3738,14 @@ fn initHeaders(
         }
 
         elf.phdrs.items[phndx.gnu_stack] = .none;
+    } else {
+        elf.ni.rodata = elf.ni.elf;
+        elf.ni.text = elf.ni.elf;
+        elf.ni.data = elf.ni.elf;
+        elf.ni.data_rel_ro = elf.ni.elf;
+        if (comp.config.any_non_single_threaded) {
+            elf.ni.tls = .wrap(elf.ni.elf);
+        }
     }
 
     switch (class) {
@@ -4522,8 +4539,6 @@ fn initHeaders(
             break :str try elf.string(.dynstr, slice);
         },
     };
-
-    try elf.ensureElfNodeSize();
 }
 
 pub fn startProgress(elf: *Elf, prog_node: std.Progress.Node) void {
@@ -4558,6 +4573,7 @@ fn getNodeShndx(elf: *const Elf, ni: MappedFile.Node.Index) Section.Index {
     return switch (elf.getNode(ni)) {
         .archive,
         .archive_header,
+        .archive_elf_footer,
         .elf,
         .ehdr,
         .shdr,
@@ -4578,6 +4594,7 @@ fn getNodeVAddr(elf: *Elf, ni: MappedFile.Node.Index) u64 {
     return switch (elf.getNode(ni)) {
         .archive,
         .archive_header,
+        .archive_elf_footer,
         .elf,
         .ehdr,
         .shdr,
@@ -4596,7 +4613,7 @@ fn getNodeVAddr(elf: *Elf, ni: MappedFile.Node.Index) u64 {
 }
 fn computeNodeVAddr(elf: *Elf, ni: MappedFile.Node.Index) u64 {
     const parent_vaddr = switch (elf.getNode(ni.parent(&elf.mf).unwrap().?)) {
-        .archive, .archive_header => unreachable,
+        .archive, .archive_header, .archive_elf_footer => unreachable,
         .elf => return 0,
         .ehdr, .shdr => unreachable,
         .segment => |phndx| switch (elf.phdrSlice()) {
@@ -4622,6 +4639,7 @@ fn resetNodeRelocs(elf: *Elf, ni: MappedFile.Node.Index) void {
     const symbol_relocs: *SymbolReloc.Index, const got_relocs: ?*GotReloc.Index = switch (elf.getNode(ni)) {
         .archive,
         .archive_header,
+        .archive_elf_footer,
         .elf,
         .ehdr,
         .shdr,
@@ -6255,8 +6273,6 @@ fn prelinkInner(elf: *Elf) Error!void {
         };
         elf.input_pending_index += 1;
     }
-
-    try elf.ensureElfNodeSize();
 }
 
 fn prepareDynamic(elf: *Elf) Error!void {
@@ -7056,6 +7072,7 @@ fn addGotRelocAssumeCapacity(
     switch (elf.getNode(node)) {
         .archive,
         .archive_header,
+        .archive_elf_footer,
         .elf,
         .ehdr,
         .shdr,
@@ -7485,7 +7502,6 @@ fn flushInner(
 
     try elf.prepareDynamic();
 
-    try elf.ensureElfNodeSize();
     while (try elf.idle(tid)) {}
 
     // We've done the final `idle` loop, so everything is at its final place in the file. We have a
@@ -7738,8 +7754,6 @@ fn genPending(elf: *Elf, pt: Zcu.PerThread) Error!void {
         };
         break;
     }
-
-    try elf.ensureElfNodeSize();
 }
 
 fn genUav(
@@ -7922,7 +7936,7 @@ fn flushMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void
 
     switch (elf.getNode(ni)) {
         .archive, .archive_header => unreachable,
-        .elf => {},
+        .archive_elf_footer, .elf => {},
         .ehdr, .shdr => elf.flushElfOffset(ni),
         .segment => |phndx| {
             elf.flushElfOffset(ni);
@@ -8216,7 +8230,7 @@ fn flushResized(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!vo
             }
         },
         .archive_header, .elf => {},
-        .ehdr => unreachable,
+        .ehdr, .archive_elf_footer => unreachable,
         .shdr => {},
         .segment => |phndx| switch (elf.phdrSlice()) {
             inline else => |phdr| {
@@ -8301,6 +8315,7 @@ fn flushNextMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!
 
     switch (elf.getNode(ni)) {
         .archive,
+        .archive_elf_footer,
         .ehdr,
         .shdr,
         .segment,
@@ -8746,8 +8761,6 @@ fn updateExportInner(
         .uav => |uav| (try elf.uavMapIndex(uav, .none)).symbol(elf),
     };
 
-    try elf.ensureElfNodeSize();
-
     // Initialize the global symbol with the same values that the local one currently has. If the
     // NAV/UAV is updated, then `updateNavInner` or `genUav` will update the global symbol sizes,
     // and `flushMoved` will update their values.
@@ -8968,18 +8981,6 @@ fn ensureSegmentAligned(elf: *Elf, start_phndx: u32, min_align: Alignment) Error
             else => unreachable,
         }
     }
-}
-
-/// Must be called deterministically after any call to `MappedFile.Node.Index.resize`
-/// (of `elf.ni.elf` or one of its children) before any possible calls to `idle`.
-fn ensureElfNodeSize(elf: *Elf) MappedFile.Error!void {
-    if (elf.ni.elf == .root) return;
-    var child_it = elf.ni.elf.reverseChildren(&elf.mf);
-    const last_end = if (child_it.next()) |last_ni| last_end: {
-        const last_offset, const last_size = last_ni.location(&elf.mf).resolve(&elf.mf);
-        break :last_end last_offset + last_size;
-    } else 0;
-    try elf.ni.elf.ensureMinimumSize(&elf.mf, elf.base.comp.gpa, last_end + @sizeOf(std.elf.ar_hdr));
 }
 
 /// If `sym` has a PLT entry, returns the address of that entry (specifically, the address which a
