@@ -2146,18 +2146,22 @@ pub fn zigTriple(target: *const Target, allocator: Allocator) Allocator.Error![]
     return Query.fromTarget(target).zigTriple(allocator);
 }
 
+/// Deprecated; to be removed in 0.18.0. Use `std.zig.target.hurdTupleSimple` instead.
 pub fn hurdTupleSimple(allocator: Allocator, arch: Cpu.Arch, abi: Abi) ![]u8 {
     return std.fmt.allocPrint(allocator, "{s}-{s}", .{ @tagName(arch), @tagName(abi) });
 }
 
+/// Deprecated; to be removed in 0.18.0. Use `std.zig.target.hurdTuple` instead.
 pub fn hurdTuple(target: *const Target, allocator: Allocator) ![]u8 {
     return hurdTupleSimple(allocator, target.cpu.arch, target.abi);
 }
 
+/// Deprecated; to be removed in 0.18.0. Use `std.zig.target.linuxTripleSimple` instead.
 pub fn linuxTripleSimple(allocator: Allocator, arch: Cpu.Arch, os_tag: Os.Tag, abi: Abi) ![]u8 {
     return std.fmt.allocPrint(allocator, "{s}-{s}-{s}", .{ @tagName(arch), @tagName(os_tag), @tagName(abi) });
 }
 
+/// Deprecated; to be removed in 0.18.0. Use `std.zig.target.linuxTriple` instead.
 pub fn linuxTriple(target: *const Target, allocator: Allocator) ![]u8 {
     return linuxTripleSimple(allocator, target.cpu.arch, target.os.tag, target.abi);
 }
