@@ -4249,8 +4249,8 @@ fn initHeaders(
                     if (elf.targetEndian() != std.lang.Endian.native) {
                         std.mem.byteSwapAllFields(info.Header(), header);
                     }
-                    // The initial bucket and chain values are all 0, but `MappedFile` initialized
-                    // the node with zeroes anyway, so no need to memset.
+                    // The initial bucket and chain values are all 0.
+                    @memset(hash_slice[@sizeOf(info.Header())..], 0);
                 },
             }
 
