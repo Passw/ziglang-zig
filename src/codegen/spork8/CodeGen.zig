@@ -187,7 +187,7 @@ fn genBody(cg: *CodeGen, body: []const Air.Inst.Index) InnerError!void {
 
 fn genInst(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     const air_tags = cg.air.instructions.items(.tag);
-    return switch (air_tags[@intFromEnum(inst)]) {
+    return switch (air_tags[@backingInt(inst)]) {
         .inferred_alloc, .inferred_alloc_comptime => unreachable,
 
         .add,
@@ -431,7 +431,7 @@ fn genInst(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
         .legalize_vec_store_elem,
         .legalize_vec_elem_val,
         .legalize_compiler_rt_call,
-        => |tag| return cg.fail("TODO: implement spork8 inst: {s}", .{@tagName(tag)}),
+        => |tag| return cg.fail("TODO: implement spork8 inst: {t}", .{tag}),
 
         .unreach => cg.airUnreachable(inst),
         .assembly => cg.airAssembly(inst),
@@ -473,21 +473,21 @@ fn airAssembly(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
         while (it.next()) |input| {
             const constraint = input.constraint;
             if (!mem.eql(u8, constraint, "I")) {
-                return cg.fail("Assembly constraint {q} not supported", .{constraint});
+                return cg.fail("assembly constraint {q} not supported", .{constraint});
             }
             const operand = input.operand.toInterned() orelse {
-                return cg.fail("Immediate argument to inline assembly must be compile-time value", .{});
+                return cg.fail("immediate argument to inline assembly must be compile-time value", .{});
             };
             const name = input.name;
 
             const value = switch (zcu.intern_pool.indexToKey(operand)) {
                 .int => |val| v: {
                     if (val.ty != .u8_type) {
-                        return cg.fail("Non-u8 type used in inline assembly value: {}", .{val.ty});
+                        return cg.fail("non-u8 type used in inline assembly value: {}", .{val.ty});
                     }
                     break :v val.storage.u64;
                 },
-                else => return cg.fail("Non-int operands not supported", .{}),
+                else => return cg.fail("non-int operands not supported", .{}),
             };
 
             try constValues.put(zcu.gpa, name, @intCast(value));
@@ -500,18 +500,19 @@ fn airAssembly(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
             var tokens = mem.tokenizeScalar(u8, line, ' ');
             // If there's no tokens, then it must be a blank line, so just skip it.
             const op = tokens.next() orelse continue;
-            const instType = std.meta.stringToEnum(AsmInstType, op) orelse return cg.fail("Invalid asm instruction: {q}", .{op});
+            const instType = std.meta.stringToEnum(AsmInstType, op) orelse return cg.fail("invalid asm instruction: {q}", .{op});
             switch (instType) {
                 .LoadI => {
-                    const registerString = tokens.next() orelse return cg.fail("Missing register for LoadI instruction", .{});
-                    const register = std.meta.stringToEnum(Register, registerString) orelse return cg.fail("Invalid register: {q}", .{registerString});
-                    const value = tokens.next() orelse return cg.fail("Missing immediate value for LoadI", .{});
+                    const registerString = tokens.next() orelse return cg.fail("missing register for LoadI instruction", .{});
+                    const register = std.meta.stringToEnum(Register, registerString) orelse return cg.fail("invalid register: {q}", .{registerString});
+                    const value = tokens.next() orelse return cg.fail("missing immediate value for LoadI", .{});
                     const intValue = v: {
                         if (mem.startsWith(u8, value, "%[")) {
                             const name = value[2 .. value.len - 1];
-                            break :v constValues.get(name) orelse return cg.fail("Constraint name {q} not included in constraints for inline asm", .{name});
+                            break :v constValues.get(name) orelse return cg.fail("constraint name {q} not included in constraints for inline asm", .{name});
                         } else {
-                            break :v std.fmt.parseInt(u8, value, 0) catch return cg.fail("Couldn't parse u8 from LoadI immediate value", .{});
+                            break :v std.fmt.parseInt(u8, value, 0) catch |err|
+                                return cg.fail("invalid LoadI immediate value: {t}", .{err});
                         }
                     };
                     if (register != .OutA) {
@@ -548,62 +549,118 @@ fn extraLen(cg: *const CodeGen) u32 {
 }
 
 const AsmInstType = enum(u8) {
-    SetPageReg, // Set the memory address high byte to a register value.
-    SetPageI, // Set the memory address high byte to a constant value.
-    SetAddrReg, // Set the memory address low byte to a register value.
-    SetAddrI, // Set the memory address low byte to a constant value.
-    Load, // Load a value from a constant address into a register.
-    LoadI, // Load a constant value into a register.
-    LoadP, // Load a value from a constant address (setting low byte only) into a register.
-    LoadInc, // Load a value from the currently set memory address into a register, and increment the address n times.
-    LoadStck, // Load a value from an offset on the current stack frame into a register.
-    Store, // Store a value to a constant address from a register.
-    StoreI, // Store a constant value into a constant address.
-    StoreP, // Store a value to a constant address (low byte only) from a register.
-    StoreInc, // Store a value from the currently set memory address from a register, and increment the address n times.
-    StoreStck, // Store a value to an offset on the current stack frame, from a register.
-    StoreNStck, // Store a value to an offset on the next stack frame, from a register.
-    StorePStck, // Store a value to an offset on the previous stack frame, from a register.
-    StoreStckI, // Store a constant value to an offset on the current stack frame.
-    StoreNStckI, // Store a constant value to an offset on the next stack frame.
-    StorePStckI, // Store a constant value to an offset on the previous stack frame.
-    Copy, // Copy a value from one register to another register.
-    Jump, // Jump to a constant location.
-    JumpReg, // Jump to a register A (high byte) + register B (low byte).
-    JumpMem, // Jump to a location pointed to by memory at the current memory address (high byte first).
-    Call, // Call a function.
-    Return, // Return from a function.
-    CmpI, // Compare A to a constant value (sets flags, but discards result).
-    CmpAndI, // Compare A to a constant value with bitwise AND (sets flags, but discards result).
-    Cmp, // Compare A to a value from memory (sets flags, but discards result).
-    CmpAnd, // Compare A to a value in memory with bitwise AND (sets flags, but discards result).
-    CmpReg, // Compare A to a value from a register (sets flags, but discards result).
-    CmpAndReg, // Compare A to a value from a register with bitwise AND (sets flags, but discards result).
-    ShiftL, // Shift B left by 1.
-    ShiftR, // Shift B right by 1.
-    RotateL, // Rotate B left by 1.
-    RotateR, // Rotate B right by 1.
-    AddI, // Add a constant value to A.
-    SubI, // Subtract a constant value from A.
-    AndI, // Bitwise-AND A with a constant value.
-    AddINF, // Add a constant value to A, without updating flags.
-    SubINF, // Subtract a constant value from A, without updating flags.
-    AndINF, // Bitwise-AND A with a constant value, without updating flags.
-    AccumulateAdd, // Add register B to A -> A.
-    AccumulateSub, // Subtract register B from A -> A.
-    AccumulateAnd, // A & B -> A.
-    OrI, // Bitwise OR B with A -> A.
-    XorI, // Bitwise OR a constant value with A -> A.
-    Not, // Invert register A.
-    Add, // Add a value from memory to A.
-    Sub, // Subtract a value from memory from A.
-    And, // AND A with a value from memory.
-    Or, // OR A with a value from memory.
-    Xor, // XOR A with a value from memory.
-    Nop, // No-op.
-    Nop1, // No-op with 1 extra clock cycle.
-    Nop2, // No-op with 2 extra clock cycles.
-    Halt, // Halt - stop the program forever (until reset).
+    /// Set the memory address high byte to a register value.
+    SetPageReg,
+    /// Set the memory address high byte to a constant value.
+    SetPageI,
+    /// Set the memory address low byte to a register value.
+    SetAddrReg,
+    /// Set the memory address low byte to a constant value.
+    SetAddrI,
+    /// Load a value from a constant address into a register.
+    Load,
+    /// Load a constant value into a register.
+    LoadI,
+    /// Load a value from a constant address (setting low byte only) into a register.
+    LoadP,
+    /// Load a value from the currently set memory address into a register, and increment the address n times.
+    LoadInc,
+    /// Load a value from an offset on the current stack frame into a register.
+    LoadStck,
+    /// Store a value to a constant address from a register.
+    Store,
+    /// Store a constant value into a constant address.
+    StoreI,
+    /// Store a value to a constant address (low byte only) from a register.
+    StoreP,
+    /// Store a value from the currently set memory address from a register, and increment the address n times.
+    StoreInc,
+    /// Store a value to an offset on the current stack frame, from a register.
+    StoreStck,
+    /// Store a value to an offset on the next stack frame, from a register.
+    StoreNStck,
+    /// Store a value to an offset on the previous stack frame, from a register.
+    StorePStck,
+    /// Store a constant value to an offset on the current stack frame.
+    StoreStckI,
+    /// Store a constant value to an offset on the next stack frame.
+    StoreNStckI,
+    /// Store a constant value to an offset on the previous stack frame.
+    StorePStckI,
+    /// Copy a value from one register to another register.
+    Copy,
+    /// Jump to a constant location.
+    Jump,
+    /// Jump to a register A (high byte) + register B (low byte).
+    JumpReg,
+    /// Jump to a location pointed to by memory at the current memory address (high byte first).
+    JumpMem,
+    /// Call a function.
+    Call,
+    /// Return from a function.
+    Return,
+    /// Compare A to a constant value (sets flags, but discards result).
+    CmpI,
+    /// Compare A to a constant value with bitwise AND (sets flags, but discards result).
+    CmpAndI,
+    /// Compare A to a value from memory (sets flags, but discards result).
+    Cmp,
+    /// Compare A to a value in memory with bitwise AND (sets flags, but discards result).
+    CmpAnd,
+    /// Compare A to a value from a register (sets flags, but discards result).
+    CmpReg,
+    /// Compare A to a value from a register with bitwise AND (sets flags, but discards result).
+    CmpAndReg,
+    /// Shift B left by 1.
+    ShiftL,
+    /// Shift B right by 1.
+    ShiftR,
+    /// Rotate B left by 1.
+    RotateL,
+    /// Rotate B right by 1.
+    RotateR,
+    /// Add a constant value to A.
+    AddI,
+    /// Subtract a constant value from A.
+    SubI,
+    /// Bitwise-AND A with a constant value.
+    AndI,
+    /// Add a constant value to A, without updating flags.
+    AddINF,
+    /// Subtract a constant value from A, without updating flags.
+    SubINF,
+    /// Bitwise-AND A with a constant value, without updating flags.
+    AndINF,
+    /// Add register B to A -> A.
+    AccumulateAdd,
+    /// Subtract register B from A -> A.
+    AccumulateSub,
+    /// A & B -> A.
+    AccumulateAnd,
+    /// Bitwise OR B with A -> A.
+    OrI,
+    /// Bitwise OR a constant value with A -> A.
+    XorI,
+    /// Invert register A.
+    Not,
+    /// Add a value from memory to A.
+    Add,
+    /// Subtract a value from memory from A.
+    Sub,
+    /// AND A with a value from memory.
+    And,
+    /// OR A with a value from memory.
+    Or,
+    /// XOR A with a value from memory.
+    Xor,
+    /// No-op.
+    Nop,
+    /// No-op with 1 extra clock cycle.
+    Nop1,
+    /// No-op with 2 extra clock cycles.
+    Nop2,
+    /// Halt - stop the program forever (until reset).
+    Halt,
 };
 
 const Register = enum(u8) {
