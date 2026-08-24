@@ -2033,6 +2033,9 @@ pub const Cpu = struct {
                 .ez80_cet,
                 .ez80_tiflags,
                 => &.{.ez80},
+
+                .spork8,
+                => &.{.spork8},
             };
         }
     };
@@ -3818,7 +3821,7 @@ pub fn cCallingConvention(target: *const Target) ?std.builtin.CallingConvention 
         .nvptx, .nvptx64 => .nvptx_device,
         .spirv32, .spirv64 => .spirv_device,
         .ez80 => .ez80_cet,
-        .spork8 => .naked,
+        .spork8 => .spork8,
     };
 }
 

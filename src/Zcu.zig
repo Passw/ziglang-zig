@@ -4699,7 +4699,7 @@ pub fn callconvSupported(zcu: *Zcu, cc: std.lang.CallingConvention) union(enum) 
             else => false,
         },
         .zsf_spork8 => switch (cc) {
-            .naked => true,
+            .spork8, .naked => true,
             else => false,
         },
     };

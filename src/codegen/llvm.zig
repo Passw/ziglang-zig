@@ -4393,6 +4393,7 @@ pub fn toLlvmCallConvTag(cc_tag: std.lang.CallingConvention.Tag, target: *const 
         .spirv_vertex,
         .spirv_task,
         .spirv_mesh,
+        .spork8,
         => null,
     };
 }
