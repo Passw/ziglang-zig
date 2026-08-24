@@ -396,26 +396,29 @@ pub fn classifyCompilerRtLibName(name: []const u8) CompilerRtClassification {
 }
 
 pub fn hasDebugInfo(target: *const std.Target) bool {
-    return switch (target.cpu.arch) {
-        // TODO: We should make newer PTX versions depend on older ones so we'd just check `ptx75`.
-        .nvptx, .nvptx64 => target.cpu.hasAny(.nvptx, &.{
-            .ptx75,
-            .ptx76,
-            .ptx77,
-            .ptx78,
-            .ptx80,
-            .ptx81,
-            .ptx82,
-            .ptx83,
-            .ptx84,
-            .ptx85,
-            .ptx86,
-            .ptx87,
-            .ptx88,
-            .ptx90,
-        }),
-        .bpfel, .bpfeb => false,
-        else => true,
+    return switch (target.ofmt) {
+        .raw, .hex => false,
+        else => switch (target.cpu.arch) {
+            // TODO: We should make newer PTX versions depend on older ones so we'd just check `ptx75`.
+            .nvptx, .nvptx64 => target.cpu.hasAny(.nvptx, &.{
+                .ptx75,
+                .ptx76,
+                .ptx77,
+                .ptx78,
+                .ptx80,
+                .ptx81,
+                .ptx82,
+                .ptx83,
+                .ptx84,
+                .ptx85,
+                .ptx86,
+                .ptx87,
+                .ptx88,
+                .ptx90,
+            }),
+            .bpfel, .bpfeb => false,
+            else => true,
+        },
     };
 }
 
