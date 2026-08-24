@@ -47,7 +47,7 @@ pub fn createEmpty(
     options: link.File.OpenOptions,
 ) !*Spork8 {
     const target = comp.root_mod.resolved_target.result;
-    assert(target.ofmt == .spork8);
+    assert(target.ofmt == .raw);
     assert(comp.config.output_mode == .Exe);
     const io = comp.io;
 
@@ -90,7 +90,7 @@ pub fn updateFunc(
     any_mir: *const codegen.AnyMir,
 ) !void {
     dev.check(.spork8_backend);
-    // This linker implementation only works with codegen backend `.stage2_spork8`.
+    // This linker implementation only works with `std.lang.CompilerBackend.zsf_spork8`.
     const mir = &any_mir.spork8;
     const zcu = pt.zcu;
     const gpa = zcu.gpa;

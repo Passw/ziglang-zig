@@ -104,7 +104,7 @@ pub const Os = struct {
                 .plan9 => arch.plan9Ext(),
                 else => switch (arch) {
                     .wasm32, .wasm64 => ".wasm",
-                    .spork8 => ".spork8",
+                    .spork8 => ".bin",
                     else => "",
                 },
             };
@@ -1065,7 +1065,6 @@ pub const ObjectFormat = enum {
     hex,
     /// The Mach object format used by macOS and other Apple platforms.
     macho,
-    spork8,
     /// The a.out format used by Plan 9 from Bell Labs.
     plan9,
     /// Machine code with no metadata.
@@ -1081,7 +1080,6 @@ pub const ObjectFormat = enum {
             .coff => ".obj",
             .elf, .macho, .wasm => ".o",
             .hex => ".ihex",
-            .spork8 => ".spork8",
             .plan9 => arch.plan9Ext(),
             .raw => ".bin",
             .spirv => ".spv",
@@ -1096,7 +1094,7 @@ pub const ObjectFormat = enum {
             else => switch (arch) {
                 .spirv32, .spirv64 => .spirv,
                 .wasm32, .wasm64 => .wasm,
-                .spork8 => .spork8,
+                .spork8 => .raw,
                 else => .elf,
             },
         };

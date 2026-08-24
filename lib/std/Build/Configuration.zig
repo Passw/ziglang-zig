@@ -2443,7 +2443,6 @@ pub const TargetQuery = struct {
         elf,
         hex,
         macho,
-        spork8,
         plan9,
         raw,
         spirv,

@@ -80,7 +80,7 @@ pub fn legalizeFeatures(pt: Zcu.PerThread, nav_index: InternPool.Nav.Index) ?*co
         .stage2_x86,
         .stage2_riscv64,
         .stage2_sparc64,
-        .stage2_spork8,
+        .zsf_spork8,
         .stage2_spirv,
         => |backend| {
             dev.check(devFeatureForBackend(backend));
@@ -122,7 +122,7 @@ pub const AnyMir = union {
             .stage2_wasm => "wasm",
             .stage2_c => "c",
             .stage2_spirv => "spirv",
-            .stage2_spork8 => "spork8",
+            .zsf_spork8 => "spork8",
             else => unreachable,
         };
     }
@@ -140,7 +140,7 @@ pub const AnyMir = union {
             .stage2_wasm,
             .stage2_c,
             .stage2_spirv,
-            .stage2_spork8,
+            .zsf_spork8,
             => |backend_ct| @field(mir, tag(backend_ct)).deinit(gpa),
         }
     }
@@ -170,7 +170,7 @@ pub fn generateFunction(
         .stage2_x86_64,
         .stage2_wasm,
         .stage2_c,
-        .stage2_spork8,
+        .zsf_spork8,
         .stage2_spirv,
         => |backend| {
             dev.check(devFeatureForBackend(backend));

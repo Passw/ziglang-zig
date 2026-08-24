@@ -1300,9 +1300,11 @@ pub const File = struct {
                 .plan9 => .plan9,
                 .c => .c,
                 .spirv => .spirv,
-                .spork8 => .spork8,
                 .hex => @panic("TODO implement hex object format"),
-                .raw => @panic("TODO implement raw object format"),
+                // This may seem surprising at first, but with a little massaging, the spork8 linker
+                // could and probably should be generalized into a "raw linker" which is used to output
+                // bare machine code for any architecture for which a corresponding backend exists.
+                .raw => .spork8,
             };
         }
 

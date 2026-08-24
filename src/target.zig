@@ -189,7 +189,6 @@ pub fn hasLlvmSupport(target: *const std.Target, ofmt: std.Target.ObjectFormat) 
         // LLVM does not support these object formats:
         .c,
         .plan9,
-        .spork8,
         => return false,
 
         .coff,
