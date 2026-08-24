@@ -486,24 +486,6 @@ pub const Node = extern struct {
             return ni.get(mf).prev;
         }
 
-        pub fn ChildIterator(comptime direction: enum { prev, next }) type {
-            return struct {
-                mf: *const MappedFile,
-                ni: Node.Index.Optional,
-                pub fn next(it: *@This()) ?Node.Index {
-                    const ni = it.ni.unwrap() orelse return null;
-                    it.ni = @field(ni.get(it.mf), @tagName(direction));
-                    return ni;
-                }
-            };
-        }
-        pub fn children(ni: Node.Index, mf: *const MappedFile) ChildIterator(.next) {
-            return .{ .mf = mf, .ni = ni.get(mf).first };
-        }
-        pub fn reverseChildren(ni: Node.Index, mf: *const MappedFile) ChildIterator(.prev) {
-            return .{ .mf = mf, .ni = ni.get(mf).last };
-        }
-
         pub fn childrenMoved(ni: Node.Index, gpa: Allocator, mf: *MappedFile) Allocator.Error!void {
             var child_oni = ni.get(mf).last;
             while (child_oni.unwrap()) |child_ni| {

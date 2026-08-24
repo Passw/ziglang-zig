@@ -3546,16 +3546,20 @@ fn objectSectionMapIndex(
         try coff.symbols.ensureUnusedCapacity(gpa, 1);
         const parent_ni = parent.node(coff);
         var prev_oni: MappedFile.Node.Index.Optional = .none;
-        var next_it = parent_ni.children(&coff.mf);
-        while (next_it.next()) |next_ni| switch (std.mem.order(
-            u8,
-            name_slice,
-            coff.getNode(next_ni).object_section.name(coff).toSlice(coff),
-        )) {
-            .lt => break,
-            .eq => unreachable,
-            .gt => prev_oni = .wrap(next_ni),
-        };
+        {
+            var child_oni = parent_ni.first(&coff.mf);
+            while (child_oni.unwrap()) |child_ni| : (child_oni = child_ni.next(&coff.mf)) {
+                switch (std.mem.order(
+                    u8,
+                    name_slice,
+                    coff.getNode(child_ni).object_section.name(coff).toSlice(coff),
+                )) {
+                    .lt => break,
+                    .eq => unreachable,
+                    .gt => prev_oni = .wrap(child_ni),
+                }
+            }
+        }
         const ni = try parent_ni.addHeaderChildAfter(&coff.mf, gpa, prev_oni, .{
             .alignment = alignment,
         });
@@ -7025,7 +7029,7 @@ fn flushResized(coff: *Coff, ni: MappedFile.Node.Index) !void {
             if (coff.isArchive() and coff.members.items.len > 0) {
                 const last_member = coff.members.items[coff.members.items.len - 1];
                 // See .archive_member branch for reasoning
-                assert(Node.known.file.reverseChildren(&coff.mf).ni == last_member.content_ni.toOptional());
+                assert(Node.known.file.last(&coff.mf).unwrap().? == last_member.content_ni);
                 try coff.flushResized(last_member.content_ni);
             }
         },
@@ -7717,30 +7721,31 @@ pub fn printNode(
             if (mf_node.flags.has_content) " has_content" else "",
         });
     }
-    var leaf = true;
-    var child_it = ni.children(&coff.mf);
-    while (child_it.next()) |child_ni| {
-        leaf = false;
-        try coff.printNode(tid, w, child_ni, indent + 1);
-    }
-    if (leaf) {
-        const file_loc = ni.fileLocation(&coff.mf, false);
-        if (file_loc.size == 0) return;
-        var address = file_loc.offset;
-        const line_len = 0x10;
-        var line_it = std.mem.window(
-            u8,
-            coff.mf.memory_map.memory[@intCast(file_loc.offset)..][0..@intCast(file_loc.size)],
-            line_len,
-            line_len,
-        );
-        while (line_it.next()) |line_bytes| : (address += line_len) {
-            try w.splatByteAll(' ', indent + 1);
-            try w.print("{x:0>8}  ", .{address});
-            for (line_bytes) |byte| try w.print("{x:0>2} ", .{byte});
-            try w.splatByteAll(' ', 3 * (line_len - line_bytes.len) + 1);
-            for (line_bytes) |byte| try w.writeByte(if (std.ascii.isPrint(byte)) byte else '.');
-            try w.writeByte('\n');
+    if (ni.first(&coff.mf).unwrap()) |first_ni| {
+        // non-leaf, just print children
+        var child_ni = first_ni;
+        while (true) {
+            try coff.printNode(tid, w, child_ni, indent + 1);
+            child_ni = child_ni.next(&coff.mf).unwrap() orelse break;
         }
+        return;
+    }
+    const file_loc = ni.fileLocation(&coff.mf, false);
+    if (file_loc.size == 0) return;
+    var address = file_loc.offset;
+    const line_len = 0x10;
+    var line_it = std.mem.window(
+        u8,
+        coff.mf.memory_map.memory[@intCast(file_loc.offset)..][0..@intCast(file_loc.size)],
+        line_len,
+        line_len,
+    );
+    while (line_it.next()) |line_bytes| : (address += line_len) {
+        try w.splatByteAll(' ', indent + 1);
+        try w.print("{x:0>8}  ", .{address});
+        for (line_bytes) |byte| try w.print("{x:0>2} ", .{byte});
+        try w.splatByteAll(' ', 3 * (line_len - line_bytes.len) + 1);
+        for (line_bytes) |byte| try w.writeByte(if (std.ascii.isPrint(byte)) byte else '.');
+        try w.writeByte('\n');
     }
 }

@@ -7902,8 +7902,10 @@ fn flushElfOffset(elf: *Elf, ni: MappedFile.Node.Index) void {
                     }
                 },
             }
-            var child_it = ni.children(&elf.mf);
-            while (child_it.next()) |child_ni| elf.flushElfOffset(child_ni);
+            var child_oni = ni.first(&elf.mf);
+            while (child_oni.unwrap()) |child_ni| : (child_oni = child_ni.next(&elf.mf)) {
+                elf.flushElfOffset(child_ni);
+            }
         },
         .section => |shndx| switch (elf.shdrPtr(shndx)) {
             inline else => |shdr| elf.targetStore(&shdr.offset, @intCast(elf_offset)),
@@ -8203,9 +8205,10 @@ fn flushResized(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!vo
     _, const size = ni.location(&elf.mf).resolve(&elf.mf);
     switch (elf.getNode(ni)) {
         .archive => {
-            var child_it = ni.reverseChildren(&elf.mf);
-            if (child_it.next()) |last_ni| {
-                if (child_it.next()) |prev_ni| if (prev_ni.hasNextMoved(&elf.mf)) return;
+            if (ni.last(&elf.mf).unwrap()) |last_ni| {
+                if (last_ni.prev(&elf.mf).unwrap()) |prev_ni| {
+                    if (prev_ni.hasNextMoved(&elf.mf)) return;
+                }
                 const offset, _ = last_ni.location(&elf.mf).resolve(&elf.mf);
                 _ = std.mem.print(&elf.arHdrPtr(last_ni).ar_size, "{d:<10}", .{
                     size - offset,
@@ -8894,13 +8897,15 @@ pub fn printNode(
             if (mf_node.flags.has_content) " has_content" else "",
         });
     }
-    var leaf = true;
-    var child_it = ni.children(&elf.mf);
-    while (child_it.next()) |child_ni| {
-        leaf = false;
-        try elf.printNode(tid, w, child_ni, indent + 1);
+    if (ni.first(&elf.mf).unwrap()) |first_ni| {
+        // non-leaf, just print children
+        var child_ni = first_ni;
+        while (true) {
+            try elf.printNode(tid, w, child_ni, indent + 1);
+            child_ni = child_ni.next(&elf.mf).unwrap() orelse break;
+        }
+        return;
     }
-    if (!leaf) return;
     const file_loc = ni.fileLocation(&elf.mf, false);
     var address = file_loc.offset;
     if (file_loc.size == 0) {
