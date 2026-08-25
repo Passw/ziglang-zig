@@ -617,7 +617,8 @@ pub fn structType(
 
 /// Returns the layout-decorated variant of `ty` for use inside a Vulkan/OpenGL
 /// interface block. Vulkan forbids nested Block decorations, so recursive calls
-/// always pass `false`.
+/// pass `false`, except through an array, whose elements are each a
+/// block of their own.
 ///
 /// This is distinct from `resolveType` because SPIR-V forbids such decorations
 /// on the pointee of a Function-scope variable.
@@ -695,26 +696,30 @@ pub fn layoutType(cg: *CodeGen, ty: Type, is_block_root: bool) Error!Id {
         },
         .array => id: {
             const elem_ty = ty.childType(zcu);
-            const elem_ty_id = try cg.layoutType(elem_ty, false);
+            const elem_ty_id = try cg.layoutType(elem_ty, is_block_root);
             const total_len = std.math.cast(u32, ty.arrayLenIncludingSentinel(zcu)) orelse
                 return cg.fail("array type of {} elements is too large", .{ty.arrayLenIncludingSentinel(zcu)});
             const id = try cg.arrayType(try cg.constInt(.u32, total_len), elem_ty_id);
-            if (elem_ty.hasRuntimeBits(zcu)) try cg.decorate(id, .{
-                .array_stride = .{ .array_stride = @intCast(elem_ty.abiSize(zcu)) },
-            });
+            if (!is_block_root and elem_ty.hasRuntimeBits(zcu)) {
+                try cg.decorate(id, .{
+                    .array_stride = .{ .array_stride = @intCast(elem_ty.abiSize(zcu)) },
+                });
+            }
             break :id id;
         },
         .spirv => if (ty.isSpirvRuntimeArray(zcu)) id: {
             const elem_ty = ty.childType(zcu);
-            const elem_ty_id = try cg.layoutType(elem_ty, false);
+            const elem_ty_id = try cg.layoutType(elem_ty, is_block_root);
             const id = cg.allocId();
             try cg.sections.globals.emit(gpa, .OpTypeRuntimeArray, .{
                 .id_result = id,
                 .element_type = elem_ty_id,
             });
-            if (elem_ty.hasRuntimeBits(zcu)) try cg.decorate(id, .{
-                .array_stride = .{ .array_stride = @intCast(elem_ty.abiSize(zcu)) },
-            });
+            if (!is_block_root and elem_ty.hasRuntimeBits(zcu)) {
+                try cg.decorate(id, .{
+                    .array_stride = .{ .array_stride = @intCast(elem_ty.abiSize(zcu)) },
+                });
+            }
             break :id id;
         } else return cg.resolveType(ty, .indirect),
         else => return cg.resolveType(ty, .indirect),
@@ -955,11 +960,18 @@ pub fn genNav(cg: *CodeGen, do_codegen: bool) Error!void {
             switch (target.os.tag) {
                 .vulkan, .opengl => {
                     switch (storage_class) {
-                        .uniform, .push_constant, .storage_buffer, .physical_storage_buffer => {
+                        .uniform,
+                        .push_constant,
+                        .storage_buffer,
+                        .physical_storage_buffer,
+                        => {
                             if (ty.hasRuntimeBits(zcu)) {
-                                try cg.decorate(ptr_ty_id, .{
-                                    .array_stride = .{ .array_stride = @intCast(ty.abiSize(zcu)) },
-                                });
+                                if (!ty.isSpirvRuntimeArray(zcu)) {
+                                    try cg.decorate(
+                                        ptr_ty_id,
+                                        .{ .array_stride = .{ .array_stride = @intCast(ty.abiSize(zcu)) } },
+                                    );
+                                }
                                 if (!cg.needsLayout(as, ty)) try cg.decorateLayout(ty, ty_id);
                             }
                             if (key.is_const and storage_class == .storage_buffer) {
