@@ -789,30 +789,13 @@ pub const s390x = @import("Target/s390x.zig");
 pub const sh = @import("Target/generic.zig");
 pub const sparc = @import("Target/sparc.zig");
 pub const spirv = @import("Target/spirv.zig");
+pub const spork8 = @import("Target/generic.zig");
 pub const ve = @import("Target/ve.zig");
 pub const wasm = @import("Target/wasm.zig");
 pub const x86 = @import("Target/x86.zig");
 pub const xcore = @import("Target/xcore.zig");
 pub const xtensa = @import("Target/xtensa.zig");
 pub const z80 = @import("Target/generic.zig");
-
-pub const spork8 = struct {
-    pub const Feature = enum {};
-    pub const featureSet = Cpu.Feature.FeatureSetFns(Feature).featureSet;
-    pub const featureSetHas = Cpu.Feature.FeatureSetFns(Feature).featureSetHas;
-    pub const featureSetHasAny = Cpu.Feature.FeatureSetFns(Feature).featureSetHasAny;
-    pub const featureSetHasAll = Cpu.Feature.FeatureSetFns(Feature).featureSetHasAll;
-
-    pub const cpu = struct {
-        pub const generic: Cpu.Model = .{
-            .name = "generic",
-            .llvm_name = null,
-            .features = .empty,
-        };
-    };
-
-    pub const all_features: [0]Cpu.Feature = .{};
-};
 
 pub const Abi = enum {
     none,
