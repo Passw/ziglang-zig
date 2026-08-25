@@ -25285,17 +25285,30 @@ fn zirBuiltinExtern(
         .location, .descriptor => {},
     };
 
-    switch (zcu.getTarget().os.tag) {
-        .vulkan, .opengl => switch (ptr_info.flags.address_space) {
-            .storage_buffer, .uniform, .push_constant => if (ptr_info.flags.size != .one) {
-                return sema.failWithOwnedErrorMsg(block, msg: {
-                    const msg = try sema.errMsg(ty_src, "extern in '{s}' address space must be a single-item pointer to a struct", .{@tagName(ptr_info.flags.address_space)});
-                    errdefer msg.destroy(sema.gpa);
-                    try sema.errNote(ty_src, msg, "wrap the element type in a struct containing a runtime-sized array", .{});
-                    break :msg msg;
-                });
-            },
-            else => {},
+    const target = zcu.getTarget();
+    switch (target.os.tag) {
+        .vulkan, .opengl => {
+            const pointee = switch (elem_ty.zigTypeTag(zcu)) {
+                .array => elem_ty.childType(zcu),
+                .spirv => if (elem_ty.isSpirvRuntimeArray(zcu)) elem_ty.childType(zcu) else elem_ty,
+                else => elem_ty,
+            };
+            switch (ptr_info.flags.address_space) {
+                .uniform,
+                .storage_buffer,
+                => if (ptr_info.flags.size != .one or pointee.zigTypeTag(zcu) != .@"struct") {
+                    return sema.fail(block, ty_src, "extern in '{t}' address space must be a single-item pointer to a struct", .{ptr_info.flags.address_space});
+                },
+                .push_constant => if (ptr_info.flags.size != .one or elem_ty.zigTypeTag(zcu) != .@"struct") {
+                    return sema.fail(block, ty_src, "extern in 'push_constant' address space must be a single-item pointer to a struct", .{});
+                },
+                .constant => if (target.os.tag == .vulkan and (pointee.zigTypeTag(zcu) != .spirv or pointee.isSpirvRuntimeArray(zcu))) {
+                    return sema.fail(block, ty_src, "extern in 'constant' address space must point to an opaque SPIR-V type, or to an array of one", .{});
+                },
+                else => if (elem_ty.isSpirvRuntimeArray(zcu)) {
+                    return sema.fail(block, ty_src, "SPIR-V runtime array is not allowed in the '{t}' address space", .{ptr_info.flags.address_space});
+                },
+            }
         },
         else => {},
     }
@@ -25717,6 +25730,9 @@ pub fn explainWhyTypeIsNotExtern(
         .spirv => {
             assert(ty.isSpirvRuntimeArray(zcu));
             try sema.errNote(src_loc, msg, "SPIR-V runtime arrays must be the last field of an extern struct", .{});
+            if (position == .other) {
+                try sema.errNote(src_loc, msg, "consider enabling the 'runtime_descriptor_array' feature to use the runtime array as the extern pointee", .{});
+            }
         },
 
         .float => try sema.errNote(src_loc, msg, "'{f}' is not extern compatible on this target", .{ty.fmt(pt)}),
