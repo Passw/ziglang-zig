@@ -2059,6 +2059,13 @@ fn derivePtr(cg: *CodeGen, derivation: Value.PointerDeriveStep) !Id {
                 while (cur.toIntern() != dst_child.toIntern()) {
                     switch (cur.zigTypeTag(zcu)) {
                         .array => {
+                            if (dst_child.zigTypeTag(zcu) == .array and
+                                dst_child.childType(zcu).toIntern() == cur.childType(zcu).toIntern() and
+                                dst_child.arrayLenIncludingSentinel(zcu) <= cur.arrayLenIncludingSentinel(zcu))
+                            {
+                                cur = dst_child;
+                                break;
+                            }
                             cur = cur.childType(zcu);
                             depth += 1;
                         },
@@ -2098,7 +2105,7 @@ fn derivePtr(cg: *CodeGen, derivation: Value.PointerDeriveStep) !Id {
                 }
             }
 
-            return cg.fail("cannot perform pointer cast: '{f}' to '{f}'", .{
+            return cg.fail("cannot cast pointer '{f}' to '{f}'", .{
                 parent_ptr_ty.fmt(pt),
                 oac.new_ptr_ty.fmt(pt),
             });
@@ -6041,7 +6048,13 @@ fn bitCast(
             while (cur.toIntern() != dst_child.toIntern()) : (try indices.append(gpa, 0)) {
                 cur = switch (cur.zigTypeTag(zcu)) {
                     .array, .vector => cur.childType(zcu),
-                    .@"struct" => cur.fieldType(0, zcu),
+                    .@"struct" => field: {
+                        for (0..cur.structFieldCount(zcu)) |i| {
+                            const field_ty = cur.fieldType(i, zcu);
+                            if (field_ty.hasRuntimeBits(zcu) and cur.structFieldOffset(i, zcu) == 0) break :field field_ty;
+                        }
+                        unreachable;
+                    },
                     else => unreachable,
                 };
             }
@@ -6751,9 +6764,19 @@ fn ptrElemPtr(cg: *CodeGen, ptr_ty: Type, ptr_id: Id, index_id: Id) !Id {
     const zcu = cg.zcu;
     // Construct new pointer type for the resulting pointer
     const as = ptr_ty.ptrAddressSpace(zcu);
-    const elem_ty_id = try cg.pointeeType(as, ptr_ty.indexableElem(zcu), false);
+    const child_ty = ptr_ty.childType(zcu);
+    const is_single_ptr = ptr_ty.isSinglePointer(zcu);
+    const elem_is_block = switch (as) {
+        .uniform, .storage_buffer => switch (child_ty.zigTypeTag(cg.zcu)) {
+            .array => is_single_ptr,
+            .spirv => is_single_ptr and child_ty.isSpirvRuntimeArray(cg.zcu),
+            else => false,
+        },
+        else => false,
+    };
+    const elem_ty_id = try cg.pointeeType(as, ptr_ty.indexableElem(zcu), elem_is_block);
     const elem_ptr_ty_id = try cg.ptrType(elem_ty_id, cg.storageClass(as));
-    if (ptr_ty.isSinglePointer(zcu)) {
+    if (is_single_ptr) {
         // Pointer-to-array. In this case, the resulting pointer is not of the same type
         // as the ptr_ty (we want a *T, not a *[N]T), and hence we need to use accessChain.
         return cg.accessChainId(elem_ptr_ty_id, ptr_id, &.{index_id});

@@ -22151,34 +22151,7 @@ fn ptrCastFull(
     }
 
     try sema.validateRuntimeValue(block, operand_src, operand);
-
-    if (zcu.getTarget().cpu.arch.isSpirV() and
-        src_info.flags.address_space != .physical_storage_buffer and
-        src_info.flags.address_space == dest_info.flags.address_space and
-        src_info.child != dest_info.child and
-        Type.fromInterned(dest_info.child).hasRuntimeBits(zcu))
-    {
-        var cur: Type = .fromInterned(src_info.child);
-        while (cur.toIntern() != dest_info.child) {
-            cur = switch (cur.zigTypeTag(zcu)) {
-                .array, .vector => cur.childType(zcu),
-                .@"struct" => if (cur.structFieldOffset(0, zcu) == 0) cur.fieldType(0, zcu) else null,
-                else => null,
-            } orelse return sema.failWithOwnedErrorMsg(block, msg: {
-                const msg = try sema.errMsg(src, "cannot cast pointer '{f}' to '{f}'", .{
-                    operand_ty.fmt(pt), dest_ty.fmt(pt),
-                });
-                errdefer msg.destroy(sema.gpa);
-                try sema.errNote(src, msg, "'{f}' must appear at offset 0 inside '{f}'", .{
-                    Type.fromInterned(dest_info.child).fmt(pt), Type.fromInterned(src_info.child).fmt(pt),
-                });
-                try sema.errNote(src, msg, "'{s}' pointers can only reach nested types through a first struct field or an array element", .{
-                    @tagName(src_info.flags.address_space),
-                });
-                break :msg msg;
-            });
-        }
-    }
+    try sema.checkLogicalPtrCast(block, src, operand_ty, dest_ty);
 
     const can_cast_to_int = !target_util.shouldBlockPointerOps(zcu.getTarget(), operand_ty.ptrAddressSpace(zcu));
     const need_null_check = can_cast_to_int and block.wantSafety() and operand_ty.ptrAllowsZero(zcu) and !dest_ty.ptrAllowsZero(zcu);
@@ -22721,6 +22694,8 @@ fn checkPtrType(
 fn checkLogicalPtrOperation(sema: *Sema, block: *Block, src: LazySrcLoc, ty: Type) !void {
     const pt = sema.pt;
     const zcu = pt.zcu;
+
+    if (block.isComptime() or block.is_typeof) return;
     if (zcu.intern_pool.indexToKey(ty.toIntern()) == .ptr_type) {
         const target = zcu.getTarget();
         const as = ty.ptrAddressSpace(zcu);
@@ -22731,16 +22706,55 @@ fn checkLogicalPtrOperation(sema: *Sema, block: *Block, src: LazySrcLoc, ty: Typ
                 try sema.errNote(
                     src,
                     msg,
-                    "cannot perform arithmetic on pointers with address space '{s}' on target {s}-{s}",
-                    .{
-                        @tagName(as),
-                        @tagName(target.cpu.arch.family()),
-                        @tagName(target.os.tag),
-                    },
+                    "pointers with address space '{t}' do not support arithmetic or indexing on target {t}-{t}",
+                    .{ as, target.cpu.arch.family(), target.os.tag },
                 );
                 break :msg msg;
             });
         }
+    }
+}
+
+fn checkLogicalPtrCast(
+    sema: *Sema,
+    block: *Block,
+    src: LazySrcLoc,
+    operand_ty: Type,
+    dest_ty: Type,
+) CompileError!void {
+    const pt = sema.pt;
+    const zcu = pt.zcu;
+    const src_info = operand_ty.ptrInfo(zcu);
+    const dest_info = dest_ty.ptrInfo(zcu);
+
+    if (block.isComptime() or block.is_typeof) return;
+    switch (zcu.getTarget().os.tag) {
+        .vulkan, .opengl => {},
+        else => return,
+    }
+    if (src_info.flags.address_space == .physical_storage_buffer) return;
+
+    var cur: Type = .fromInterned(src_info.child);
+    while (cur.toIntern() != dest_info.child) {
+        cur = switch (cur.zigTypeTag(zcu)) {
+            .array, .vector => cur.childType(zcu),
+            .@"struct" => field: {
+                for (0..cur.structFieldCount(zcu)) |i| {
+                    const field_ty = cur.fieldType(i, zcu);
+                    if (field_ty.hasRuntimeBits(zcu) and cur.structFieldOffset(i, zcu) == 0) break :field field_ty;
+                }
+                break :field null;
+            },
+            else => null,
+        } orelse return sema.failWithOwnedErrorMsg(block, msg: {
+            const msg = try sema.errMsg(src, "cannot cast pointer '{f}' to '{f}'", .{ operand_ty.fmt(pt), dest_ty.fmt(pt) });
+            errdefer msg.destroy(sema.gpa);
+            try sema.errNote(src, msg, "'{f}' must appear at offset 0 inside '{f}'", .{
+                Type.fromInterned(dest_info.child).fmt(pt),
+                Type.fromInterned(src_info.child).fmt(pt),
+            });
+            break :msg msg;
+        });
     }
 }
 
@@ -27367,6 +27381,7 @@ fn elemPtrOneLayerOnly(
 
             try sema.validateRuntimeElemAccess(block, elem_index_src, result_ty, indexable_src);
             try sema.validateRuntimeValue(block, indexable_src, indexable);
+            try sema.checkLogicalPtrOperation(block, src, indexable_ty);
 
             if (child_ty.abiSize(zcu) == 0) {
                 // zero-bit child type; just bitcast the pointer
@@ -27439,6 +27454,7 @@ fn elemVal(
                         },
                         .partially_comptime, .fully_comptime => unreachable, // caught by `validateRuntimeElemAccess`
                     }
+                    try sema.checkLogicalPtrOperation(block, src, indexable_ty);
 
                     return block.addBinOp(.ptr_elem_val, indexable, elem_index);
                 },
@@ -27840,6 +27856,7 @@ fn elemValSlice(
         const cmp_op: Air.Inst.Tag = if (slice_sent) .cmp_lte else .cmp_lt;
         try sema.addSafetyCheckIndexOob(block, src, elem_index, len_inst, cmp_op);
     }
+    try sema.checkLogicalPtrOperation(block, src, slice_ty);
     return block.addBinOp(.slice_elem_val, slice, elem_index);
 }
 
@@ -27891,6 +27908,7 @@ fn elemPtrSlice(
 
     try sema.validateRuntimeElemAccess(block, elem_index_src, elem_ptr_ty, slice_src);
     try sema.validateRuntimeValue(block, slice_src, slice);
+    try sema.checkLogicalPtrOperation(block, src, slice_ty);
 
     if (oob_safety and block.wantSafety()) {
         const len_inst = len: {
