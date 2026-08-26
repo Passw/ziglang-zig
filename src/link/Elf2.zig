@@ -4376,6 +4376,12 @@ fn initHeaders(
                 assert(elf.targetLoad(&shdr.size) == elf.got.count() * @sizeOf(Addr));
             },
         }
+        if (elf.shndx.dynamic != .UNDEF) {
+            try elf.shndx.rela_dyn.relaEnsureAdditionalCapacity(elf, elf.got.count());
+        }
+        for (0..elf.got.count()) |got_index| {
+            elf.updateGotEntry(got_index);
+        }
 
         // Create any always-provided linker-defined symbols. The symbols marking the `INIT_ARRAY`/
         // `FINI_ARRAY`/`PREINIT_ARRAY` sections are instead created by `createInitFiniArraySection`
@@ -7187,6 +7193,7 @@ fn addGotRelocAssumeCapacity(
     });
 }
 fn updateGotEntry(elf: *Elf, got_index: usize) void {
+    assert(elf.ehdrType() != .REL);
     const entry_value: union(enum) {
         unsigned: u64,
         signed: i64,
