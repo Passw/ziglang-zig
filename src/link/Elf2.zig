@@ -4099,33 +4099,44 @@ fn initHeaders(
             .addralign = addr_align,
             .entsize = @intCast(addr_align.toByteUnits()),
         });
-        if (plt.got_plt) |got_plt| {
-            const got_plt_segment_ni = if (elf.options.z_now) elf.ni.data_rel_ro else elf.ni.data;
-            elf.shndx.got_plt = try elf.addSection(got_plt_segment_ni, .{
-                .name = ".got.plt",
-                .type = .PROGBITS,
-                .flags = .{ .WRITE = true, .ALLOC = true },
-                .size = got_plt.header_entries * elf.targetPtrSize(),
-                .addralign = addr_align,
-                .entsize = @intCast(addr_align.toByteUnits()),
-            });
-            elf.shndx.plt = try elf.addSection(elf.ni.text, .{
-                .name = ".plt",
-                .type = .PROGBITS,
-                .flags = .{ .ALLOC = true, .EXECINSTR = true },
-                .size = plt.entry_size * plt.header_entries,
-                .addralign = plt.@"align",
-                .node_align = node_block_align,
-            });
-        } else {
-            elf.shndx.plt = try elf.addSection(elf.phdrs.items[phndx.plt].unwrap().?, .{
-                .name = ".plt",
-                .type = .PROGBITS,
-                .flags = .{ .ALLOC = true, .WRITE = true, .EXECINSTR = true },
-                .size = plt.entry_size * plt.header_entries,
-                .addralign = plt.@"align",
-                .node_align = node_block_align,
-            });
+        {
+            const init_plt_size = plt.entry_size * plt.header_entries;
+            if (plt.got_plt) |got_plt| {
+                const got_plt_segment_ni = if (elf.options.z_now) elf.ni.data_rel_ro else elf.ni.data;
+                elf.shndx.got_plt = try elf.addSection(got_plt_segment_ni, .{
+                    .name = ".got.plt",
+                    .type = .PROGBITS,
+                    .flags = .{ .WRITE = true, .ALLOC = true },
+                    .size = got_plt.header_entries * elf.targetPtrSize(),
+                    .addralign = addr_align,
+                    .entsize = @intCast(addr_align.toByteUnits()),
+                });
+                elf.shndx.plt = try elf.addSection(elf.ni.text, .{
+                    .name = ".plt",
+                    .type = .PROGBITS,
+                    .flags = .{ .ALLOC = true, .EXECINSTR = true },
+                    .size = plt.@"align".forward(init_plt_size),
+                    .addralign = plt.@"align",
+                    .node_align = node_block_align,
+                });
+            } else {
+                elf.shndx.plt = try elf.addSection(elf.phdrs.items[phndx.plt].unwrap().?, .{
+                    .name = ".plt",
+                    .type = .PROGBITS,
+                    .flags = .{ .ALLOC = true, .WRITE = true, .EXECINSTR = true },
+                    .size = plt.@"align".forward(init_plt_size),
+                    .addralign = plt.@"align",
+                    .node_align = node_block_align,
+                });
+            }
+            // And the award for most annoying PLT requirement goes to SPARC, which decided that the
+            // whole table should have a greater alignment than the size of the individual entries,
+            // hence this bullshit:
+            if (plt.@"align".forward(init_plt_size) != init_plt_size) {
+                switch (elf.shdrPtr(elf.shndx.plt)) {
+                    inline else => |shdr| elf.targetStore(&shdr.size, init_plt_size),
+                }
+            }
         }
         if (plt.plt_sec != null) elf.shndx.plt_sec = try elf.addSection(elf.ni.text, .{
             .name = ".plt.sec",
