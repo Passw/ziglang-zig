@@ -3108,6 +3108,8 @@ pub fn stackAlignment(target: *const Target) u16 {
 
         .kvx => return 32,
 
+        .spork8 => return 256,
+
         else => {},
     }
 
@@ -3127,6 +3129,7 @@ pub fn stackGrowth(target: *const Target) StackGrowth {
     return switch (target.cpu.arch) {
         .hppa,
         .hppa64,
+        .spork8,
         => .up,
         else => .down,
     };
@@ -3232,6 +3235,13 @@ pub fn cTypeBitSize(target: *const Target, c_type: CType) ?u16 {
                 .short, .ushort, .int, .uint => 16,
                 .long, .ulong, .float, .double, .longdouble => 32,
                 .longlong, .ulonglong => 64,
+            },
+            // https://github.com/benanderman/spork-8/blob/main/Programming.md
+            .spork8 => switch (c_type) {
+                .char => 8,
+                .short, .ushort, .int, .uint => 16,
+                .long, .ulong, .float => 32,
+                .double, .longdouble, .longlong, .ulonglong => 64,
             },
             .mips64,
             .mips64el,
