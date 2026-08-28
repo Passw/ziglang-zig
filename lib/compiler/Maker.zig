@@ -809,6 +809,11 @@ pub fn main(init: process.Init.Minimal) !void {
                 var select: Io.Select(Event) = .init(io, &select_buffer);
                 defer select.cancelDiscard();
 
+                // File watching cannot be canceled without blocking
+                // https://codeberg.org/ziglang/zig/issues/31693
+                var is_fs_watching = false;
+                defer if (is_fs_watching) @panic("(zig build system) TODO file watching cannot be canceled without blocking");
+
                 try select.concurrent(.message, Server.receiveMessage, .{s});
 
                 var in_debounce = false;
@@ -816,8 +821,14 @@ pub fn main(init: process.Init.Minimal) !void {
                     .message => |payload| {
                         const header: Client.Message.Header = try payload;
                         switch (header.tag) {
-                            .exit => return cleanExit(io, &scanned_config),
+                            .exit => {
+                                // exit early until file watching supports cancelation without blocking
+                                if (is_fs_watching) std.process.exit(0);
+                                return cleanExit(io, &scanned_config);
+                            },
                             .bsp_build_steps => {
+                                if (is_fs_watching) @panic("(zig build system) TODO file watching cannot be canceled without blocking");
+
                                 // Cancel existing file watching
                                 select.cancelDiscard();
                                 in_debounce = false;
@@ -851,6 +862,7 @@ pub fn main(init: process.Init.Minimal) !void {
                                         &watch.?,
                                         if (in_debounce) .{ .ms = debounce_interval_ms } else .none,
                                     });
+                                    is_fs_watching = true;
                                 } else if (watch) |*w| {
                                     w.deinit();
                                     watch = null;
@@ -862,6 +874,7 @@ pub fn main(init: process.Init.Minimal) !void {
                         }
                     },
                     .fs_event => |payload| {
+                        is_fs_watching = false;
                         if (!Watch.have_impl) unreachable;
                         switch (payload catch |err| switch (err) {
                             error.MustReconfigure => {
@@ -883,6 +896,7 @@ pub fn main(init: process.Init.Minimal) !void {
                             &watch.?,
                             if (in_debounce) .{ .ms = debounce_interval_ms } else .none,
                         });
+                        is_fs_watching = true;
                         continue :loop try select.await();
                     },
                 }
