@@ -1086,10 +1086,12 @@ const StackIterator = union(enum) {
         switch (it.*) {
             .ctx_first => |context_ptr| {
                 // After the first frame, start actually unwinding.
-                it.* = if (SelfInfo != void and SelfInfo.can_unwind and fp_usability != .ideal)
-                    .{ .di = .init(context_ptr) }
-                else
-                    .{ .fp = context_ptr.getFp() };
+                if (SelfInfo != void and SelfInfo.can_unwind and fp_usability != .ideal) {
+                    it.* = .{ .di = .init(context_ptr) };
+                } else {
+                    const fp = applyOffset(context_ptr.getFp(), stack_bias) orelse return .end;
+                    it.* = .{ .fp = fp };
+                }
 
                 // The caller expects *return* addresses, where they will subtract 1 to find the address of the call.
                 // However, we have the actual current PC, which should not be adjusted. Compensate by adding 1.
@@ -1099,7 +1101,7 @@ const StackIterator = union(enum) {
                 const di = getSelfDebugInfo() catch unreachable;
                 const ret_addr = di.unwindFrame(io, unwind_context) catch |err| {
                     const pc = unwind_context.pc;
-                    const fp = unwind_context.getFp();
+                    const fp = applyOffset(unwind_context.getFp(), stack_bias) orelse return .end;
                     unwind_context.deinit();
                     it.* = .{ .fp = fp };
                     return .{ .switch_to_fp = .{
