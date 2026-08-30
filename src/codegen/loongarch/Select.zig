@@ -5948,6 +5948,9 @@ fn cmp(
     rhs_vi: Value.Index,
 ) !void {
     wip_mir_log.debug("  | # cmp {f}, {t}, {f}, {t}, {f}", .{ isel.fmtType(ty), res_reg, lhs_vi, op, rhs_vi });
+    const res_lock = isel.tryLockReg(res_reg);
+    defer res_lock.unlock(isel);
+
     if (!ty.isRuntimeFloat() and !ty.isArrayOrVector(isel.pt.zcu)) {
         // integeral comparison
         const int_info: std.builtin.Type.Int = if (ty.toIntern() == .bool_type)
