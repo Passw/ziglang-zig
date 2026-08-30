@@ -3758,12 +3758,12 @@ pub fn body(isel: *Select, air_body: []const Air.Inst.Index) error{ OutOfMemory,
                 } else if (dst_tag == .float and src_tag == .float) {
                     assert(dst_ty.floatBits(isel.target) == src_ty.floatBits(isel.target));
                     try dst_vi.value.defMove(isel, ty_op.operand);
-                } else if (dst_ty.isAbiInt(zcu) and src_tag == .float) {
+                } else if (dst_ty.isAbiInt(zcu) and src_tag == .float and isel.canUseFprForFloat(src_ty)) {
                     const dst_int_info = dst_ty.intInfo(zcu);
                     assert(dst_int_info.bits == src_ty.floatBits(isel.target));
 
                     try dst_vi.value.reextendToGarbage(isel);
-                    const dst_reg = try dst_vi.value.defRegMod(isel, .fromFloating(dst_int_info.bits)) orelse break :unused;
+                    const dst_reg = try dst_vi.value.defRegMod(isel, .fromFloatBits(dst_int_info.bits)) orelse break :unused;
                     const src_vi = try isel.use(ty_op.operand);
                     const src_mat = try src_vi.matReg(isel);
                     const src_reg = src_mat.reg();
@@ -3773,12 +3773,12 @@ pub fn body(isel: *Select, air_body: []const Air.Inst.Index) error{ OutOfMemory,
                         64 => .@"movfr2gr.d"(dst_reg, src_reg),
                     });
                     try src_mat.finish(isel);
-                } else if (dst_tag == .float and src_ty.isAbiInt(zcu)) {
+                } else if (dst_tag == .float and src_ty.isAbiInt(zcu) and isel.canUseFprForFloat(dst_ty)) {
                     const src_int_info = src_ty.intInfo(zcu);
                     assert(dst_ty.floatBits(isel.target) == src_int_info.bits);
 
                     try dst_vi.value.reextendToGarbage(isel);
-                    const dst_reg = try dst_vi.value.defRegMod(isel, .fromFloating(src_int_info.bits)) orelse break :unused;
+                    const dst_reg = try dst_vi.value.defRegMod(isel, .fromFloatBits(src_int_info.bits)) orelse break :unused;
                     const src_vi = try isel.use(ty_op.operand);
                     const src_mat = try src_vi.matReg(isel);
                     const src_reg = src_mat.reg();
@@ -7256,6 +7256,32 @@ fn gprAlignment(isel: *Select) std.mem.Alignment {
         .loongarch64 => .@"8",
         else => unreachable,
     };
+}
+
+fn fprBits(isel: *Select) u7 {
+    const cpu = &isel.target.cpu;
+    if (cpu.has(.loongarch, .d)) {
+        return 64;
+    } else if (cpu.has(.loongarch, .f)) {
+        return 32;
+    } else {
+        return 0;
+    }
+}
+
+fn vectorBits(isel: *Select) u7 {
+    const cpu = &isel.target.cpu;
+    if (cpu.has(.loongarch, .lasx)) {
+        return 256;
+    } else if (cpu.has(.loongarch, .lsx)) {
+        return 128;
+    } else {
+        return isel.fprBits();
+    }
+}
+
+fn canUseFprForFloat(isel: *Select, ty: ZigType) bool {
+    return ty.floatBits(isel.target) <= isel.fprBits();
 }
 
 fn typeOfField(isel: *Select, ty: ZigType, offset: u64) ?ZigType {
