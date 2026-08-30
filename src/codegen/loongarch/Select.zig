@@ -101,8 +101,8 @@ pub const Block = struct {
     fn branch(target_block: *Block, isel: *Select) !void {
         if (isel.instructions.items.len > target_block.target_label) {
             try isel.internal_relocs.append(isel.pt.zcu.gpa, .{
-                .label = @intCast(isel.instructions.items.len),
                 .target = target_block.target_label,
+                .reloc = .{ .label = @intCast(isel.instructions.items.len), .type = .B26 },
             });
             try isel.emit(.b(0, 0));
         }
@@ -1449,6 +1449,7 @@ pub const Value = struct {
                         .reloc = .{
                             .label = @intCast(isel.instructions.items.len),
                             .addend = @intCast(total_root_offset),
+                            .type = .PCALA_LO12,
                         },
                     });
                     try isel.emit(.@"addi.d"(ptr_reg, ptr_reg, 0));
@@ -1460,6 +1461,7 @@ pub const Value = struct {
                         .reloc = .{
                             .label = @intCast(isel.instructions.items.len),
                             .addend = @intCast(total_root_offset),
+                            .type = .PCALA_HI20,
                         },
                     });
                     try isel.emit(.pcalau12i(ptr_reg, 0));
@@ -3164,8 +3166,8 @@ pub fn body(isel: *Select, air_body: []const Air.Inst.Index) error{ OutOfMemory,
                     const next_repeat_label = instruction.*;
                     instruction.* = .b(0, 0);
                     try isel.internal_relocs.append(gpa, .{
-                        .label = repeat_label,
                         .target = isel.instructions.items.len,
+                        .reloc = .{ .label = repeat_label, .type = .B26 },
                     });
                     repeat_label = @bitCast(next_repeat_label);
                 }
@@ -3197,8 +3199,8 @@ pub fn body(isel: *Select, air_body: []const Air.Inst.Index) error{ OutOfMemory,
                     .extension = .zero_ext,
                 });
                 try isel.internal_relocs.append(gpa, .{
-                    .label = @intCast(isel.instructions.items.len),
                     .target = else_label,
+                    .reloc = .{ .label = @intCast(isel.instructions.items.len), .type = .B21 },
                 });
                 try isel.emit(.beqz(cond_mat.reg(), 0, 0));
                 try cond_mat.finish(isel);
@@ -3241,8 +3243,8 @@ pub fn body(isel: *Select, air_body: []const Air.Inst.Index) error{ OutOfMemory,
                     });
 
                     try isel.internal_relocs.append(gpa, .{
-                        .label = @intCast(isel.instructions.items.len),
                         .target = next_label,
+                        .reloc = .{ .label = @intCast(isel.instructions.items.len), .type = .B26 },
                     });
                     try isel.emit(.b(0, 0));
 
@@ -3268,8 +3270,8 @@ pub fn body(isel: *Select, air_body: []const Air.Inst.Index) error{ OutOfMemory,
                         defer isel.freeReg(item_reg);
 
                         try isel.internal_relocs.append(gpa, .{
-                            .label = @intCast(isel.instructions.items.len),
                             .target = case_label,
+                            .reloc = .{ .label = @intCast(isel.instructions.items.len), .type = .B16 },
                         });
                         try isel.emit(.beq(cond_mat.reg(), item_reg, 0));
                         try isel.moveIntImm(item_reg, @bitCast(item_int));
@@ -3323,13 +3325,14 @@ pub fn body(isel: *Select, air_body: []const Air.Inst.Index) error{ OutOfMemory,
                         else => unreachable,
                         inline .@"extern", .func => |func| .{
                             .nav = func.owner_nav,
-                            .reloc = .{ .label = @intCast(isel.instructions.items.len) },
+                            .reloc = .{ .label = @intCast(isel.instructions.items.len), .type = .CALL36 },
                         },
                         .ptr => |ptr| .{
                             .nav = ptr.base_addr.nav,
                             .reloc = .{
                                 .label = @intCast(isel.instructions.items.len),
                                 .addend = @intCast(ptr.byte_offset),
+                                .type = .CALL36,
                             },
                         },
                     });
@@ -3920,13 +3923,13 @@ pub fn body(isel: *Select, air_body: []const Air.Inst.Index) error{ OutOfMemory,
                                 .extension = .zero_ext,
                             });
                             try isel.internal_relocs.append(gpa, .{
-                                .label = @intCast(isel.instructions.items.len),
                                 .target = cmp_label,
+                                .reloc = .{ .label = @intCast(isel.instructions.items.len), .type = .B21 },
                             });
                             try isel.emit(.beqz(lhs_tag_mat.reg(), 0, 0));
                             try isel.internal_relocs.append(gpa, .{
-                                .label = @intCast(isel.instructions.items.len),
                                 .target = cmp_label,
+                                .reloc = .{ .label = @intCast(isel.instructions.items.len), .type = .B21 },
                             });
                             try isel.emit(.beqz(res_reg, 0, 0));
 
@@ -4274,8 +4277,8 @@ pub fn body(isel: *Select, air_body: []const Air.Inst.Index) error{ OutOfMemory,
                 );
                 const error_set_part_mat = try error_set_part_vi.matIntRegZeroExt(isel);
                 try isel.internal_relocs.append(gpa, .{
-                    .label = @intCast(isel.instructions.items.len),
                     .target = cont_label,
+                    .reloc = .{ .label = @intCast(isel.instructions.items.len), .type = .B26 },
                 });
                 try isel.emit(.beqz(error_set_part_mat.reg(), 0, 0));
                 try error_set_part_mat.finish(isel);
@@ -4312,8 +4315,8 @@ pub fn body(isel: *Select, air_body: []const Air.Inst.Index) error{ OutOfMemory,
                 defer isel.freeReg(tmp_reg);
 
                 try isel.internal_relocs.append(gpa, .{
-                    .label = @intCast(isel.instructions.items.len),
                     .target = cont_label,
+                    .reloc = .{ .label = @intCast(isel.instructions.items.len), .type = .B26 },
                 });
                 try isel.emit(.beqz(tmp_reg, 0, 0));
 
@@ -6467,6 +6470,7 @@ fn moveConstant(isel: *Select, dst: Value.Location, init_constant: Constant, ini
                             .reloc = .{
                                 .label = @intCast(isel.instructions.items.len),
                                 .addend = @intCast(ptr.byte_offset),
+                                .type = .PCALA_LO12,
                             },
                         });
                         try isel.emit(.@"addi.d"(rd, rd, 0));
@@ -6475,6 +6479,7 @@ fn moveConstant(isel: *Select, dst: Value.Location, init_constant: Constant, ini
                             .reloc = .{
                                 .label = @intCast(isel.instructions.items.len),
                                 .addend = @intCast(ptr.byte_offset),
+                                .type = .PCALA_HI20,
                             },
                         });
                         try isel.emit(.pcalau12i(rd, 0));
@@ -6489,6 +6494,7 @@ fn moveConstant(isel: *Select, dst: Value.Location, init_constant: Constant, ini
                             .reloc = .{
                                 .label = @intCast(isel.instructions.items.len),
                                 .addend = @intCast(ptr.byte_offset),
+                                .type = .PCALA_LO12,
                             },
                         });
                         try isel.emit(.@"addi.d"(rd, rd, 0));
@@ -6497,6 +6503,7 @@ fn moveConstant(isel: *Select, dst: Value.Location, init_constant: Constant, ini
                             .reloc = .{
                                 .label = @intCast(isel.instructions.items.len),
                                 .addend = @intCast(ptr.byte_offset),
+                                .type = .PCALA_HI20,
                             },
                         });
                         try isel.emit(.pcalau12i(rd, 0));
@@ -6752,15 +6759,12 @@ fn moveConstant(isel: *Select, dst: Value.Location, init_constant: Constant, ini
             // load constant pointer
             try isel.uav_relocs.append(zcu.gpa, .{
                 .uav = uav,
-                .reloc = .{ .label = @intCast(isel.instructions.items.len), .addend = 0 },
+                .reloc = .{ .label = @intCast(isel.instructions.items.len), .type = .PCALA_LO12 },
             });
             try isel.emit(.@"addi.d"(tmp_reg, tmp_reg, 0));
             try isel.uav_relocs.append(zcu.gpa, .{
                 .uav = uav,
-                .reloc = .{
-                    .label = @intCast(isel.instructions.items.len),
-                    .addend = 0,
-                },
+                .reloc = .{ .label = @intCast(isel.instructions.items.len), .type = .PCALA_HI20 },
             });
             try isel.emit(.pcalau12i(tmp_reg, 0));
 
