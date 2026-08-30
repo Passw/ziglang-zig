@@ -3198,8 +3198,14 @@ const LinkTestOptions = struct {
     test_filters: []const []const u8,
     optimize_modes: []const OptimizeMode,
     skip_non_native: bool,
+    skip_freebsd: bool,
+    skip_netbsd: bool,
+    skip_openbsd: bool,
     skip_windows: bool,
+    skip_darwin: bool,
+    skip_linux: bool,
     skip_llvm: bool,
+    skip_libc: bool,
     max_rss: usize,
 };
 
@@ -3212,12 +3218,21 @@ pub fn addLinkTests(b: *std.Build, options: LinkTestOptions) *Step {
     ) orelse false;
 
     for (link_targets) |link_target| {
-        if (options.skip_non_native and !link_target.target.isNative()) continue;
-        if (options.skip_windows and link_target.target.os_tag == .windows) continue;
-
         const resolved_target = b.resolveTargetQuery(link_target.target);
-        const triple_txt = resolved_target.query.zigTriple(b.allocator) catch @panic("OOM");
+
+        if (options.skip_non_native and !isNative(&resolved_target, &b.graph.host.result))
+            continue;
+
         const target = &resolved_target.result;
+
+        if (options.skip_freebsd and target.os.tag == .freebsd) continue;
+        if (options.skip_netbsd and target.os.tag == .netbsd) continue;
+        if (options.skip_openbsd and target.os.tag == .openbsd) continue;
+        if (options.skip_windows and target.os.tag == .windows) continue;
+        if (options.skip_darwin and target.os.tag.isDarwin()) continue;
+        if (options.skip_linux and target.os.tag == .linux) continue;
+
+        const triple_txt = resolved_target.query.zigTriple(b.allocator) catch @panic("OOM");
 
         if (options.test_target_filters.len > 0) {
             for (options.test_target_filters) |filter| {
@@ -3225,9 +3240,15 @@ pub fn addLinkTests(b: *std.Build, options: LinkTestOptions) *Step {
             } else continue;
         }
 
+        if (options.skip_libc and (link_target.link_libc == true or std.os.targetRequiresLibC(target)))
+            continue;
+
+        // We can't provide MSVC libc when cross-compiling.
+        if (target.abi == .msvc and link_target.link_libc == true and builtin.os.tag != .windows)
+            continue;
+
         for (options.optimize_modes) |optimize_mode| {
             if (link_target.optimize_mode != optimize_mode) continue;
-            if (link_target.link_libc and target.abi == .msvc and b.graph.host.result.os.tag != .windows) continue;
             const would_use_llvm = wouldUseLlvm(link_target.use_llvm, link_target.target, optimize_mode);
             if (options.skip_llvm and would_use_llvm) continue;
 

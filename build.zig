@@ -656,8 +656,14 @@ pub fn build(b: *std.Build) !void {
         .test_filters = test_filters,
         .optimize_modes = optimize_modes,
         .skip_non_native = skip_non_native,
+        .skip_freebsd = skip_freebsd,
+        .skip_netbsd = skip_netbsd,
+        .skip_openbsd = skip_openbsd,
         .skip_windows = skip_windows,
+        .skip_darwin = skip_darwin,
+        .skip_linux = skip_linux,
         .skip_llvm = skip_llvm,
+        .skip_libc = skip_libc,
         .max_rss = 100_000_000,
     }));
     test_step.dependOn(tests.addStackTraceTests(b, .{
