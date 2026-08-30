@@ -2590,6 +2590,7 @@ pub fn analyze(isel: *Select, air_body: []const Air.Inst.Index) !void {
             .is_named_enum_value,
             .tag_name,
             .error_name,
+            .cmp_lte_errors_len,
             => {
                 const un_op = air_data[@backingInt(air_inst_index)].un_op;
 
