@@ -1026,7 +1026,7 @@ pub const Value = struct {
         }
 
         /// Defines a value with a register.
-        /// Returned registers are free-ed.
+        /// Returned registers are free-ed and marked as written.
         /// Extension unchanged.
         fn defReg(vi: Value.Index, isel: *Select) !?Register.Alias {
             const value = vi.get(isel);
@@ -3573,6 +3573,26 @@ pub fn body(isel: *Select, air_body: []const Air.Inst.Index) error{ OutOfMemory,
                     },
                 }) else return isel.fail("unimplemented float", .{});
             },
+            .add_with_overflow, .sub_with_overflow => if (isel.live_values.fetchRemove(air.inst_index)) |res_vi| {
+                defer res_vi.value.deref(isel);
+
+                const ty_pl = air.data(air.inst_index).ty_pl;
+                const bin_op = isel.air.extraData(Air.Bin, ty_pl.payload).data;
+                const ty = isel.air.typeOf(bin_op.lhs, ip);
+                const lhs_vi = try isel.use(bin_op.lhs);
+                const rhs_vi = try isel.use(bin_op.rhs);
+                const ty_size = lhs_vi.size(isel);
+
+                const wrapped_vi = try res_vi.value.partExact(isel, 0, ty_size);
+                const overflow_vi = try res_vi.value.partExact(isel, ty_size, 1);
+                try isel.addOrSubtract(ty, wrapped_vi, switch (air_tag) {
+                    else => unreachable,
+                    .add_with_overflow => .add,
+                    .sub_with_overflow => .sub,
+                }, lhs_vi, rhs_vi, .{
+                    .overflow = if (try overflow_vi.defReg(isel)) |overflow_ra| .{ .overflow_ra = overflow_ra } else .wrap,
+                });
+            },
             .not => if (isel.live_values.fetchRemove(air.inst_index)) |res_vi| unused: {
                 defer res_vi.value.deref(isel);
 
@@ -3676,7 +3696,10 @@ pub fn body(isel: *Select, air_body: []const Air.Inst.Index) error{ OutOfMemory,
                             try rhs_mat.finish(isel);
                             try lhs_mat.finish(isel);
                         },
-                        else => try isel.failUnimplemented("too big {t} {f}", .{ air_tag, isel.fmtType(ty) }),
+                        else => {
+                            _ = try res_vi.value.def(isel);
+                            try isel.failUnimplemented("too big {t} {f}", .{ air_tag, isel.fmtType(ty) });
+                        },
                     }
                 } else try isel.failUnimplemented("unimplemented float div", .{});
             },
@@ -5996,7 +6019,7 @@ const AddOrSubtractOptions = struct {
         @"unreachable",
         panic: Zcu.SimplePanicId,
         wrap,
-        reg: Register,
+        overflow_ra: Register.Alias,
     };
 };
 
@@ -6011,10 +6034,24 @@ fn addOrSubtract(
     opts: AddOrSubtractOptions,
 ) !void {
     wip_mir_log.debug("  | # {t} ty = {f}, res = {f}, lhs = {f}, rhs = {f}, overflow = {t}", .{ op, isel.fmtType(ty), res_vi, lhs_vi, rhs_vi, opts.overflow });
-    // TODO: implement opts.overflow
     const zcu = isel.pt.zcu;
     assert(ty.isAbiInt(zcu));
     const int_info = ty.intInfo(zcu);
+
+    switch (opts.overflow) {
+        .wrap, .@"unreachable" => {},
+        .overflow_ra => |overflow_ra| {
+            const overflow_reg = if (overflow_ra.mod == .integer) overflow_ra.reg else try isel.allocRegForWrite(.int);
+            defer if (overflow_ra.mod != .integer) isel.freeReg(overflow_reg);
+            switch (op) {
+                .add => try isel.cmp(overflow_reg, ty, res_vi, .lt, lhs_vi),
+                .sub => try isel.cmp(overflow_reg, ty, res_vi, .gt, lhs_vi),
+            }
+        },
+        .panic => {
+            try isel.failUnimplemented("unimplemented {t} with {t}", .{ op, opts.overflow });
+        },
+    }
 
     if (int_info.bits <= 32) {
         try res_vi.reextendToGarbage(isel); // TODO optimize
