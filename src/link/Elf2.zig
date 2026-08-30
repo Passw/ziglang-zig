@@ -7189,7 +7189,6 @@ fn prelinkInner(elf: *Elf) Error!void {
         }) |debug_shndx| {
             if (debug_shndx == .UNDEF) continue;
             const debug_ni = debug_shndx.get(elf).ni;
-            _ = debug_ni.last(&elf.mf).unwrap() orelse continue;
             const frame_format = debug_shndx.debugFrameFormat(elf);
             const unit_padding_ni = elf.addNodeAssumeCapacity(
                 try debug_ni.addFloatingChild(gpa, &elf.mf, .{
@@ -8941,7 +8940,6 @@ fn updateFuncInner(
                     .debug_frame => elf.shndx.debug_frame,
                     .eh_frame => elf.shndx.eh_frame,
                 }.get(elf).ni;
-                try frame_ni.trimStart(gpa, &elf.mf);
                 switch (wip_nav.frame_format) {
                     .debug_frame => {},
                     .eh_frame => {
@@ -8953,11 +8951,6 @@ fn updateFuncInner(
             },
             .dwarf2 => |debug| {
                 try debug.finishFunc(func_length);
-                for ([3]Section.Index{
-                    elf.shndx.debug_info,
-                    elf.shndx.debug_line,
-                    elf.shndx.debug_rnglists,
-                }) |debug_shndx| try debug_shndx.get(elf).ni.trimStart(gpa, &elf.mf);
                 const unit = debug.wip_nav.unit.get(debug.wip_nav.dwarf);
                 {
                     const debug_info_ni = unit.debug_info_ni.unwrap().?;
@@ -10928,19 +10921,21 @@ pub fn printNode(
             const zcu = elf.base.comp.zcu.?;
             const ip = &zcu.intern_pool;
             const nav = ip.getNav(gi.nav(&elf.dwarf));
-            try w.print("({f}, {f})", .{
-                Type.fromInterned(nav.resolved.?.type).fmt(.{ .zcu = zcu, .tid = tid }),
-                nav.fqn.fmt(ip),
+            try w.writeByte('(');
+            if (nav.resolved) |resolved| try w.print("{f}, ", .{
+                Type.fromInterned(resolved.type).fmt(.{ .zcu = zcu, .tid = tid }),
             });
+            try w.print("{f})", .{nav.fqn.fmt(ip)});
         },
         .func_frame_fde, .func_debug_info, .func_debug_line => |fi| {
             const zcu = elf.base.comp.zcu.?;
             const ip = &zcu.intern_pool;
             const nav = ip.getNav(fi.nav(&elf.dwarf));
-            try w.print("({f}, {f})", .{
-                Type.fromInterned(nav.resolved.?.type).fmt(.{ .zcu = zcu, .tid = tid }),
-                nav.fqn.fmt(ip),
+            try w.writeByte('(');
+            if (nav.resolved) |resolved| try w.print("{f}, ", .{
+                Type.fromInterned(resolved.type).fmt(.{ .zcu = zcu, .tid = tid }),
             });
+            try w.print("{f})", .{nav.fqn.fmt(ip)});
         },
         .decl_debug_info => |di| {
             const comp = elf.base.comp;
@@ -10948,10 +10943,7 @@ pub fn printNode(
             const ip = &zcu.intern_pool;
             const src_inst = di.srcInst(&elf.dwarf);
             try w.print("({f}, ", .{zcu.fileByIndex(src_inst.resolveFile(ip)).path.fmt(comp)});
-            if (src_inst.resolve(ip)) |inst|
-                try w.print("%{d}", .{inst})
-            else
-                try w.writeAll("lost");
+            if (src_inst.resolve(ip)) |inst| try w.print("%{d}", .{inst}) else try w.writeAll("lost");
             try w.writeByte(')');
         },
     }

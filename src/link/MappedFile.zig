@@ -664,23 +664,6 @@ pub const Node = extern struct {
             return true;
         }
 
-        pub fn trimStart(ni: Node.Index, gpa: Allocator, mf: *MappedFile) Allocator.Error!void {
-            mf.nodes_lock.assertUnlocked();
-            const node = ni.get(mf);
-            const first_ni = node.first.unwrap() orelse return;
-            const shift, _ = first_ni.location(mf).resolve(mf);
-            if (shift == 0) return;
-            const offset, const size = node.location().resolve(mf);
-            try ni.setLocation(gpa, mf, offset + shift, size - shift);
-            var child_oni = node.first;
-            while (child_oni.unwrap()) |child_ni| {
-                const child_node = child_ni.get(mf);
-                const child_offset, const child_size = child_node.location().resolve(mf);
-                try child_ni.setLocation(gpa, mf, child_offset - shift, child_size);
-                child_oni = child_node.next;
-            }
-        }
-
         /// Ensures that the size of `ni` is at least `min_size`. Valid for any node.
         ///
         /// Applies `growth_factor` if necessary (so the caller should *not* apply `growth_factor`).
