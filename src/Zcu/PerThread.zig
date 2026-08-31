@@ -258,6 +258,8 @@ pub fn update(
         return;
     }
 
+    try comp.link_queue.enqueueZcu(comp, pt.tid, .files_ready);
+
     if (comp.config.incremental) {
         const update_zir_refs_node = main_progress_node.start("Update ZIR References", 0);
         defer update_zir_refs_node.end();

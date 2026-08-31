@@ -794,6 +794,28 @@ pub const File = struct {
         }
     }
 
+    /// When there is a ZCU, this is called exactly once per update, to indicate that all per-file
+    /// state (e.g. `Zcu.alive_files`) has been populated by the frontend, so can now be safely
+    /// accessed by the linker.
+    ///
+    /// This call occurs before any call to any of these functions:
+    /// * `updateNav`
+    /// * `updateFunc`
+    /// * `updateContainerType`
+    /// * `updateLineNumber`
+    ///
+    /// Asserts that the ZCU is not using the LLVM backend.
+    fn zcuFilesReady(base: *File) Error!void {
+        assert(base.comp.zcu.?.llvm_object == null);
+        switch (base.tag) {
+            else => {},
+            inline .elf2 => |tag| {
+                dev.check(tag.devFeature());
+                return @as(*tag.Type(), @fieldParentPtr("base", base)).zcuFilesReady();
+            },
+        }
+    }
+
     /// Asserts that the ZCU is not using the LLVM backend.
     fn updateNav(base: *File, pt: Zcu.PerThread, nav_index: InternPool.Nav.Index) Error!void {
         assert(base.comp.zcu.?.llvm_object == null);
@@ -819,19 +841,6 @@ pub const File = struct {
             inline .elf, .c => |tag| {
                 dev.check(tag.devFeature());
                 return @as(*tag.Type(), @fieldParentPtr("base", base)).updateContainerType(pt, ty, success);
-            },
-        }
-    }
-
-    /// Never called when LLVM is codegenning the ZCU.
-    fn clearContainerType(base: *File, pt: Zcu.PerThread, ty: InternPool.Index) Error!void {
-        assert(base.comp.zcu.?.llvm_object == null);
-        switch (base.tag) {
-            .lld => unreachable,
-            else => {},
-            inline .elf => |tag| {
-                dev.check(tag.devFeature());
-                return @as(*tag.Type(), @fieldParentPtr("base", base)).clearContainerType(pt, ty);
             },
         }
     }
@@ -1417,6 +1426,9 @@ pub const PrelinkTask = union(enum) {
     load_dso: Path,
 };
 pub const ZcuTask = union(enum) {
+    /// Sent once per update, as the very first `ZcuTask` in the update. Indicates that all per-file
+    /// state (e.g. `Zcu.alive_files`) is populated so can now be safely accessed by the linker.
+    files_ready,
     /// Write the constant value for a Decl to the output file.
     link_nav: InternPool.Nav.Index,
     /// Write the machine code for a function to the output file.
@@ -1620,6 +1632,16 @@ pub fn doZcuTask(comp: *Compilation, tid: Zcu.PerThread.Id, task: ZcuTask) void 
     var timer = comp.startTimer();
 
     const maybe_nav: ?InternPool.Nav.Index = switch (task) {
+        .files_ready => {
+            if (zcu.llvm_object != null) return;
+            const lf = comp.bin_file orelse return;
+            lf.zcuFilesReady() catch |err| switch (err) {
+                error.Canceled => io.recancel(),
+                error.AlreadyReported => return,
+                error.OutOfMemory => return diags.setAllocFailure(),
+            };
+            return;
+        },
         .link_nav => |nav_index| nav: {
             const fqn_slice = ip.getNav(nav_index).fqn.toSlice(ip);
             const nav_prog_node = comp.link_prog_node.start(fqn_slice, 0);

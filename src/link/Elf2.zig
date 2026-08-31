@@ -7148,6 +7148,10 @@ fn prelinkInner(elf: *Elf) Error!void {
     }
 }
 
+pub fn zcuFilesReady(elf: *Elf) link.Error!void {
+    _ = elf; // TODO jacobly
+}
+
 fn prepareDynamic(elf: *Elf) Error!void {
     const comp = elf.base.comp;
 
