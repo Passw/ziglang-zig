@@ -10,10 +10,7 @@ consts: std.ArrayList(Const),
 globals: std.array_hash_map.Auto(InternPool.Nav.Index, Global),
 funcs: std.array_hash_map.Auto(InternPool.Nav.Index, Func),
 decls: std.array_hash_map.Auto(InternPool.TrackedInst.Index, Decl),
-pending_decl: ?struct {
-    di: Decl.Index,
-    instance_val: InternPool.Index,
-},
+pending_decl: struct { di: Decl.Index, instance_val: InternPool.Index },
 
 debug_abbrev: Abbrev,
 frame: Frame,
@@ -680,7 +677,7 @@ pub const WipNav = struct {
             const di_nw = &debug.info_writer;
             const diw = &di_nw.interface;
             try diw.writeUleb128(try dwarf.refAbbrevCode(.decl_func));
-            try dwarf.refConst(pt, di_nw, .fromInterned(ip.namespacePtr(switch (func.generic_owner) {
+            try dwarf.refType(pt, di_nw, .fromInterned(ip.namespacePtr(switch (func.generic_owner) {
                 .none => nav,
                 else => |generic_owner| ip.getNav(zcu.funcInfo(generic_owner).owner_nav),
             }.analysis.?.namespace).owner_type));
@@ -692,7 +689,7 @@ pub const WipNav = struct {
                 .normal => nav.fqn,
                 .@"extern", .@"export" => nav.name,
             }.toSlice(ip));
-            try dwarf.refConst(pt, di_nw, .fromInterned(func_type.return_type));
+            try dwarf.refType(pt, di_nw, .fromInterned(func_type.return_type));
             try dwarf.addrSym(di_nw, debug.wip_nav.func_si, 0);
             debug.info_func_length_offset = diw.end;
             try diw.writeInt(u32, undefined, dwarf.endian);
@@ -802,7 +799,7 @@ pub const WipNav = struct {
                 .local_var => if (opt_name) |_| .local_var else unreachable,
             }));
             if (opt_name) |name| try dwarf.strp(&dwarf.debug_str, di_nw, name);
-            try dwarf.refConst(debug.pt, di_nw, ty.toValue());
+            try dwarf.refType(debug.pt, di_nw, ty);
             try dwarf.exprLoc(&debug.info_writer, loc);
             debug.any_children = true;
         }
@@ -855,7 +852,7 @@ pub const WipNav = struct {
                 } else unreachable,
             }));
             if (opt_name) |name| try dwarf.strp(&dwarf.debug_str, di_nw, name);
-            try dwarf.refConst(pt, di_nw, ty.toValue());
+            try dwarf.refType(pt, di_nw, ty);
             if (ty_class.hasRuntimeBits()) try dwarf.blockConst(pt, di_nw, val);
             if (ty_class.comptimeOnly()) try dwarf.refConst(pt, di_nw, val);
             debug.any_children = true;
@@ -1251,7 +1248,7 @@ pub fn init(lf: *link.File, format: DW.Format) Dwarf {
         .globals = .empty,
         .funcs = .empty,
         .decls = .empty,
-        .pending_decl = null,
+        .pending_decl = .{ .di = undefined, .instance_val = .none },
 
         .debug_abbrev = .{
             .ni = .none,
@@ -1457,33 +1454,42 @@ pub fn getFuncIfExists(dwarf: *Dwarf, nav: InternPool.Nav.Index) ?Func.Index {
     return @fromBackingInt(@intCast(dwarf.funcs.getIndex(nav) orelse return null));
 }
 
-pub fn getDeclInst(dwarf: *Dwarf, val: InternPool.Index) ?InternPool.TrackedInst.Index {
+fn getDeclInst(dwarf: *Dwarf, val: InternPool.Index) ?InternPool.TrackedInst.Index {
     const ip = &dwarf.lf.comp.zcu.?.intern_pool;
     switch (ip.indexToKey(val)) {
         else => unreachable,
-        .struct_type => {
-            const loaded_struct = ip.loadStructType(val);
-            if (loaded_struct.captures.len == 0) return null;
-            return ip.getNav(loaded_struct.name_nav.unwrap() orelse
-                return loaded_struct.zir_index).srcInst(ip);
-        },
-        .enum_type => {
-            const loaded_enum = ip.loadEnumType(val);
-            if (loaded_enum.captures.len == 0) return null;
-            return ip.getNav(loaded_enum.name_nav.unwrap() orelse
-                return loaded_enum.zir_index.unwrap().?).srcInst(ip);
-        },
-        .union_type => {
-            const loaded_union = ip.loadUnionType(val);
-            if (loaded_union.captures.len == 0) return null;
-            return ip.getNav(loaded_union.name_nav.unwrap() orelse
-                return loaded_union.zir_index).srcInst(ip);
-        },
-        .opaque_type => {
-            const loaded_opaque = ip.loadOpaqueType(val);
-            if (loaded_opaque.captures.len == 0) return null;
-            return ip.getNav(loaded_opaque.name_nav.unwrap() orelse
-                return loaded_opaque.zir_index).srcInst(ip);
+        .struct_type, .union_type, .enum_type, .opaque_type => |container, tag| switch (container) {
+            .declared => |declared| switch (declared.captures.owned.len) {
+                0 => return null,
+                else => switch (tag) {
+                    else => unreachable,
+                    .struct_type => {
+                        const loaded_struct = ip.loadStructType(val);
+                        return ip.getNav(loaded_struct.name_nav.unwrap() orelse
+                            return loaded_struct.zir_index).srcInst(ip);
+                    },
+                    .union_type => {
+                        const loaded_union = ip.loadUnionType(val);
+                        return ip.getNav(loaded_union.name_nav.unwrap() orelse
+                            return loaded_union.zir_index).srcInst(ip);
+                    },
+                    .enum_type => {
+                        const loaded_enum = ip.loadEnumType(val);
+                        return ip.getNav(loaded_enum.name_nav.unwrap() orelse
+                            return loaded_enum.zir_index.unwrap().?).srcInst(ip);
+                    },
+                    .opaque_type => {
+                        const loaded_opaque = ip.loadOpaqueType(val);
+                        return ip.getNav(loaded_opaque.name_nav.unwrap() orelse
+                            return loaded_opaque.zir_index).srcInst(ip);
+                    },
+                },
+            },
+            .reified => |reified| {
+                assert(reified.zir_index.resolve(ip).? != .main_struct_inst);
+                return reified.zir_index;
+            },
+            .generated_union_tag => unreachable,
         },
         .func => |func| return ip.getNav(switch (func.generic_owner) {
             .none => func.owner_nav,
@@ -1496,7 +1502,7 @@ pub fn getDecl(
     pt: Zcu.PerThread,
     instance_val: InternPool.Index,
 ) link.Error!MappedFile.Node.Index {
-    assert(dwarf.pending_decl == null);
+    assert(dwarf.pending_decl.instance_val == .none);
     const comp = dwarf.lf.comp;
     const gpa = comp.gpa;
     const zcu = pt.zcu;
@@ -2003,13 +2009,15 @@ fn genDeclFuncGeneric(
     name: []const u8,
     param_body: []const std.zig.Zir.Inst.Index,
 ) link.EmitError!void {
+    const zcu = pt.zcu;
     const diw = &di_nw.interface;
     try diw.writeUleb128(try dwarf.refAbbrevCode(.decl_func_generic));
-    try dwarf.refConst(pt, di_nw, parent_ty.toValue());
+    try dwarf.refType(pt, di_nw, parent_ty);
     try diw.writeInt(u32, decl.src_line + 1, dwarf.endian);
     try diw.writeUleb128(decl.src_column + 1);
     try diw.writeByte(if (decl.is_pub) DW.ACCESS.public else DW.ACCESS.private);
     try dwarf.strp(&dwarf.debug_str, di_nw, name);
+    try dwarf.refType(pt, di_nw, .fromInterned(fn_ty.return_type));
     var param_index: u32 = 0;
     for (param_body) |param_inst| {
         switch (zir.getParamName(param_inst) orelse break) {
@@ -2019,7 +2027,7 @@ fn genDeclFuncGeneric(
                 try dwarf.strp(&dwarf.debug_str, di_nw, zir.nullTerminatedString(param_name));
             },
         }
-        try dwarf.refConst(pt, di_nw, .fromInterned(fn_ty.param_types.get(&pt.zcu.intern_pool)[param_index]));
+        try dwarf.refType(pt, di_nw, .fromInterned(fn_ty.param_types.get(&zcu.intern_pool)[param_index]));
         param_index += 1;
     }
     if (fn_ty.is_var_args) try diw.writeUleb128(try dwarf.refAbbrevCode(.is_var_args));
@@ -2095,7 +2103,6 @@ fn updateConstInner(
     const ip = &zcu.intern_pool;
     const diw = &di_nw.interface;
     switch (ip.indexToKey(val)) {
-        else => return,
         .int_type => |int_type| {
             const ty: Type = .fromInterned(val);
             try diw.writeUleb128(try dwarf.refAbbrevCode(.numeric_type));
@@ -2111,17 +2118,13 @@ fn updateConstInner(
         },
         .ptr_type => |ptr_type| switch (ptr_type.flags.size) {
             .one, .many, .c => {
-                const ty: Type = .fromInterned(val);
-                const ptr_child_ty: Type = .fromInterned(ptr_type.child);
+                const name = try zcu.gpa.print("{f}", .{Type.fromInterned(val).fmt(pt)});
+                defer zcu.gpa.free(name);
                 try diw.writeUleb128(try dwarf.refAbbrevCode(switch (ptr_type.flags.alignment) {
                     .none => if (ptr_type.sentinel == .none) .ptr_type else .ptr_sentinel_type,
                     else => if (ptr_type.sentinel == .none) .ptr_aligned_type else .ptr_aligned_sentinel_type,
                 }));
-                {
-                    const name = try zcu.gpa.print("{f}", .{ty.fmt(pt)});
-                    defer zcu.gpa.free(name);
-                    try dwarf.strp(&dwarf.debug_str, di_nw, name);
-                }
+                try dwarf.strp(&dwarf.debug_str, di_nw, name);
                 if (ptr_type.sentinel != .none) try dwarf.blockConst(pt, di_nw, .fromInterned(ptr_type.sentinel));
                 if (ptr_type.flags.alignment.toByteUnits()) |a| try diw.writeUleb128(a);
                 try diw.writeByte(@backingInt(ptr_type.flags.address_space));
@@ -2139,30 +2142,180 @@ fn updateConstInner(
                     );
                 }
                 if (ptr_type.flags.is_volatile) try diw.writeUleb128(try dwarf.refAbbrevCode(.is_volatile));
-                try dwarf.refConst(pt, di_nw, ptr_child_ty.toValue());
+                try dwarf.refType(pt, di_nw, .fromInterned(ptr_type.child));
             },
             .slice => {
                 const ty: Type = .fromInterned(val);
+                const name = try zcu.gpa.print("{f}", .{ty.fmt(pt)});
+                defer zcu.gpa.free(name);
                 try diw.writeUleb128(try dwarf.refAbbrevCode(.generated_struct_type));
-                {
-                    const name = try zcu.gpa.print("{f}", .{ty.fmt(pt)});
-                    defer zcu.gpa.free(name);
-                    try dwarf.strp(&dwarf.debug_str, di_nw, name);
-                }
+                try dwarf.strp(&dwarf.debug_str, di_nw, name);
                 try diw.writeUleb128(ty.abiSize(zcu));
                 try diw.writeUleb128(ty.abiAlignment(zcu).toByteUnits().?);
                 try diw.writeUleb128(try dwarf.refAbbrevCode(.generated_field));
                 try dwarf.strp(&dwarf.debug_str, di_nw, "ptr");
                 const ptr_field_ty = ty.slicePtrFieldType(zcu);
-                try dwarf.refConst(pt, di_nw, ptr_field_ty.toValue());
+                try dwarf.refType(pt, di_nw, ptr_field_ty);
                 try diw.writeUleb128(0);
                 try diw.writeUleb128(try dwarf.refAbbrevCode(.generated_field));
                 try dwarf.strp(&dwarf.debug_str, di_nw, "len");
                 const len_field_ty: Type = .usize;
-                try dwarf.refConst(pt, di_nw, len_field_ty.toValue());
+                try dwarf.refType(pt, di_nw, len_field_ty);
                 try diw.writeUleb128(len_field_ty.abiAlignment(zcu).forward(ptr_field_ty.abiSize(zcu)));
                 try diw.writeUleb128(@backingInt(AbbrevCode.null));
             },
+        },
+        .array_type => |array_type| {
+            const name = try zcu.gpa.print("{f}", .{Type.fromInterned(val).fmt(pt)});
+            defer zcu.gpa.free(name);
+            try diw.writeUleb128(try dwarf.refAbbrevCode(
+                if (array_type.sentinel == .none) .array_type else .array_sentinel_type,
+            ));
+            try dwarf.strp(&dwarf.debug_str, di_nw, name);
+            if (array_type.sentinel != .none)
+                try dwarf.blockConst(pt, di_nw, .fromInterned(array_type.sentinel));
+            try dwarf.refType(pt, di_nw, .fromInterned(array_type.child));
+            try diw.writeUleb128(try dwarf.refAbbrevCode(.array_len));
+            try dwarf.refType(pt, di_nw, .usize);
+            try diw.writeUleb128(array_type.len);
+            try diw.writeUleb128(@backingInt(AbbrevCode.null));
+        },
+        .vector_type => |vector_type| {
+            const name = try zcu.gpa.print("{f}", .{Type.fromInterned(val).fmt(pt)});
+            defer zcu.gpa.free(name);
+            try diw.writeUleb128(try dwarf.refAbbrevCode(.vector_type));
+            try dwarf.strp(&dwarf.debug_str, di_nw, name);
+            try dwarf.refType(pt, di_nw, .fromInterned(vector_type.child));
+            try diw.writeUleb128(try dwarf.refAbbrevCode(.array_len));
+            try dwarf.refType(pt, di_nw, .usize);
+            try diw.writeUleb128(vector_type.len);
+            try diw.writeUleb128(@backingInt(AbbrevCode.null));
+        },
+        .opt_type => |opt_child_type_index| {
+            const opt_ty: Type = .fromInterned(val);
+            const opt_child_ty: Type = .fromInterned(opt_child_type_index);
+            const opt_repr = optRepr(opt_child_ty, zcu);
+            const name = try zcu.gpa.print("{f}", .{opt_ty.fmt(pt)});
+            defer zcu.gpa.free(name);
+            try diw.writeUleb128(try dwarf.refAbbrevCode(.generated_union_type));
+            try dwarf.strp(&dwarf.debug_str, di_nw, name);
+            try diw.writeUleb128(opt_ty.abiSize(zcu));
+            try diw.writeUleb128(opt_ty.abiAlignment(zcu).toByteUnits().?);
+            switch (opt_repr) {
+                .opv_null => {
+                    try diw.writeUleb128(try dwarf.refAbbrevCode(.generated_field));
+                    try dwarf.strp(&dwarf.debug_str, di_nw, "null");
+                    try dwarf.refType(pt, di_nw, .null);
+                    try diw.writeUleb128(0);
+                },
+                .unpacked, .error_set, .pointer => {
+                    try diw.writeUleb128(try dwarf.refAbbrevCode(.tagged_union));
+                    try dwarf.secOffset(di_nw, di_nw.ni, diw.end + dwarf.secOffsetSize());
+                    {
+                        try diw.writeUleb128(try dwarf.refAbbrevCode(.generated_field));
+                        try dwarf.strp(&dwarf.debug_str, di_nw, "has_value");
+                        switch (opt_repr) {
+                            .opv_null => unreachable,
+                            .unpacked => {
+                                try dwarf.refType(pt, di_nw, .bool);
+                                try diw.writeUleb128(if (opt_child_ty.hasRuntimeBits(zcu))
+                                    opt_child_ty.abiSize(zcu)
+                                else
+                                    0);
+                            },
+                            .error_set => {
+                                try dwarf.refType(pt, di_nw, try pt.intType(.unsigned, zcu.errorSetBits()));
+                                try diw.writeUleb128(0);
+                            },
+                            .pointer => {
+                                try dwarf.refType(pt, di_nw, .usize);
+                                try diw.writeUleb128(0);
+                            },
+                        }
+
+                        try diw.writeUleb128(try dwarf.refAbbrevCode(.tagged_union_field));
+                        try diw.writeUleb128(DW.FORM.data1);
+                        try diw.writeByte(0);
+                        {
+                            try diw.writeUleb128(try dwarf.refAbbrevCode(.generated_field));
+                            try dwarf.strp(&dwarf.debug_str, di_nw, "null");
+                            try dwarf.refType(pt, di_nw, .null);
+                            try diw.writeUleb128(0);
+                        }
+                        try diw.writeUleb128(@backingInt(AbbrevCode.null));
+
+                        try diw.writeUleb128(try dwarf.refAbbrevCode(.tagged_union_default_field));
+                        {
+                            try diw.writeUleb128(try dwarf.refAbbrevCode(.generated_field));
+                            try dwarf.strp(&dwarf.debug_str, di_nw, "?");
+                            try dwarf.refType(pt, di_nw, opt_child_ty);
+                            try diw.writeUleb128(0);
+                        }
+                        try diw.writeUleb128(@backingInt(AbbrevCode.null));
+                    }
+                    try diw.writeUleb128(@backingInt(AbbrevCode.null));
+                },
+            }
+            try diw.writeUleb128(@backingInt(AbbrevCode.null));
+        },
+        .anyframe_type => unreachable,
+        .error_union_type => |error_union_type| {
+            const eu_ty: Type = .fromInterned(val);
+            const eu_error_set_ty: Type = .fromInterned(error_union_type.error_set_type);
+            const eu_payload_ty: Type = .fromInterned(error_union_type.payload_type);
+            const eu_error_set_offset, const eu_payload_offset = switch (error_union_type.payload_type) {
+                .generic_poison_type => .{ 0, 0 },
+                else => .{
+                    codegen.errUnionErrorOffset(eu_payload_ty, zcu),
+                    codegen.errUnionPayloadOffset(eu_payload_ty, zcu),
+                },
+            };
+            const name = try zcu.gpa.print("{f}", .{eu_ty.fmt(pt)});
+            defer zcu.gpa.free(name);
+
+            try diw.writeUleb128(try dwarf.refAbbrevCode(.generated_union_type));
+            try dwarf.strp(&dwarf.debug_str, di_nw, name);
+            if (error_union_type.error_set_type != .generic_poison_type and
+                error_union_type.payload_type != .generic_poison_type)
+            {
+                try diw.writeUleb128(eu_ty.abiSize(zcu));
+                try diw.writeUleb128(eu_ty.abiAlignment(zcu).toByteUnits().?);
+            } else {
+                try diw.writeUleb128(0);
+                try diw.writeUleb128(1);
+            }
+            {
+                try diw.writeUleb128(try dwarf.refAbbrevCode(.tagged_union));
+                try dwarf.secOffset(di_nw, di_nw.ni, diw.end + dwarf.secOffsetSize());
+                {
+                    try diw.writeUleb128(try dwarf.refAbbrevCode(.generated_field));
+                    try dwarf.strp(&dwarf.debug_str, di_nw, "is_error");
+                    try dwarf.refType(pt, di_nw, try pt.intType(.unsigned, zcu.errorSetBits()));
+                    try diw.writeUleb128(eu_error_set_offset);
+
+                    try diw.writeUleb128(try dwarf.refAbbrevCode(.tagged_union_field));
+                    try diw.writeUleb128(DW.FORM.udata);
+                    try diw.writeUleb128(0);
+                    {
+                        try diw.writeUleb128(try dwarf.refAbbrevCode(.generated_field));
+                        try dwarf.strp(&dwarf.debug_str, di_nw, "value");
+                        try dwarf.refType(pt, di_nw, eu_payload_ty);
+                        try diw.writeUleb128(eu_payload_offset);
+                    }
+                    try diw.writeUleb128(@backingInt(AbbrevCode.null));
+
+                    try diw.writeUleb128(try dwarf.refAbbrevCode(.tagged_union_default_field));
+                    {
+                        try diw.writeUleb128(try dwarf.refAbbrevCode(.generated_field));
+                        try dwarf.strp(&dwarf.debug_str, di_nw, "error");
+                        try dwarf.refType(pt, di_nw, eu_error_set_ty);
+                        try diw.writeUleb128(eu_error_set_offset);
+                    }
+                    try diw.writeUleb128(@backingInt(AbbrevCode.null));
+                }
+                try diw.writeUleb128(@backingInt(AbbrevCode.null));
+            }
+            try diw.writeUleb128(@backingInt(AbbrevCode.null));
         },
         .simple_type => |simple_type| switch (simple_type) {
             .f16,
@@ -2220,25 +2373,315 @@ fn updateConstInner(
                 var name_buf: ["@TypeOf(undefined)".len]u8 = undefined;
                 try dwarf.strp(&dwarf.debug_str, di_nw, std.mem.print(&name_buf, "{f}", .{ty.fmt(pt)}) catch unreachable);
             },
-            .anyerror => return,
+            .anyerror => {
+                const global_error_set_names = ip.global_error_set.getNamesFromMainThread();
+                try diw.writeUleb128(try dwarf.refAbbrevCode(
+                    if (global_error_set_names.len > 0) .generated_enum_type else .generated_empty_enum_type,
+                ));
+                try dwarf.strp(&dwarf.debug_str, di_nw, "anyerror");
+                try dwarf.refType(pt, di_nw, try pt.intType(.unsigned, zcu.errorSetBits()));
+                for (global_error_set_names, 1..) |name, value| {
+                    try diw.writeUleb128(try dwarf.refAbbrevCode(.enum_field));
+                    try diw.writeUleb128(DW.FORM.udata);
+                    try diw.writeUleb128(value);
+                    try dwarf.strp(&dwarf.debug_str, di_nw, name.toSlice(ip));
+                }
+                if (global_error_set_names.len > 0) try diw.writeUleb128(@backingInt(AbbrevCode.null));
+            },
             .adhoc_inferred_error_set => unreachable,
+        },
+        .tuple_type => |tuple_type| {
+            const ty: Type = .fromInterned(val);
+            const name = try zcu.gpa.print("{f}", .{ty.fmt(pt)});
+            defer zcu.gpa.free(name);
+            if (tuple_type.types.len == 0) {
+                try diw.writeUleb128(try dwarf.refAbbrevCode(.generated_empty_struct_type));
+                try dwarf.strp(&dwarf.debug_str, di_nw, name);
+                try diw.writeByte(@intFromBool(false));
+            } else {
+                try diw.writeUleb128(try dwarf.refAbbrevCode(.generated_struct_type));
+                try dwarf.strp(&dwarf.debug_str, di_nw, name);
+                try diw.writeUleb128(ty.abiSize(zcu));
+                try diw.writeUleb128(ty.abiAlignment(zcu).toByteUnits().?);
+                var field_byte_offset: u64 = 0;
+                for (0..tuple_type.types.len) |field_index| {
+                    const comptime_value = tuple_type.values.get(ip)[field_index];
+                    const field_ty: Type = .fromInterned(tuple_type.types.get(ip)[field_index]);
+                    const comptime_value_class = switch (comptime_value) {
+                        .none => .no_possible_value,
+                        else => field_ty.classify(zcu),
+                    };
+                    try diw.writeUleb128(try dwarf.refAbbrevCode(switch (comptime_value) {
+                        .none => .field,
+                        else => switch (comptime_value_class) {
+                            .no_possible_value, .one_possible_value => .field_comptime,
+                            .runtime => .field_comptime_fully_runtime,
+                            .partially_comptime => .field_comptime_partially_comptime,
+                            .fully_comptime => .field_comptime_fully_comptime,
+                        },
+                    }));
+                    var field_name_buf: [std.fmt.count("{d}", .{std.math.maxInt(u32)})]u8 = undefined;
+                    try dwarf.strp(
+                        &dwarf.debug_str,
+                        di_nw,
+                        std.mem.print(&field_name_buf, "{d}", .{field_index}) catch unreachable,
+                    );
+                    try dwarf.refType(pt, di_nw, field_ty);
+                    if (comptime_value == .none) {
+                        const field_align = field_ty.abiAlignment(zcu);
+                        field_byte_offset = field_align.forward(field_byte_offset);
+                        try diw.writeUleb128(field_byte_offset);
+                        try diw.writeUleb128(field_ty.abiAlignment(zcu).toByteUnits().?);
+                        field_byte_offset += field_ty.abiSize(zcu);
+                    }
+                    if (comptime_value_class.hasRuntimeBits())
+                        try dwarf.blockConst(pt, di_nw, .fromInterned(comptime_value));
+                    if (comptime_value_class.comptimeOnly())
+                        try dwarf.refConst(pt, di_nw, .fromInterned(comptime_value));
+                }
+                try diw.writeUleb128(@backingInt(AbbrevCode.null));
+            }
         },
         .struct_type => {
             const loaded_struct = ip.loadStructType(val);
             const zfi = loaded_struct.zir_index.resolveFile(ip);
             const zf = zcu.fileByIndex(zfi);
+            const src_inst = loaded_struct.zir_index.resolve(ip);
+            if (src_inst == .main_struct_inst) {
+                assert(loaded_struct.captures.len == 0);
+                const ui = dwarf.getUnit(zf.mod.?);
+                _, const fi = try ui.get(dwarf).getFile(zcu.gpa, ui, zfi);
+                try diw.writeUleb128(try dwarf.refAbbrevCode(switch (loaded_struct.layout) {
+                    .auto => if (loaded_struct.field_types.len > 0) .file else .empty_file,
+                    .@"extern", .@"packed" => unreachable,
+                }));
+                try diw.writeUleb128(@backingInt(fi));
+                try dwarf.strp(&dwarf.debug_str, di_nw, loaded_struct.name.toSlice(ip));
+            } else if (loaded_struct.captures.len > 0 or loaded_struct.is_reified) {
+                try diw.writeUleb128(try dwarf.refAbbrevCode(
+                    if (loaded_struct.captures.len > 0 or loaded_struct.field_types.len > 0) switch (loaded_struct.layout) {
+                        .auto, .@"extern" => .decl_instance_struct,
+                        .@"packed" => .decl_instance_packed_struct,
+                    } else switch (loaded_struct.layout) {
+                        .auto, .@"extern" => .decl_instance_empty_struct,
+                        .@"packed" => .decl_instance_empty_packed_struct,
+                    },
+                ));
+                try dwarf.secOffset(di_nw, try dwarf.getDecl(pt, val), 0);
+            } else if (loaded_struct.name_nav.unwrap()) |name_ni| {
+                const name_nav = ip.getNav(name_ni);
+                const decl = zf.zir.?.getDeclaration(name_nav.srcInst(ip).resolve(ip).?);
+                const parent_ni = try dwarf.getDecl(pt, ip.namespacePtr(
+                    name_nav.analysis.?.namespace,
+                ).owner_type);
+                try diw.writeUleb128(try dwarf.refAbbrevCode(switch (loaded_struct.layout) {
+                    .auto, .@"extern" => if (loaded_struct.field_types.len > 0) .decl_struct else .decl_empty_struct,
+                    .@"packed" => if (loaded_struct.field_types.len > 0) .decl_packed_struct else .decl_empty_packed_struct,
+                }));
+                try dwarf.secOffset(di_nw, parent_ni, 0);
+                try diw.writeInt(u32, decl.src_line + 1, dwarf.endian);
+                try diw.writeUleb128(decl.src_column + 1);
+                try diw.writeByte(if (decl.is_pub) DW.ACCESS.public else DW.ACCESS.private);
+                try dwarf.strp(&dwarf.debug_str, di_nw, name_nav.name.toSlice(ip));
+            } else {
+                const decl = zf.zir.?.getStructDecl(src_inst.?);
+                const parent_ni = try dwarf.getDecl(pt, ip.namespacePtr(
+                    ip.namespacePtr(loaded_struct.namespace).parent.unwrap().?,
+                ).owner_type);
+                try diw.writeUleb128(try dwarf.refAbbrevCode(switch (loaded_struct.layout) {
+                    .auto, .@"extern" => if (loaded_struct.field_types.len > 0) .type_decl_struct else .type_decl_empty_struct,
+                    .@"packed" => if (loaded_struct.field_types.len > 0) .type_decl_packed_struct else .type_decl_empty_packed_struct,
+                }));
+                try dwarf.secOffset(di_nw, parent_ni, 0);
+                try diw.writeInt(u32, decl.src_line + 1, dwarf.endian);
+                try diw.writeUleb128(decl.src_column + 1);
+                try dwarf.strp(&dwarf.debug_str, di_nw, loaded_struct.name.toSlice(ip));
+            }
             switch (loaded_struct.layout) {
                 .auto, .@"extern" => {
-                    const struct_is_file = loaded_struct.zir_index.resolve(ip) == .main_struct_inst;
-                    if (loaded_struct.name_nav.unwrap()) |name_ni| {
-                        assert(!struct_is_file);
+                    const ty: Type = .fromInterned(val);
+                    try diw.writeUleb128(ty.abiSize(zcu));
+                    try diw.writeUleb128(ty.abiAlignment(zcu).toByteUnits().?);
+                    try dwarf.genCaptures(pt, di_nw, loaded_struct.captures);
+                    for (0..loaded_struct.field_types.len) |field_index| {
+                        const is_comptime = loaded_struct.field_is_comptime_bits.get(ip, field_index);
+                        // TODO: we currently don't emit information about default values for
+                        // non-`comptime` fields, because these default values are resolved at a
+                        // separate time in the compiler frontend. To emit this information, the
+                        // frontend needs to tell us when the default values are available: like
+                        // how `Zcu.PerThread.ensureTypeLayoutUpToDate` enqueues a link task to
+                        // indicate completion of the type's layout, a task should be enqueued
+                        // by `Zcu.PerThread.ensureStructDefaultsUpToDate`, and upon receiving
+                        // it we should patch the correct default field values in.
+                        const field_default: InternPool.Index =
+                            if (is_comptime) loaded_struct.field_defaults.getOrNone(ip, field_index) else .none;
+                        assert(!(is_comptime and field_default == .none));
+                        const field_ty: Type = .fromInterned(loaded_struct.field_types.get(ip)[field_index]);
+                        const field_default_class = switch (field_default) {
+                            .none => .no_possible_value,
+                            else => field_ty.classify(zcu),
+                        };
+                        try diw.writeUleb128(try dwarf.refAbbrevCode(switch (field_default_class) {
+                            .no_possible_value, .one_possible_value => if (is_comptime) .field_comptime else .field,
+                            .runtime => if (is_comptime) .field_comptime_fully_runtime else .field_default_fully_runtime,
+                            .partially_comptime => if (is_comptime) .field_comptime_partially_comptime else .field_default_partially_comptime,
+                            .fully_comptime => if (is_comptime) .field_comptime_fully_comptime else .field_default_fully_comptime,
+                        }));
+                        try dwarf.strp(&dwarf.debug_str, di_nw, loaded_struct.field_names.get(ip)[field_index].toSlice(ip));
+                        try dwarf.refType(pt, di_nw, field_ty);
+                        if (!is_comptime) {
+                            try diw.writeUleb128(loaded_struct.field_offsets.get(ip)[field_index]);
+                            try diw.writeUleb128(loaded_struct.field_aligns.getOrNone(ip, field_index).toByteUnits() orelse
+                                field_ty.abiAlignment(zcu).toByteUnits().?);
+                        }
+                        if (field_default_class.hasRuntimeBits())
+                            try dwarf.blockConst(pt, di_nw, .fromInterned(field_default));
+                        if (field_default_class.comptimeOnly())
+                            try dwarf.refConst(pt, di_nw, .fromInterned(field_default));
+                    }
+                },
+                .@"packed" => {
+                    try dwarf.refType(pt, di_nw, .fromInterned(loaded_struct.packed_backing_int_type));
+                    try dwarf.genCaptures(pt, di_nw, loaded_struct.captures);
+                    var field_bit_offset: u16 = 0;
+                    for (0..loaded_struct.field_types.len) |field_index| {
+                        try diw.writeUleb128(try dwarf.refAbbrevCode(.packed_field));
+                        try dwarf.strp(&dwarf.debug_str, di_nw, loaded_struct.field_names.get(ip)[field_index].toSlice(ip));
+                        const field_ty: Type = .fromInterned(loaded_struct.field_types.get(ip)[field_index]);
+                        try dwarf.refType(pt, di_nw, field_ty);
+                        try diw.writeUleb128(field_bit_offset);
+                        field_bit_offset += @intCast(field_ty.bitSize(zcu));
+                    }
+                },
+            }
+            if (loaded_struct.captures.len > 0 or loaded_struct.field_types.len > 0)
+                try diw.writeUleb128(@backingInt(AbbrevCode.null));
+        },
+        .union_type => {
+            const loaded_union = ip.loadUnionType(val);
+            const loaded_tag = ip.loadEnumType(loaded_union.enum_tag_type);
+            const zfi = loaded_union.zir_index.resolveFile(ip);
+            const zf = zcu.fileByIndex(zfi);
+            if (loaded_union.captures.len > 0 or loaded_union.is_reified) {
+                try diw.writeUleb128(try dwarf.refAbbrevCode(
+                    if (loaded_union.captures.len > 0 or loaded_union.field_types.len > 0) switch (loaded_union.layout) {
+                        .auto, .@"extern" => .decl_instance_union,
+                        .@"packed" => .decl_instance_packed_union,
+                    } else switch (loaded_union.layout) {
+                        .auto, .@"extern" => .decl_instance_empty_union,
+                        .@"packed" => .decl_instance_empty_packed_union,
+                    },
+                ));
+                try dwarf.secOffset(di_nw, try dwarf.getDecl(pt, val), 0);
+            } else if (loaded_union.name_nav.unwrap()) |name_ni| {
+                const name_nav = ip.getNav(name_ni);
+                const decl = zf.zir.?.getDeclaration(name_nav.srcInst(ip).resolve(ip).?);
+                const parent_ni = try dwarf.getDecl(pt, ip.namespacePtr(
+                    name_nav.analysis.?.namespace,
+                ).owner_type);
+                try diw.writeUleb128(try dwarf.refAbbrevCode(switch (loaded_union.layout) {
+                    .auto, .@"extern" => if (loaded_union.field_types.len > 0) .decl_union else .decl_empty_union,
+                    .@"packed" => if (loaded_union.field_types.len > 0) .decl_packed_union else .decl_empty_packed_union,
+                }));
+                try dwarf.secOffset(di_nw, parent_ni, 0);
+                try diw.writeInt(u32, decl.src_line + 1, dwarf.endian);
+                try diw.writeUleb128(decl.src_column + 1);
+                try diw.writeByte(if (decl.is_pub) DW.ACCESS.public else DW.ACCESS.private);
+                try dwarf.strp(&dwarf.debug_str, di_nw, name_nav.name.toSlice(ip));
+            } else {
+                const decl = zf.zir.?.getUnionDecl(loaded_union.zir_index.resolve(ip).?);
+                const parent_ni = try dwarf.getDecl(pt, ip.namespacePtr(
+                    ip.namespacePtr(loaded_union.namespace).parent.unwrap().?,
+                ).owner_type);
+                try diw.writeUleb128(try dwarf.refAbbrevCode(switch (loaded_union.layout) {
+                    .auto, .@"extern" => if (loaded_union.field_types.len > 0) .type_decl_union else .type_decl_empty_union,
+                    .@"packed" => if (loaded_union.field_types.len > 0) .type_decl_packed_union else .type_decl_empty_packed_union,
+                }));
+                try dwarf.secOffset(di_nw, parent_ni, 0);
+                try diw.writeInt(u32, decl.src_line + 1, dwarf.endian);
+                try diw.writeUleb128(decl.src_column + 1);
+                try dwarf.strp(&dwarf.debug_str, di_nw, loaded_union.name.toSlice(ip));
+            }
+            switch (loaded_union.layout) {
+                .auto, .@"extern" => {
+                    const union_layout = Type.getUnionLayout(loaded_union, zcu);
+                    try diw.writeUleb128(union_layout.abi_size);
+                    try diw.writeUleb128(union_layout.abi_align.toByteUnits().?);
+                    try dwarf.genCaptures(pt, di_nw, loaded_union.captures);
+                    if (loaded_union.has_runtime_tag) {
+                        try diw.writeUleb128(try dwarf.refAbbrevCode(.tagged_union));
+                        try dwarf.secOffset(di_nw, di_nw.ni, diw.end + dwarf.secOffsetSize());
+                        {
+                            try diw.writeUleb128(try dwarf.refAbbrevCode(.generated_field));
+                            try dwarf.strp(&dwarf.debug_str, di_nw, "tag");
+                            try dwarf.refType(pt, di_nw, .fromInterned(loaded_union.enum_tag_type));
+                            try diw.writeUleb128(union_layout.tagOffset());
+
+                            for (0..loaded_union.field_types.len) |field_index| {
+                                try diw.writeUleb128(try dwarf.refAbbrevCode(.tagged_union_field));
+                                try dwarf.enumConstValue(diw, loaded_tag, field_index);
+                                {
+                                    try diw.writeUleb128(try dwarf.refAbbrevCode(.field));
+                                    try dwarf.strp(
+                                        &dwarf.debug_str,
+                                        di_nw,
+                                        loaded_tag.field_names.get(ip)[field_index].toSlice(ip),
+                                    );
+                                    const field_ty: Type = .fromInterned(loaded_union.field_types.get(ip)[field_index]);
+                                    try dwarf.refType(pt, di_nw, field_ty);
+                                    try diw.writeUleb128(union_layout.payloadOffset());
+                                    try diw.writeUleb128(loaded_union.field_aligns.getOrNone(ip, field_index).toByteUnits() orelse
+                                        if (field_ty.isNoReturn(zcu)) 1 else field_ty.abiAlignment(zcu).toByteUnits().?);
+                                }
+                                try diw.writeUleb128(@backingInt(AbbrevCode.null));
+                            }
+                        }
+                        try diw.writeUleb128(@backingInt(AbbrevCode.null));
+                    } else for (0..loaded_union.field_types.len) |field_index| {
+                        try diw.writeUleb128(try dwarf.refAbbrevCode(.field));
+                        try dwarf.strp(&dwarf.debug_str, di_nw, loaded_tag.field_names.get(ip)[field_index].toSlice(ip));
+                        const field_ty: Type = .fromInterned(loaded_union.field_types.get(ip)[field_index]);
+                        try dwarf.refType(pt, di_nw, field_ty);
+                        try diw.writeUleb128(0);
+                        try diw.writeUleb128(loaded_union.field_aligns.getOrNone(ip, field_index).toByteUnits() orelse
+                            if (field_ty.isNoReturn(zcu)) 1 else field_ty.abiAlignment(zcu).toByteUnits().?);
+                    }
+                },
+                .@"packed" => {
+                    try dwarf.refType(pt, di_nw, .fromInterned(loaded_union.packed_backing_int_type));
+                    for (0..loaded_union.field_types.len) |field_index| {
+                        try diw.writeUleb128(try dwarf.refAbbrevCode(.packed_field));
+                        try dwarf.strp(&dwarf.debug_str, di_nw, loaded_tag.field_names.get(ip)[field_index].toSlice(ip));
+                        try dwarf.refType(pt, di_nw, .fromInterned(loaded_union.field_types.get(ip)[field_index]));
+                        try diw.writeUleb128(0);
+                    }
+                },
+            }
+            if (loaded_union.captures.len > 0 or loaded_union.field_types.len > 0)
+                try diw.writeUleb128(@backingInt(AbbrevCode.null));
+        },
+        .enum_type => {
+            const loaded_enum = ip.loadEnumType(val);
+            switch (loaded_enum.owner_union) {
+                .none => {
+                    const zfi = loaded_enum.zir_index.unwrap().?.resolveFile(ip);
+                    const zf = zcu.fileByIndex(zfi);
+                    if (loaded_enum.captures.len > 0 or loaded_enum.is_reified) {
+                        try diw.writeUleb128(try dwarf.refAbbrevCode(
+                            if (loaded_enum.captures.len > 0 or loaded_enum.field_names.len > 0)
+                                .decl_instance_enum
+                            else
+                                .decl_instance_empty_enum,
+                        ));
+                        try dwarf.secOffset(di_nw, try dwarf.getDecl(pt, val), 0);
+                    } else if (loaded_enum.name_nav.unwrap()) |name_ni| {
                         const name_nav = ip.getNav(name_ni);
                         const decl = zf.zir.?.getDeclaration(name_nav.srcInst(ip).resolve(ip).?);
                         const parent_ni = try dwarf.getDecl(pt, ip.namespacePtr(
                             name_nav.analysis.?.namespace,
                         ).owner_type);
                         try diw.writeUleb128(try dwarf.refAbbrevCode(
-                            if (loaded_struct.field_types.len > 0) .decl_struct else .decl_namespace_struct,
+                            if (loaded_enum.field_names.len > 0) .decl_enum else .decl_empty_enum,
                         ));
                         try dwarf.secOffset(di_nw, parent_ni, 0);
                         try diw.writeInt(u32, decl.src_line + 1, dwarf.endian);
@@ -2246,105 +2689,171 @@ fn updateConstInner(
                         try diw.writeByte(if (decl.is_pub) DW.ACCESS.public else DW.ACCESS.private);
                         try dwarf.strp(&dwarf.debug_str, di_nw, name_nav.name.toSlice(ip));
                     } else {
-                        const ui = dwarf.getUnit(zf.mod.?);
-                        _, const fi = try ui.get(dwarf).getFile(zcu.gpa, ui, zfi);
-                        try diw.writeUleb128(try dwarf.refAbbrevCode(switch (loaded_struct.field_types.len) {
-                            0 => if (struct_is_file) .empty_file else .empty_struct_type,
-                            else => if (struct_is_file) .file else .struct_type,
-                        }));
-                        try diw.writeUleb128(@backingInt(fi));
-                        try dwarf.strp(&dwarf.debug_str, di_nw, loaded_struct.fqn.toSlice(ip));
+                        const decl = zf.zir.?.getEnumDecl(loaded_enum.zir_index.unwrap().?.resolve(ip).?);
+                        const parent_ni = try dwarf.getDecl(pt, ip.namespacePtr(
+                            ip.namespacePtr(loaded_enum.namespace).parent.unwrap().?,
+                        ).owner_type);
+                        try diw.writeUleb128(try dwarf.refAbbrevCode(
+                            if (loaded_enum.field_names.len > 0) .type_decl_enum else .type_decl_empty_enum,
+                        ));
+                        try dwarf.secOffset(di_nw, parent_ni, 0);
+                        try diw.writeInt(u32, decl.src_line + 1, dwarf.endian);
+                        try diw.writeUleb128(decl.src_column + 1);
+                        try dwarf.strp(&dwarf.debug_str, di_nw, loaded_enum.name.toSlice(ip));
                     }
-                    if (loaded_struct.field_types.len > 0) {
-                        const ty: Type = .fromInterned(val);
-                        try diw.writeUleb128(ty.abiSize(zcu));
-                        try diw.writeUleb128(ty.abiAlignment(zcu).toByteUnits().?);
-                        for (0..loaded_struct.field_types.len) |field_index| {
-                            const is_comptime = loaded_struct.field_is_comptime_bits.get(ip, field_index);
-                            // TODO: we currently don't emit information about default values for
-                            // non-`comptime` fields, because these default values are resolved at a
-                            // separate time in the compiler frontend. To emit this information, the
-                            // frontend needs to tell us when the default values are available: like
-                            // how `Zcu.PerThread.ensureTypeLayoutUpToDate` enqueues a link task to
-                            // indicate completion of the type's layout, a task should be enqueued
-                            // by `Zcu.PerThread.ensureStructDefaultsUpToDate`, and upon receiving
-                            // it we should patch the correct default field values in.
-                            const field_default: InternPool.Index =
-                                if (is_comptime) loaded_struct.field_defaults.getOrNone(ip, field_index) else .none;
-                            assert(!(is_comptime and field_default == .none));
-                            const field_ty: Type = .fromInterned(loaded_struct.field_types.get(ip)[field_index]);
-                            const field_default_class = switch (field_default) {
-                                .none => .no_possible_value,
-                                else => field_ty.classify(zcu),
-                            };
-                            try diw.writeUleb128(try dwarf.refAbbrevCode(switch (field_default_class) {
-                                .no_possible_value, .one_possible_value => if (is_comptime) .field_comptime else .field,
-                                .runtime => if (is_comptime) .field_comptime_fully_runtime else .field_default_fully_runtime,
-                                .partially_comptime => if (is_comptime) .field_comptime_partially_comptime else .field_default_partially_comptime,
-                                .fully_comptime => if (is_comptime) .field_comptime_fully_comptime else .field_default_fully_comptime,
-                            }));
-                            try dwarf.strp(&dwarf.debug_str, di_nw, loaded_struct.field_names.get(ip)[field_index].toSlice(ip));
-                            try dwarf.refConst(pt, di_nw, field_ty.toValue());
-                            if (!is_comptime) {
-                                try diw.writeUleb128(loaded_struct.field_offsets.get(ip)[field_index]);
-                                try diw.writeUleb128(loaded_struct.field_aligns.getOrNone(ip, field_index).toByteUnits() orelse
-                                    field_ty.abiAlignment(zcu).toByteUnits().?);
-                            }
-                            if (field_default_class.hasRuntimeBits()) try dwarf.blockConst(pt, di_nw, .fromInterned(field_default));
-                            if (field_default_class.comptimeOnly()) try dwarf.refConst(pt, di_nw, .fromInterned(field_default));
-                        }
-                        try diw.writeUleb128(@backingInt(AbbrevCode.null));
-                    } else try diw.writeByte(@intFromBool(false));
                 },
-                .@"packed" => return,
-            }
-        },
-        .enum_type => {
-            const loaded_enum = ip.loadEnumType(val);
-            if (loaded_enum.zir_index.unwrap()) |zir_index| {
-                assert(loaded_enum.owner_union == .none);
-                const zfi = zir_index.resolveFile(ip);
-                const zf = zcu.fileByIndex(zfi);
-                if (loaded_enum.name_nav.unwrap()) |name_ni| {
-                    const name_nav = ip.getNav(name_ni);
-                    const decl = zf.zir.?.getDeclaration(name_nav.srcInst(ip).resolve(ip).?);
-                    const parent_ni = try dwarf.getDecl(pt, ip.namespacePtr(
-                        name_nav.analysis.?.namespace,
-                    ).owner_type);
+                else => {
                     try diw.writeUleb128(try dwarf.refAbbrevCode(
-                        if (loaded_enum.field_names.len > 0) .decl_enum else .decl_empty_enum,
+                        if (loaded_enum.field_names.len > 0) .generated_enum_type else .generated_empty_enum_type,
                     ));
-                    try dwarf.secOffset(di_nw, parent_ni, 0);
-                    try diw.writeInt(u32, decl.src_line + 1, dwarf.endian);
-                    try diw.writeUleb128(decl.src_column + 1);
-                    try diw.writeByte(if (decl.is_pub) DW.ACCESS.public else DW.ACCESS.private);
-                    try dwarf.strp(&dwarf.debug_str, di_nw, name_nav.name.toSlice(ip));
-                } else {
-                    const ui = dwarf.getUnit(zf.mod.?);
-                    _, const fi = try ui.get(dwarf).getFile(zcu.gpa, ui, zfi);
-                    try diw.writeUleb128(try dwarf.refAbbrevCode(
-                        if (loaded_enum.field_names.len > 0) .enum_type else .empty_enum_type,
-                    ));
-                    try diw.writeUleb128(@backingInt(fi));
                     try dwarf.strp(&dwarf.debug_str, di_nw, loaded_enum.fqn.toSlice(ip));
-                }
-            } else {
-                assert(loaded_enum.owner_union != .none);
-                try diw.writeUleb128(try dwarf.refAbbrevCode(
-                    if (loaded_enum.field_names.len == 0) .generated_empty_enum_type else .generated_enum_type,
-                ));
-                try dwarf.strp(&dwarf.debug_str, di_nw, loaded_enum.fqn.toSlice(ip));
+                },
             }
-            try dwarf.refConst(pt, di_nw, .fromInterned(loaded_enum.int_tag_type));
+            try dwarf.refType(pt, di_nw, .fromInterned(loaded_enum.int_tag_type));
             for (0..loaded_enum.field_names.len) |field_index| {
                 try diw.writeUleb128(try dwarf.refAbbrevCode(.enum_field));
                 try dwarf.enumConstValue(diw, loaded_enum, field_index);
                 try dwarf.strp(&dwarf.debug_str, di_nw, loaded_enum.field_names.get(ip)[field_index].toSlice(ip));
             }
-            if (loaded_enum.field_names.len > 0) try diw.writeUleb128(@backingInt(AbbrevCode.null));
+            if (loaded_enum.captures.len > 0 or loaded_enum.field_names.len > 0)
+                try diw.writeUleb128(@backingInt(AbbrevCode.null));
         },
+        // no defined size, so lowered the same as incomplete struct types
+        .opaque_type => return dwarf.updateConstIncompleteInner(pt, di_nw, val),
+        .spirv_type => unreachable,
+        .func_type => |func_type| {
+            const is_nullary = func_type.param_types.len == 0 and !func_type.is_var_args;
+            const name = try zcu.gpa.print("{f}", .{Type.fromInterned(val).fmt(pt)});
+            defer zcu.gpa.free(name);
+            try diw.writeUleb128(try dwarf.refAbbrevCode(
+                if (is_nullary) .nullary_func_type else .func_type,
+            ));
+            try dwarf.strp(&dwarf.debug_str, di_nw, name);
+            const cc: DW.CC = cc: {
+                if (zcu.getTarget().cCallingConvention()) |cc| {
+                    if (@as(std.lang.CallingConvention.Tag, cc) == func_type.cc) {
+                        break :cc .normal;
+                    }
+                }
+                // For better or worse, we try to match what Clang emits.
+                break :cc switch (func_type.cc) {
+                    .@"inline" => .nocall,
+                    .async, .auto, .naked => .normal,
+                    .x86_64_sysv => .LLVM_X86_64SysV,
+                    .x86_64_win => .LLVM_Win64,
+                    .x86_64_regcall_v3_sysv => .LLVM_X86RegCall,
+                    .x86_64_regcall_v4_win => .LLVM_X86RegCall,
+                    .x86_64_vectorcall => .LLVM_vectorcall,
+                    .x86_sysv, .x86_win, .x86_mingw => .normal,
+                    .x86_64_preserve_none => .LLVM_PreserveNone,
+                    .x86_stdcall => .BORLAND_stdcall,
+                    .x86_fastcall => .BORLAND_msfastcall,
+                    .x86_thiscall => .BORLAND_thiscall,
+                    .x86_thiscall_mingw => .BORLAND_thiscall,
+                    .x86_regcall_v3 => .LLVM_X86RegCall,
+                    .x86_regcall_v4_win => .LLVM_X86RegCall,
+                    .x86_vectorcall => .LLVM_vectorcall,
+
+                    .aarch64_aapcs => .normal,
+                    .aarch64_aapcs_darwin => .normal,
+                    .aarch64_aapcs_win => .normal,
+                    .aarch64_vfabi => .LLVM_AAPCS,
+                    .aarch64_vfabi_sve => .LLVM_AAPCS,
+                    .aarch64_preserve_none => .LLVM_PreserveNone,
+
+                    .arm_aapcs => .LLVM_AAPCS,
+                    .arm_aapcs_vfp => .LLVM_AAPCS_VFP,
+
+                    .riscv64_lp64_v,
+                    .riscv32_ilp32_v,
+                    => .LLVM_RISCVVectorCall,
+
+                    .m68k_rtd => .LLVM_M68kRTD,
+
+                    .sh_renesas => .GNU_renesas_sh,
+
+                    .amdgcn_kernel => .LLVM_OpenCLKernel,
+                    .nvptx_kernel,
+                    .spirv_kernel,
+                    => .nocall,
+
+                    .x86_64_interrupt,
+                    .x86_interrupt,
+                    .arm_interrupt,
+                    .mips64_interrupt,
+                    .mips_interrupt,
+                    .riscv64_interrupt,
+                    .riscv32_interrupt,
+                    .sh_interrupt,
+                    .arc_interrupt,
+                    .avr_builtin,
+                    .avr_signal,
+                    .avr_interrupt,
+                    .csky_interrupt,
+                    .m68k_interrupt,
+                    .microblaze_interrupt,
+                    .msp430_interrupt,
+                    => .normal,
+
+                    else => .nocall,
+                };
+            };
+            try diw.writeByte(@backingInt(cc));
+            try dwarf.refType(pt, di_nw, .fromInterned(func_type.return_type));
+            if (!is_nullary) {
+                for (0..func_type.param_types.len) |param_index| {
+                    try diw.writeUleb128(try dwarf.refAbbrevCode(.unnamed_param));
+                    try dwarf.refType(pt, di_nw, .fromInterned(func_type.param_types.get(ip)[param_index]));
+                }
+                if (func_type.is_var_args) try diw.writeUleb128(try dwarf.refAbbrevCode(.is_var_args));
+                try diw.writeUleb128(@backingInt(AbbrevCode.null));
+            }
+        },
+        .error_set_type => |error_set_type| {
+            const name = try zcu.gpa.print("{f}", .{Type.fromInterned(val).fmt(pt)});
+            defer zcu.gpa.free(name);
+            try diw.writeUleb128(try dwarf.refAbbrevCode(
+                if (error_set_type.names.len > 0) .generated_enum_type else .generated_empty_enum_type,
+            ));
+            try dwarf.strp(&dwarf.debug_str, di_nw, name);
+            try dwarf.refType(pt, di_nw, try pt.intType(.unsigned, zcu.errorSetBits()));
+            for (0..error_set_type.names.len) |field_index| {
+                const field_name = error_set_type.names.get(ip)[field_index];
+                try diw.writeUleb128(try dwarf.refAbbrevCode(.enum_field));
+                try diw.writeUleb128(DW.FORM.udata);
+                try diw.writeUleb128(ip.getErrorValueIfExists(field_name).?);
+                try dwarf.strp(&dwarf.debug_str, di_nw, field_name.toSlice(ip));
+            }
+            if (error_set_type.names.len > 0) try diw.writeUleb128(@backingInt(AbbrevCode.null));
+        },
+        .inferred_error_set_type => |func| {
+            const name = try zcu.gpa.print("{f}", .{Type.fromInterned(val).fmt(pt)});
+            defer zcu.gpa.free(name);
+            try diw.writeUleb128(try dwarf.refAbbrevCode(.inferred_error_set_type));
+            try dwarf.strp(&dwarf.debug_str, di_nw, name);
+            try dwarf.refType(pt, di_nw, switch (ip.funcIesResolvedUnordered(func)) {
+                .none => .anyerror,
+                else => |ies| .fromInterned(ies),
+            });
+        },
+
+        else => return,
+
+        .memoized_call => unreachable, // not a value
     }
     try dwarf.genDebugInfoPadding(diw, diw.unusedCapacityLen());
+}
+
+fn optRepr(opt_child_type: Type, zcu: *const Zcu) enum { unpacked, opv_null, error_set, pointer } {
+    if (opt_child_type.isNoReturn(zcu)) return .opv_null;
+    return switch (opt_child_type.toIntern()) {
+        .anyerror_type => .error_set,
+        else => switch (zcu.intern_pool.indexToKey(opt_child_type.toIntern())) {
+            else => .unpacked,
+            .error_set_type, .inferred_error_set_type => .error_set,
+            .ptr_type => |ptr_type| if (ptr_type.flags.is_allowzero) .unpacked else .pointer,
+        },
+    };
 }
 
 pub fn updateConstIncomplete(
@@ -2369,7 +2878,7 @@ fn updateConstIncompleteInner(
     const ip = &zcu.intern_pool;
     const diw = &di_nw.interface;
     done: {
-        const src_inst, const zf, const capture_names, const captures, const fqn, const maybe_name_nav, const namespace = container: switch (ip.indexToKey(val)) {
+        const kind: enum { @"struct", @"union", @"enum" }, const zf, const src_line, const src_column, const is_reified, const captures, const name, const maybe_name_nav, const namespace = container: switch (ip.indexToKey(val)) {
             .struct_type => {
                 const loaded_struct = ip.loadStructType(val);
                 const src_inst = loaded_struct.zir_index.resolveFull(ip) orelse {
@@ -2383,22 +2892,34 @@ fn updateConstIncompleteInner(
                         _, const fi = try ui.get(dwarf).getFile(zcu.gpa, ui, src_inst.file);
                         try diw.writeUleb128(try dwarf.refAbbrevCode(.empty_file));
                         try diw.writeUleb128(@backingInt(fi));
-                        try dwarf.strp(&dwarf.debug_str, di_nw, loaded_struct.fqn.toSlice(ip));
+                        try dwarf.strp(&dwarf.debug_str, di_nw, loaded_struct.name.toSlice(ip));
                         try diw.writeByte(@intFromBool(true));
                         break :done;
                     },
-                    else => break :container .{
-                        src_inst,
-                        zf,
-                        switch (zf.zir.?.instructions.items(.data)[@backingInt(src_inst.inst)].extended.opcode) {
+                    else => {
+                        const data = zf.zir.?.instructions.items(.data)[@backingInt(src_inst.inst)].extended;
+                        const src_line, const src_column = src_loc: switch (data.opcode) {
                             else => unreachable,
-                            .struct_decl => zf.zir.?.getStructDecl(src_inst.inst).capture_names,
-                            .reify_struct => &.{},
-                        },
-                        loaded_struct.captures,
-                        loaded_struct.fqn,
-                        loaded_struct.name_nav,
-                        loaded_struct.namespace,
+                            .struct_decl => {
+                                const decl = zf.zir.?.getStructDecl(src_inst.inst);
+                                break :src_loc .{ decl.src_line, decl.src_column };
+                            },
+                            .reify_struct => {
+                                const decl = zf.zir.?.extraData(std.zig.Zir.Inst.ReifyStruct, data.operand).data;
+                                break :src_loc .{ decl.src_line, decl.src_column };
+                            },
+                        };
+                        break :container .{
+                            .@"struct",
+                            zf,
+                            src_line,
+                            src_column,
+                            loaded_struct.is_reified,
+                            loaded_struct.captures,
+                            loaded_struct.name,
+                            loaded_struct.name_nav,
+                            loaded_struct.namespace,
+                        };
                     },
                 }
             },
@@ -2409,16 +2930,26 @@ fn updateConstIncompleteInner(
                     break :done;
                 };
                 const zf = zcu.fileByIndex(src_inst.file);
-                break :container .{
-                    src_inst,
-                    zf,
-                    switch (zf.zir.?.instructions.items(.data)[@backingInt(src_inst.inst)].extended.opcode) {
-                        else => unreachable,
-                        .union_decl => zf.zir.?.getUnionDecl(src_inst.inst).capture_names,
-                        .reify_union => &.{},
+                const data = zf.zir.?.instructions.items(.data)[@backingInt(src_inst.inst)].extended;
+                const src_line, const src_column = src_loc: switch (data.opcode) {
+                    else => unreachable,
+                    .union_decl => {
+                        const decl = zf.zir.?.getUnionDecl(src_inst.inst);
+                        break :src_loc .{ decl.src_line, decl.src_column };
                     },
+                    .reify_union => {
+                        const decl = zf.zir.?.extraData(std.zig.Zir.Inst.ReifyUnion, data.operand).data;
+                        break :src_loc .{ decl.src_line, decl.src_column };
+                    },
+                };
+                break :container .{
+                    .@"union",
+                    zf,
+                    src_line,
+                    src_column,
+                    loaded_union.is_reified,
                     loaded_union.captures,
-                    loaded_union.fqn,
+                    loaded_union.name,
                     loaded_union.name_nav,
                     loaded_union.namespace,
                 };
@@ -2427,7 +2958,7 @@ fn updateConstIncompleteInner(
                 const loaded_enum = ip.loadEnumType(val);
                 const zir_index = loaded_enum.zir_index.unwrap() orelse {
                     try diw.writeUleb128(try dwarf.refAbbrevCode(.generated_empty_struct_type));
-                    try dwarf.strp(&dwarf.debug_str, di_nw, loaded_enum.fqn.toSlice(ip));
+                    try dwarf.strp(&dwarf.debug_str, di_nw, loaded_enum.name.toSlice(ip));
                     try diw.writeByte(@intFromBool(true));
                     break :done;
                 };
@@ -2436,20 +2967,31 @@ fn updateConstIncompleteInner(
                     break :done;
                 };
                 const zf = zcu.fileByIndex(src_inst.file);
-                break :container .{
-                    src_inst,
-                    zf,
-                    switch (zf.zir.?.instructions.items(.data)[@backingInt(src_inst.inst)].extended.opcode) {
-                        else => unreachable,
-                        .enum_decl => zf.zir.?.getEnumDecl(src_inst.inst).capture_names,
-                        .reify_enum => &.{},
+                const data = zf.zir.?.instructions.items(.data)[@backingInt(src_inst.inst)].extended;
+                const src_line, const src_column = src_loc: switch (data.opcode) {
+                    else => unreachable,
+                    .enum_decl => {
+                        const decl = zf.zir.?.getEnumDecl(src_inst.inst);
+                        break :src_loc .{ decl.src_line, decl.src_column };
                     },
+                    .reify_enum => {
+                        const decl = zf.zir.?.extraData(std.zig.Zir.Inst.ReifyEnum, data.operand).data;
+                        break :src_loc .{ decl.src_line, decl.src_column };
+                    },
+                };
+                break :container .{
+                    .@"enum",
+                    zf,
+                    src_line,
+                    src_column,
+                    loaded_enum.is_reified,
                     loaded_enum.captures,
-                    loaded_enum.fqn,
+                    loaded_enum.name,
                     loaded_enum.name_nav,
                     loaded_enum.namespace,
                 };
             },
+            // always complete, but forwarded from `updateConstInner`
             .opaque_type => {
                 const loaded_opaque = ip.loadOpaqueType(val);
                 const src_inst = loaded_opaque.zir_index.resolveFull(ip) orelse {
@@ -2457,12 +2999,15 @@ fn updateConstIncompleteInner(
                     break :done;
                 };
                 const zf = zcu.fileByIndex(src_inst.file);
+                const decl = zf.zir.?.getOpaqueDecl(src_inst.inst);
                 break :container .{
-                    src_inst,
+                    .@"struct",
                     zf,
-                    zf.zir.?.getOpaqueDecl(src_inst.inst).capture_names,
+                    decl.src_line,
+                    decl.src_column,
+                    false,
                     loaded_opaque.captures,
-                    loaded_opaque.fqn,
+                    loaded_opaque.name,
                     loaded_opaque.name_nav,
                     loaded_opaque.namespace,
                 };
@@ -2477,84 +3022,108 @@ fn updateConstIncompleteInner(
                 },
                 else => |ty| {
                     try diw.writeUleb128(try dwarf.refAbbrevCode(.undefined_comptime_value));
-                    try dwarf.refConst(pt, di_nw, .fromInterned(ty));
+                    try dwarf.refType(pt, di_nw, .fromInterned(ty));
                 },
             },
         };
-        const spec_di = if (false and captures.len > 0) try dwarf.getDecl(pt, val) else undefined;
-        _ = spec_di;
-        if (maybe_name_nav.unwrap()) |name_ni| {
+        if (captures.len > 0 or is_reified) {
+            try diw.writeUleb128(try dwarf.refAbbrevCode(if (captures.len > 0) switch (kind) {
+                .@"struct" => .decl_instance_incomplete_struct,
+                .@"union" => .decl_instance_incomplete_union,
+                .@"enum" => .decl_instance_incomplete_enum,
+            } else switch (kind) {
+                .@"struct" => .decl_instance_empty_incomplete_struct,
+                .@"union" => .decl_instance_empty_incomplete_union,
+                .@"enum" => .decl_instance_empty_incomplete_enum,
+            }));
+            try dwarf.secOffset(di_nw, try dwarf.getDecl(pt, val), 0);
+        } else if (maybe_name_nav.unwrap()) |name_ni| {
             const name_nav = ip.getNav(name_ni);
-            const name_src_inst = name_nav.srcInst(ip).resolve(ip).?;
-            const decl = zf.zir.?.getDeclaration(name_src_inst);
+            const decl = zf.zir.?.getDeclaration(name_nav.srcInst(ip).resolve(ip).?);
             const parent_ni = try dwarf.getDecl(pt, ip.namespacePtr(
                 name_nav.analysis.?.namespace,
             ).owner_type);
-            try diw.writeUleb128(try dwarf.refAbbrevCode(
-                if (captures.len > 0) .decl_capturing_namespace_struct else .decl_namespace_struct,
-            ));
+            try diw.writeUleb128(try dwarf.refAbbrevCode(if (captures.len > 0) switch (kind) {
+                .@"struct" => .decl_incomplete_struct,
+                .@"union" => .decl_incomplete_union,
+                .@"enum" => .decl_incomplete_enum,
+            } else switch (kind) {
+                .@"struct" => .decl_empty_incomplete_struct,
+                .@"union" => .decl_empty_incomplete_union,
+                .@"enum" => .decl_empty_incomplete_enum,
+            }));
             try dwarf.secOffset(di_nw, parent_ni, 0);
             try diw.writeInt(u32, decl.src_line + 1, dwarf.endian);
             try diw.writeUleb128(decl.src_column + 1);
             try diw.writeByte(if (decl.is_pub) DW.ACCESS.public else DW.ACCESS.private);
             try dwarf.strp(&dwarf.debug_str, di_nw, name_nav.name.toSlice(ip));
         } else {
-            const ui = dwarf.getUnit(zf.mod.?);
-            _, const fi = try ui.get(dwarf).getFile(zcu.gpa, ui, src_inst.file);
-            const parent_ni = if (false) try dwarf.getDecl(pt, ip.namespacePtr(
+            const parent_ni = try dwarf.getDecl(pt, ip.namespacePtr(
                 ip.namespacePtr(namespace).parent.unwrap().?,
             ).owner_type);
-            _ = parent_ni;
-            try diw.writeUleb128(try dwarf.refAbbrevCode(
-                if (captures.len > 0) .capturing_empty_struct_type else .empty_struct_type,
-            ));
-            try diw.writeUleb128(@backingInt(fi));
-            try dwarf.strp(&dwarf.debug_str, di_nw, fqn.toSlice(ip));
+            try diw.writeUleb128(try dwarf.refAbbrevCode(if (captures.len > 0) switch (kind) {
+                .@"struct" => .type_decl_incomplete_struct,
+                .@"union" => .type_decl_incomplete_union,
+                .@"enum" => .type_decl_incomplete_enum,
+            } else switch (kind) {
+                .@"struct" => .type_decl_empty_incomplete_struct,
+                .@"union" => .type_decl_empty_incomplete_union,
+                .@"enum" => .type_decl_empty_incomplete_enum,
+            }));
+            try dwarf.secOffset(di_nw, parent_ni, 0);
+            try diw.writeInt(u32, src_line + 1, dwarf.endian);
+            try diw.writeUleb128(src_column + 1);
+            try dwarf.strp(&dwarf.debug_str, di_nw, name.toSlice(ip));
         }
-        try diw.writeByte(@intFromBool(true));
-        for (capture_names, captures.get(ip)) |capture_name, capture| switch (capture.unwrap()) {
-            .@"comptime" => |capture_val| {
-                const ty: Type = .fromInterned(ip.typeOf(capture_val));
-                const ty_class = ty.classify(zcu);
-                try diw.writeUleb128(try dwarf.refAbbrevCode(switch (ty_class) {
-                    .no_possible_value => unreachable,
-                    .one_possible_value => .comptime_capture,
-                    .runtime => .comptime_capture_runtime,
-                    .partially_comptime => .comptime_capture_partially_comptime,
-                    .fully_comptime => .comptime_capture_fully_comptime,
-                }));
-                try dwarf.strp(&dwarf.debug_str, di_nw, zf.zir.?.nullTerminatedString(capture_name));
-                try dwarf.refConst(pt, di_nw, ty.toValue());
-                if (ty_class.hasRuntimeBits()) try dwarf.blockConst(pt, di_nw, .fromInterned(capture_val));
-                if (ty_class.comptimeOnly()) try dwarf.refConst(pt, di_nw, .fromInterned(capture_val));
-            },
-            .runtime => |capture_ty| {
-                try diw.writeUleb128(try dwarf.refAbbrevCode(.runtime_capture));
-                try dwarf.strp(&dwarf.debug_str, di_nw, zf.zir.?.nullTerminatedString(capture_name));
-                try dwarf.refConst(pt, di_nw, .fromInterned(capture_ty));
-            },
-            .nav_val => |capture_nav| {
-                const gi = try dwarf.getGlobal(capture_nav);
-                try diw.writeUleb128(try dwarf.refAbbrevCode(.nav_capture));
-                try dwarf.strp(&dwarf.debug_str, di_nw, zf.zir.?.nullTerminatedString(capture_name));
-                try dwarf.exprLoc(di_nw, .{ .implicit_pointer = .{
-                    .node = gi.get(dwarf).debug_info_ni.unwrap().?,
-                } });
-            },
-            .nav_ref => |capture_nav| {
-                const gi = try dwarf.getGlobal(capture_nav);
-                const capture_name_slice = try zcu.gpa.print("&{s}", .{zf.zir.?.nullTerminatedString(capture_name)});
-                defer zcu.gpa.free(capture_name_slice);
-                try diw.writeUleb128(try dwarf.refAbbrevCode(.nav_capture));
-                try dwarf.strp(&dwarf.debug_str, di_nw, capture_name_slice);
-                try dwarf.exprLoc(di_nw, .{ .stack_value = &.{ .implicit_pointer = .{
-                    .node = gi.get(dwarf).debug_info_ni.unwrap().?,
-                } } });
-            },
-        };
+        try dwarf.genCaptures(pt, di_nw, captures);
         if (captures.len > 0) try diw.writeByte(@backingInt(AbbrevCode.null));
     }
     try dwarf.genDebugInfoPadding(diw, diw.unusedCapacityLen());
+}
+
+fn genCaptures(
+    dwarf: *Dwarf,
+    pt: Zcu.PerThread,
+    di_nw: *MappedFile.Node.Writer,
+    captures: anytype,
+) link.EmitError!void {
+    const zcu = pt.zcu;
+    const ip = &zcu.intern_pool;
+    const diw = &di_nw.interface;
+    for (captures.get(ip)) |capture| switch (capture.unwrap()) {
+        .@"comptime" => |capture_val| {
+            const ty: Type = .fromInterned(ip.typeOf(capture_val));
+            const ty_class = ty.classify(zcu);
+            try diw.writeUleb128(try dwarf.refAbbrevCode(switch (ty_class) {
+                .no_possible_value => unreachable,
+                .one_possible_value => .comptime_capture,
+                .runtime => .comptime_capture_runtime,
+                .partially_comptime => .comptime_capture_partially_comptime,
+                .fully_comptime => .comptime_capture_fully_comptime,
+            }));
+            try dwarf.refType(pt, di_nw, ty);
+            if (ty_class.hasRuntimeBits()) try dwarf.blockConst(pt, di_nw, .fromInterned(capture_val));
+            if (ty_class.comptimeOnly()) try dwarf.refConst(pt, di_nw, .fromInterned(capture_val));
+        },
+        .runtime => |capture_ty| {
+            try diw.writeUleb128(try dwarf.refAbbrevCode(.runtime_capture));
+            try dwarf.refType(pt, di_nw, .fromInterned(capture_ty));
+        },
+        .nav_val => |capture_nav| {
+            const gi = try dwarf.getGlobal(capture_nav);
+            try diw.writeUleb128(try dwarf.refAbbrevCode(.nav_capture));
+            try dwarf.exprLoc(di_nw, .{ .implicit_pointer = .{
+                .node = gi.get(dwarf).debug_info_ni.unwrap().?,
+            } });
+        },
+        .nav_ref => |capture_nav| {
+            const gi = try dwarf.getGlobal(capture_nav);
+            try diw.writeUleb128(try dwarf.refAbbrevCode(.nav_capture));
+            try dwarf.exprLoc(di_nw, .{ .stack_value = &.{ .implicit_pointer = .{
+                .node = gi.get(dwarf).debug_info_ni.unwrap().?,
+            } } });
+        },
+    };
 }
 
 pub fn genDecl(
@@ -2563,6 +3132,7 @@ pub fn genDecl(
     di_nw: *MappedFile.Node.Writer,
     instance_val: InternPool.Index,
 ) link.Error!void {
+    log.debug("genDecl({f})", .{Value.fromInterned(instance_val).fmtValue(pt)});
     dwarf.genDeclInner(pt, di_nw, instance_val) catch |err| switch (err) {
         else => |e| return e,
         error.WriteFailed => return dwarf.reportWriteError(di_nw),
@@ -2574,46 +3144,199 @@ fn genDeclInner(
     di_nw: *MappedFile.Node.Writer,
     instance_val: InternPool.Index,
 ) link.EmitError!void {
-    const ip = &dwarf.lf.comp.zcu.?.intern_pool;
+    const zcu = pt.zcu;
+    const ip = &zcu.intern_pool;
     const diw = &di_nw.interface;
-    switch (ip.indexToKey(instance_val)) {
-        else => unreachable,
-        .struct_type => {
-            const loaded_struct = ip.loadStructType(instance_val);
+    done: {
+        const kind: enum { @"struct", @"union", @"enum" }, const zf, const src_line, const src_column, const capture_names, const captures, const name, const maybe_name_nav, const namespace = container: switch (ip.indexToKey(instance_val)) {
+            else => unreachable,
+            .struct_type => {
+                const loaded_struct = ip.loadStructType(instance_val);
+                const src_inst = loaded_struct.zir_index.resolveFull(ip) orelse {
+                    try diw.writeUleb128(try dwarf.refAbbrevCode(.decl_lost));
+                    break :done;
+                };
+                const zf = zcu.fileByIndex(src_inst.file);
+                const inst = zf.zir.?.instructions.get(@backingInt(src_inst.inst));
+                const src_line, const src_column, const capture_names = decl: switch (inst.tag) {
+                    else => unreachable,
+                    .struct_init, .struct_init_ref => {
+                        const decl = zf.zir.?.extraData(std.zig.Zir.Inst.StructInit, inst.data.pl_node.payload_index).data;
+                        break :decl .{ decl.src_line, decl.src_column, &.{} };
+                    },
+                    .struct_init_anon => {
+                        const decl = zf.zir.?.extraData(std.zig.Zir.Inst.StructInitAnon, inst.data.pl_node.payload_index).data;
+                        break :decl .{ decl.src_line, decl.src_column, &.{} };
+                    },
+                    .extended => switch (inst.data.extended.opcode) {
+                        else => unreachable,
+                        .struct_decl => {
+                            const decl = zf.zir.?.getStructDecl(src_inst.inst);
+                            break :decl .{ decl.src_line, decl.src_column, decl.capture_names };
+                        },
+                        .reify_struct => {
+                            const decl = zf.zir.?.extraData(std.zig.Zir.Inst.ReifyStruct, inst.data.extended.operand).data;
+                            break :decl .{ decl.src_line, decl.src_column, &.{} };
+                        },
+                    },
+                };
+                break :container .{
+                    .@"struct",
+                    zf,
+                    src_line,
+                    src_column,
+                    capture_names,
+                    loaded_struct.captures,
+                    loaded_struct.name,
+                    loaded_struct.name_nav,
+                    loaded_struct.namespace,
+                };
+            },
+            .union_type => {
+                const loaded_union = ip.loadUnionType(instance_val);
+                const src_inst = loaded_union.zir_index.resolveFull(ip) orelse {
+                    try diw.writeUleb128(try dwarf.refAbbrevCode(.decl_lost));
+                    break :done;
+                };
+                const zf = zcu.fileByIndex(src_inst.file);
+                const inst = zf.zir.?.instructions.get(@backingInt(src_inst.inst));
+                const src_line, const src_column, const capture_names = decl: switch (inst.tag) {
+                    else => unreachable,
+                    .extended => switch (inst.data.extended.opcode) {
+                        else => unreachable,
+                        .union_decl => {
+                            const decl = zf.zir.?.getUnionDecl(src_inst.inst);
+                            break :decl .{ decl.src_line, decl.src_column, decl.capture_names };
+                        },
+                        .reify_union => {
+                            const decl = zf.zir.?.extraData(std.zig.Zir.Inst.ReifyUnion, inst.data.extended.operand).data;
+                            break :decl .{ decl.src_line, decl.src_column, &.{} };
+                        },
+                    },
+                };
+                break :container .{
+                    .@"union",
+                    zf,
+                    src_line,
+                    src_column,
+                    capture_names,
+                    loaded_union.captures,
+                    loaded_union.name,
+                    loaded_union.name_nav,
+                    loaded_union.namespace,
+                };
+            },
+            .enum_type => {
+                const loaded_enum = ip.loadEnumType(instance_val);
+                const src_inst = loaded_enum.zir_index.unwrap().?.resolveFull(ip) orelse {
+                    try diw.writeUleb128(try dwarf.refAbbrevCode(.decl_lost));
+                    break :done;
+                };
+                const zf = zcu.fileByIndex(src_inst.file);
+                const inst = zf.zir.?.instructions.get(@backingInt(src_inst.inst));
+                const src_line, const src_column, const capture_names = decl: switch (inst.tag) {
+                    else => unreachable,
+                    .extended => switch (inst.data.extended.opcode) {
+                        else => unreachable,
+                        .enum_decl => {
+                            const decl = zf.zir.?.getEnumDecl(src_inst.inst);
+                            break :decl .{ decl.src_line, decl.src_column, decl.capture_names };
+                        },
+                        .reify_enum => {
+                            const decl = zf.zir.?.extraData(std.zig.Zir.Inst.ReifyEnum, inst.data.extended.operand).data;
+                            break :decl .{ decl.src_line, decl.src_column, &.{} };
+                        },
+                    },
+                };
+                break :container .{
+                    .@"enum",
+                    zf,
+                    src_line,
+                    src_column,
+                    capture_names,
+                    loaded_enum.captures,
+                    loaded_enum.name,
+                    loaded_enum.name_nav,
+                    loaded_enum.namespace,
+                };
+            },
+            .opaque_type => {
+                const loaded_opaque = ip.loadOpaqueType(instance_val);
+                const src_inst = loaded_opaque.zir_index.resolveFull(ip) orelse {
+                    try diw.writeUleb128(try dwarf.refAbbrevCode(.decl_lost));
+                    break :done;
+                };
+                const zf = zcu.fileByIndex(src_inst.file);
+                const decl = zf.zir.?.getOpaqueDecl(src_inst.inst);
+                break :container .{
+                    .@"struct",
+                    zf,
+                    decl.src_line,
+                    decl.src_column,
+                    decl.capture_names,
+                    loaded_opaque.captures,
+                    loaded_opaque.name,
+                    loaded_opaque.name_nav,
+                    loaded_opaque.namespace,
+                };
+            },
+        };
+        if (maybe_name_nav.unwrap()) |name_ni| {
+            const name_nav = ip.getNav(name_ni);
+            const decl = zf.zir.?.getDeclaration(name_nav.srcInst(ip).resolve(ip).?);
             const parent_ni = try dwarf.getDecl(pt, ip.namespacePtr(
-                ip.namespacePtr(loaded_struct.namespace).parent.unwrap().?,
+                name_nav.analysis.?.namespace,
             ).owner_type);
-            try diw.writeUleb128(try dwarf.refAbbrevCode(.decl_specification_struct));
+            try diw.writeUleb128(try dwarf.refAbbrevCode(if (captures.len > 0) switch (kind) {
+                .@"struct" => .decl_specification_struct,
+                .@"union" => .decl_specification_union,
+                .@"enum" => .decl_specification_enum,
+            } else switch (kind) {
+                .@"struct" => .decl_specification_empty_struct,
+                .@"union" => .decl_specification_empty_union,
+                .@"enum" => .decl_specification_empty_enum,
+            }));
             try dwarf.secOffset(di_nw, parent_ni, 0);
-            try diw.writeInt(u32, 0, dwarf.endian);
-            try diw.writeUleb128(0);
-            try diw.writeByte(DW.ACCESS.public);
-            try dwarf.strp(&dwarf.debug_str, di_nw, loaded_struct.fqn.toSlice(ip));
-        },
-        .enum_type => {
-            const loaded_enum = ip.loadEnumType(instance_val);
+            try diw.writeInt(u32, decl.src_line + 1, dwarf.endian);
+            try diw.writeUleb128(decl.src_column + 1);
+            try diw.writeByte(if (decl.is_pub) DW.ACCESS.public else DW.ACCESS.private);
+            try dwarf.strp(&dwarf.debug_str, di_nw, name.toSlice(ip));
+        } else {
             const parent_ni = try dwarf.getDecl(pt, ip.namespacePtr(
-                ip.namespacePtr(loaded_enum.namespace).parent.unwrap().?,
+                ip.namespacePtr(namespace).parent.unwrap().?,
             ).owner_type);
-            try diw.writeUleb128(try dwarf.refAbbrevCode(.decl_specification_enum));
+            try diw.writeUleb128(try dwarf.refAbbrevCode(if (captures.len > 0) switch (kind) {
+                .@"struct" => .type_decl_specification_struct,
+                .@"union" => .type_decl_specification_union,
+                .@"enum" => .type_decl_specification_enum,
+            } else switch (kind) {
+                .@"struct" => .type_decl_specification_empty_struct,
+                .@"union" => .type_decl_specification_empty_union,
+                .@"enum" => .type_decl_specification_empty_enum,
+            }));
             try dwarf.secOffset(di_nw, parent_ni, 0);
-            try diw.writeInt(u32, 0, dwarf.endian);
-            try diw.writeUleb128(0);
-            try diw.writeByte(DW.ACCESS.public);
-            try dwarf.strp(&dwarf.debug_str, di_nw, loaded_enum.fqn.toSlice(ip));
-        },
-        .union_type => {
-            const loaded_union = ip.loadUnionType(instance_val);
-            const parent_ni = try dwarf.getDecl(pt, ip.namespacePtr(
-                ip.namespacePtr(loaded_union.namespace).parent.unwrap().?,
-            ).owner_type);
-            try diw.writeUleb128(try dwarf.refAbbrevCode(.decl_specification_union));
-            try dwarf.secOffset(di_nw, parent_ni, 0);
-            try diw.writeInt(u32, 0, dwarf.endian);
-            try diw.writeUleb128(0);
-            try diw.writeByte(DW.ACCESS.public);
-            try dwarf.strp(&dwarf.debug_str, di_nw, loaded_union.fqn.toSlice(ip));
-        },
+            try diw.writeInt(u32, src_line + 1, dwarf.endian);
+            try diw.writeUleb128(src_column + 1);
+            try dwarf.strp(&dwarf.debug_str, di_nw, name.toSlice(ip));
+        }
+        for (capture_names, captures.get(ip)) |capture_name, capture| {
+            try diw.writeUleb128(try dwarf.refAbbrevCode(.capture_specification));
+            switch (capture.unwrap()) {
+                .@"comptime", .runtime, .nav_val => try dwarf.strp(
+                    &dwarf.debug_str,
+                    di_nw,
+                    zf.zir.?.nullTerminatedString(capture_name),
+                ),
+                .nav_ref => {
+                    const capture_name_slice = try zcu.gpa.print("&{s}", .{
+                        zf.zir.?.nullTerminatedString(capture_name),
+                    });
+                    defer zcu.gpa.free(capture_name_slice);
+                    try dwarf.strp(&dwarf.debug_str, di_nw, capture_name_slice);
+                },
+            }
+        }
+        if (captures.len > 0) try diw.writeUleb128(@backingInt(AbbrevCode.null));
     }
     try dwarf.genDebugInfoPadding(diw, diw.unusedCapacityLen());
 }
@@ -2746,6 +3469,14 @@ fn blockConst(
     assert(start + size == nw.interface.end);
 }
 
+fn refType(
+    dwarf: *Dwarf,
+    pt: Zcu.PerThread,
+    nw: *MappedFile.Node.Writer,
+    ty: Type,
+) link.EmitError!void {
+    return dwarf.refConst(pt, nw, ty.toValue());
+}
 fn refConst(
     dwarf: *Dwarf,
     pt: Zcu.PerThread,
@@ -2875,14 +3606,38 @@ pub const AbbrevCode = enum {
     // decl, specification, and instance codes are assumed to all have the same uleb128 size
     decl_lost,
     decl_alias,
+    decl_empty_incomplete_enum,
+    decl_incomplete_enum,
     decl_empty_enum,
     decl_enum,
-    decl_namespace_struct,
-    decl_capturing_namespace_struct,
+    type_decl_empty_incomplete_enum,
+    type_decl_incomplete_enum,
+    type_decl_empty_enum,
+    type_decl_enum,
+    decl_empty_incomplete_struct,
+    decl_incomplete_struct,
+    decl_empty_struct,
     decl_struct,
+    type_decl_empty_incomplete_struct,
+    type_decl_incomplete_struct,
+    type_decl_empty_struct,
+    type_decl_struct,
+    decl_empty_packed_struct,
     decl_packed_struct,
+    type_decl_empty_packed_struct,
+    type_decl_packed_struct,
+    decl_empty_incomplete_union,
+    decl_incomplete_union,
+    decl_empty_union,
     decl_union,
+    type_decl_empty_incomplete_union,
+    type_decl_incomplete_union,
+    type_decl_empty_union,
+    type_decl_union,
+    decl_empty_packed_union,
     decl_packed_union,
+    type_decl_empty_packed_union,
+    type_decl_packed_union,
     decl_var,
     decl_const,
     decl_const_runtime_bits,
@@ -2894,17 +3649,35 @@ pub const AbbrevCode = enum {
     decl_func_generic,
     decl_extern_nullary_func,
     decl_extern_func,
+    decl_specification_empty_struct,
     decl_specification_struct,
+    type_decl_specification_empty_struct,
+    type_decl_specification_struct,
+    decl_specification_empty_enum,
     decl_specification_enum,
+    type_decl_specification_empty_enum,
+    type_decl_specification_enum,
+    decl_specification_empty_union,
     decl_specification_union,
+    type_decl_specification_empty_union,
+    type_decl_specification_union,
     decl_specification_func,
     decl_instance_alias,
+    decl_instance_empty_incomplete_enum,
+    decl_instance_incomplete_enum,
     decl_instance_empty_enum,
     decl_instance_enum,
-    decl_instance_namespace_struct,
+    decl_instance_empty_incomplete_struct,
+    decl_instance_incomplete_struct,
+    decl_instance_empty_struct,
     decl_instance_struct,
+    decl_instance_empty_packed_struct,
     decl_instance_packed_struct,
+    decl_instance_empty_incomplete_union,
+    decl_instance_incomplete_union,
+    decl_instance_empty_union,
     decl_instance_union,
+    decl_instance_empty_packed_union,
     decl_instance_packed_union,
     decl_instance_var,
     decl_instance_const,
@@ -2963,17 +3736,7 @@ pub const AbbrevCode = enum {
     generated_empty_struct_type,
     generated_struct_type,
     generated_union_type,
-    empty_enum_type,
-    enum_type,
-    empty_struct_type,
-    capturing_empty_struct_type,
-    struct_type,
-    empty_packed_struct_type,
-    packed_struct_type,
-    empty_union_type,
-    union_type,
-    empty_packed_union_type,
-    packed_union_type,
+    capture_specification,
     comptime_capture,
     comptime_capture_runtime,
     comptime_capture_partially_comptime,
@@ -3032,13 +3795,19 @@ pub const AbbrevCode = enum {
         .{ .accessibility, .data1 },
         .{ .name, .strp },
     };
-
+    const type_decl_attrs = &[_]Attr{
+        .{ .ZIG_parent, .ref_addr },
+        .{ .decl_line, .data4 },
+        .{ .decl_column, .udata },
+        .{ .name, .strp },
+    };
     const decl_specification_attrs = decl_attrs ++ &[_]Attr{
         .{ .declaration, .flag_present },
     };
-
+    const type_decl_specification_attrs = type_decl_attrs ++ &[_]Attr{
+        .{ .declaration, .flag_present },
+    };
     const decl_instance_attrs = &[_]Attr{
-        .{ .ZIG_parent, .ref_addr },
         .{ .specification, .ref_addr },
     };
 
@@ -3066,6 +3835,15 @@ pub const AbbrevCode = enum {
                 .{ .import, .ref_addr },
             },
         },
+        .decl_empty_incomplete_enum = .{
+            .tag = .enumeration_type,
+            .attrs = decl_attrs,
+        },
+        .decl_incomplete_enum = .{
+            .tag = .enumeration_type,
+            .children = true,
+            .attrs = decl_attrs,
+        },
         .decl_empty_enum = .{
             .tag = .enumeration_type,
             .attrs = decl_attrs ++ .{
@@ -3079,17 +3857,42 @@ pub const AbbrevCode = enum {
                 .{ .type, .ref_addr },
             },
         },
-        .decl_namespace_struct = .{
-            .tag = .structure_type,
-            .attrs = decl_attrs ++ .{
-                .{ .declaration, .flag },
+        .type_decl_empty_incomplete_enum = .{
+            .tag = .enumeration_type,
+            .attrs = type_decl_attrs,
+        },
+        .type_decl_incomplete_enum = .{
+            .tag = .enumeration_type,
+            .children = true,
+            .attrs = type_decl_attrs,
+        },
+        .type_decl_empty_enum = .{
+            .tag = .enumeration_type,
+            .attrs = type_decl_attrs ++ .{
+                .{ .type, .ref_addr },
             },
         },
-        .decl_capturing_namespace_struct = .{
+        .type_decl_enum = .{
+            .tag = .enumeration_type,
+            .children = true,
+            .attrs = type_decl_attrs ++ .{
+                .{ .type, .ref_addr },
+            },
+        },
+        .decl_empty_incomplete_struct = .{
+            .tag = .structure_type,
+            .attrs = decl_attrs,
+        },
+        .decl_incomplete_struct = .{
             .tag = .structure_type,
             .children = true,
+            .attrs = decl_attrs,
+        },
+        .decl_empty_struct = .{
+            .tag = .structure_type,
             .attrs = decl_attrs ++ .{
-                .{ .declaration, .flag },
+                .{ .byte_size, .udata },
+                .{ .alignment, .udata },
             },
         },
         .decl_struct = .{
@@ -3100,11 +3903,70 @@ pub const AbbrevCode = enum {
                 .{ .alignment, .udata },
             },
         },
+        .type_decl_empty_incomplete_struct = .{
+            .tag = .structure_type,
+            .attrs = type_decl_attrs,
+        },
+        .type_decl_incomplete_struct = .{
+            .tag = .structure_type,
+            .children = true,
+            .attrs = type_decl_attrs,
+        },
+        .type_decl_empty_struct = .{
+            .tag = .structure_type,
+            .attrs = type_decl_attrs ++ .{
+                .{ .byte_size, .udata },
+                .{ .alignment, .udata },
+            },
+        },
+        .type_decl_struct = .{
+            .tag = .structure_type,
+            .children = true,
+            .attrs = type_decl_attrs ++ .{
+                .{ .byte_size, .udata },
+                .{ .alignment, .udata },
+            },
+        },
+        .decl_empty_packed_struct = .{
+            .tag = .structure_type,
+            .attrs = decl_attrs ++ .{
+                .{ .type, .ref_addr },
+            },
+        },
         .decl_packed_struct = .{
             .tag = .structure_type,
             .children = true,
             .attrs = decl_attrs ++ .{
                 .{ .type, .ref_addr },
+            },
+        },
+        .type_decl_empty_packed_struct = .{
+            .tag = .structure_type,
+            .attrs = type_decl_attrs ++ .{
+                .{ .type, .ref_addr },
+            },
+        },
+        .type_decl_packed_struct = .{
+            .tag = .structure_type,
+            .children = true,
+            .attrs = type_decl_attrs ++ .{
+                .{ .type, .ref_addr },
+            },
+        },
+        .decl_empty_incomplete_union = .{
+            .tag = .union_type,
+            .attrs = decl_attrs,
+        },
+        .decl_incomplete_union = .{
+            .tag = .union_type,
+            .children = true,
+            .attrs = decl_attrs,
+        },
+        .decl_empty_union = .{
+            .tag = .union_type,
+            .attrs = decl_attrs ++ .{
+                .{ .byte_size, .udata },
+                .{ .alignment, .udata },
             },
         },
         .decl_union = .{
@@ -3115,10 +3977,53 @@ pub const AbbrevCode = enum {
                 .{ .alignment, .udata },
             },
         },
+        .type_decl_empty_incomplete_union = .{
+            .tag = .union_type,
+            .attrs = type_decl_attrs,
+        },
+        .type_decl_incomplete_union = .{
+            .tag = .union_type,
+            .children = true,
+            .attrs = type_decl_attrs,
+        },
+        .type_decl_empty_union = .{
+            .tag = .union_type,
+            .attrs = type_decl_attrs ++ .{
+                .{ .byte_size, .udata },
+                .{ .alignment, .udata },
+            },
+        },
+        .type_decl_union = .{
+            .tag = .union_type,
+            .children = true,
+            .attrs = type_decl_attrs ++ .{
+                .{ .byte_size, .udata },
+                .{ .alignment, .udata },
+            },
+        },
+        .decl_empty_packed_union = .{
+            .tag = .union_type,
+            .attrs = decl_attrs ++ .{
+                .{ .type, .ref_addr },
+            },
+        },
         .decl_packed_union = .{
             .tag = .union_type,
             .children = true,
             .attrs = decl_attrs ++ .{
+                .{ .type, .ref_addr },
+            },
+        },
+        .type_decl_empty_packed_union = .{
+            .tag = .union_type,
+            .attrs = type_decl_attrs ++ .{
+                .{ .type, .ref_addr },
+            },
+        },
+        .type_decl_packed_union = .{
+            .tag = .union_type,
+            .children = true,
+            .attrs = type_decl_attrs ++ .{
                 .{ .type, .ref_addr },
             },
         },
@@ -3200,16 +4105,15 @@ pub const AbbrevCode = enum {
         .decl_nullary_func_generic = .{
             .tag = .subprogram,
             .attrs = decl_attrs ++ .{
-                //.{ .type, .ref_addr },
-                //.{ .noreturn, .flag },
+                .{ .type, .ref_addr },
+                .{ .noreturn, .flag },
             },
         },
         .decl_func_generic = .{
             .tag = .subprogram,
             .children = true,
             .attrs = decl_attrs ++ .{
-                //.{ .type, .ref_addr },
-                //.{ .noreturn, .flag },
+                .{ .type, .ref_addr },
             },
         },
         .decl_extern_nullary_func = .{
@@ -3233,17 +4137,59 @@ pub const AbbrevCode = enum {
                 .{ .noreturn, .flag },
             },
         },
+        .decl_specification_empty_struct = .{
+            .tag = .structure_type,
+            .attrs = decl_specification_attrs,
+        },
         .decl_specification_struct = .{
             .tag = .structure_type,
+            .children = true,
+            .attrs = decl_specification_attrs,
+        },
+        .type_decl_specification_empty_struct = .{
+            .tag = .structure_type,
+            .attrs = type_decl_specification_attrs,
+        },
+        .type_decl_specification_struct = .{
+            .tag = .structure_type,
+            .children = true,
+            .attrs = type_decl_specification_attrs,
+        },
+        .decl_specification_empty_enum = .{
+            .tag = .enumeration_type,
             .attrs = decl_specification_attrs,
         },
         .decl_specification_enum = .{
             .tag = .enumeration_type,
+            .children = true,
+            .attrs = decl_specification_attrs,
+        },
+        .type_decl_specification_empty_enum = .{
+            .tag = .enumeration_type,
+            .attrs = type_decl_specification_attrs,
+        },
+        .type_decl_specification_enum = .{
+            .tag = .enumeration_type,
+            .children = true,
+            .attrs = type_decl_specification_attrs,
+        },
+        .decl_specification_empty_union = .{
+            .tag = .union_type,
             .attrs = decl_specification_attrs,
         },
         .decl_specification_union = .{
             .tag = .union_type,
+            .children = true,
             .attrs = decl_specification_attrs,
+        },
+        .type_decl_specification_empty_union = .{
+            .tag = .union_type,
+            .attrs = type_decl_specification_attrs,
+        },
+        .type_decl_specification_union = .{
+            .tag = .union_type,
+            .children = true,
+            .attrs = type_decl_specification_attrs,
         },
         .decl_specification_func = .{
             .tag = .subprogram,
@@ -3254,6 +4200,15 @@ pub const AbbrevCode = enum {
             .attrs = decl_instance_attrs ++ .{
                 .{ .import, .ref_addr },
             },
+        },
+        .decl_instance_empty_incomplete_enum = .{
+            .tag = .enumeration_type,
+            .attrs = decl_instance_attrs,
+        },
+        .decl_instance_incomplete_enum = .{
+            .tag = .enumeration_type,
+            .children = true,
+            .attrs = decl_instance_attrs,
         },
         .decl_instance_empty_enum = .{
             .tag = .enumeration_type,
@@ -3268,11 +4223,20 @@ pub const AbbrevCode = enum {
                 .{ .type, .ref_addr },
             },
         },
-        .decl_instance_namespace_struct = .{
+        .decl_instance_empty_incomplete_struct = .{
+            .tag = .structure_type,
+            .attrs = decl_instance_attrs,
+        },
+        .decl_instance_incomplete_struct = .{
             .tag = .structure_type,
             .children = true,
+            .attrs = decl_instance_attrs,
+        },
+        .decl_instance_empty_struct = .{
+            .tag = .structure_type,
             .attrs = decl_instance_attrs ++ .{
-                .{ .declaration, .flag },
+                .{ .byte_size, .udata },
+                .{ .alignment, .udata },
             },
         },
         .decl_instance_struct = .{
@@ -3283,11 +4247,33 @@ pub const AbbrevCode = enum {
                 .{ .alignment, .udata },
             },
         },
+        .decl_instance_empty_packed_struct = .{
+            .tag = .structure_type,
+            .attrs = decl_instance_attrs ++ .{
+                .{ .type, .ref_addr },
+            },
+        },
         .decl_instance_packed_struct = .{
             .tag = .structure_type,
             .children = true,
             .attrs = decl_instance_attrs ++ .{
                 .{ .type, .ref_addr },
+            },
+        },
+        .decl_instance_empty_incomplete_union = .{
+            .tag = .union_type,
+            .attrs = decl_instance_attrs,
+        },
+        .decl_instance_incomplete_union = .{
+            .tag = .union_type,
+            .children = true,
+            .attrs = decl_instance_attrs,
+        },
+        .decl_instance_empty_union = .{
+            .tag = .union_type,
+            .attrs = decl_instance_attrs ++ .{
+                .{ .byte_size, .udata },
+                .{ .alignment, .udata },
             },
         },
         .decl_instance_union = .{
@@ -3296,6 +4282,12 @@ pub const AbbrevCode = enum {
             .attrs = decl_instance_attrs ++ .{
                 .{ .byte_size, .udata },
                 .{ .alignment, .udata },
+            },
+        },
+        .decl_instance_empty_packed_union = .{
+            .tag = .union_type,
+            .attrs = decl_instance_attrs ++ .{
+                .{ .type, .ref_addr },
             },
         },
         .decl_instance_packed_union = .{
@@ -3769,114 +4761,21 @@ pub const AbbrevCode = enum {
                 .{ .alignment, .udata },
             },
         },
-        .empty_enum_type = .{
-            .tag = .enumeration_type,
+        .capture_specification = .{
+            .tag = .template_value_parameter,
             .attrs = &.{
-                .{ .decl_file, .udata },
                 .{ .name, .strp },
-                .{ .type, .ref_addr },
-            },
-        },
-        .enum_type = .{
-            .tag = .enumeration_type,
-            .children = true,
-            .attrs = &.{
-                .{ .decl_file, .udata },
-                .{ .name, .strp },
-                .{ .type, .ref_addr },
-            },
-        },
-        .empty_struct_type = .{
-            .tag = .structure_type,
-            .attrs = &.{
-                .{ .decl_file, .udata },
-                .{ .name, .strp },
-                .{ .declaration, .flag },
-            },
-        },
-        .capturing_empty_struct_type = .{
-            .tag = .structure_type,
-            .children = true,
-            .attrs = &.{
-                .{ .decl_file, .udata },
-                .{ .name, .strp },
-                .{ .declaration, .flag },
-            },
-        },
-        .struct_type = .{
-            .tag = .structure_type,
-            .children = true,
-            .attrs = &.{
-                .{ .decl_file, .udata },
-                .{ .name, .strp },
-                .{ .byte_size, .udata },
-                .{ .alignment, .udata },
-            },
-        },
-        .empty_packed_struct_type = .{
-            .tag = .structure_type,
-            .attrs = &.{
-                .{ .decl_file, .udata },
-                .{ .name, .strp },
-                .{ .type, .ref_addr },
-            },
-        },
-        .packed_struct_type = .{
-            .tag = .structure_type,
-            .children = true,
-            .attrs = &.{
-                .{ .decl_file, .udata },
-                .{ .name, .strp },
-                .{ .type, .ref_addr },
-            },
-        },
-        .empty_union_type = .{
-            .tag = .union_type,
-            .attrs = &.{
-                .{ .decl_file, .udata },
-                .{ .name, .strp },
-                .{ .byte_size, .udata },
-                .{ .alignment, .udata },
-            },
-        },
-        .union_type = .{
-            .tag = .union_type,
-            .children = true,
-            .attrs = &.{
-                .{ .decl_file, .udata },
-                .{ .name, .strp },
-                .{ .byte_size, .udata },
-                .{ .alignment, .udata },
-            },
-        },
-        .empty_packed_union_type = .{
-            .tag = .union_type,
-            .attrs = &.{
-                .{ .decl_file, .udata },
-                .{ .name, .strp },
-                .{ .type, .ref_addr },
-            },
-        },
-        .packed_union_type = .{
-            .tag = .union_type,
-            .children = true,
-            .attrs = &.{
-                .{ .decl_file, .udata },
-                .{ .name, .strp },
-                .{ .type, .ref_addr },
             },
         },
         .comptime_capture = .{
             .tag = .template_value_parameter,
             .attrs = &.{
-                .{ .name, .strp },
                 .{ .type, .ref_addr },
             },
         },
         .comptime_capture_runtime = .{
             .tag = .template_value_parameter,
             .attrs = &.{
-                .{ .name, .strp },
                 .{ .type, .ref_addr },
                 .{ .const_value, .block },
             },
@@ -3884,7 +4783,6 @@ pub const AbbrevCode = enum {
         .comptime_capture_partially_comptime = .{
             .tag = .template_value_parameter,
             .attrs = &.{
-                .{ .name, .strp },
                 .{ .type, .ref_addr },
                 .{ .const_value, .block },
                 .{ .ZIG_comptime_value, .ref_addr },
@@ -3893,7 +4791,6 @@ pub const AbbrevCode = enum {
         .comptime_capture_fully_comptime = .{
             .tag = .template_value_parameter,
             .attrs = &.{
-                .{ .name, .strp },
                 .{ .type, .ref_addr },
                 .{ .ZIG_comptime_value, .ref_addr },
             },
@@ -3901,14 +4798,12 @@ pub const AbbrevCode = enum {
         .runtime_capture = .{
             .tag = .template_type_parameter,
             .attrs = &.{
-                .{ .name, .strp },
                 .{ .type, .ref_addr },
             },
         },
         .nav_capture = .{
             .tag = .template_value_parameter,
             .attrs = &.{
-                .{ .name, .strp },
                 .{ .location, .exprloc },
             },
         },

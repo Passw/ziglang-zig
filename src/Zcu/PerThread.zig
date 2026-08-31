@@ -864,26 +864,60 @@ fn updateZirRefs(pt: Zcu.PerThread) (Io.Cancelable || Allocator.Error)!void {
                 try comp.link_queue.enqueueZcu(comp, pt.tid, .{ .lost_tracking = tracked_inst_index });
                 continue;
             };
-            tracked_inst.inst = InternPool.TrackedInst.MaybeLost.ZirIndex.wrap(new_inst);
+            tracked_inst.inst = .wrap(new_inst);
 
             const old_zir = file.prev_zir.?.*;
-            const new_zir = file.zir.?;
             const old_tag = old_zir.instructions.items(.tag)[@backingInt(old_inst)];
             const old_data = old_zir.instructions.items(.data)[@backingInt(old_inst)];
 
-            switch (old_tag) {
-                .declaration => {
-                    const old_line = old_zir.getDeclaration(old_inst).src_line;
-                    const new_line = new_zir.getDeclaration(new_inst).src_line;
-                    if (old_line != new_line) {
-                        comp.link_prog_node.increaseEstimatedTotalItems(1);
-                        try comp.link_queue.enqueueZcu(comp, pt.tid, .{ .debug_update_line_number = .{
-                            .inst = tracked_inst_index,
-                            .line = new_line,
-                        } });
-                    }
-                },
-                else => {},
+            const new_zir = file.zir.?;
+            const new_data = new_zir.instructions.items(.data)[@backingInt(new_inst)];
+
+            debug_update_line_number: {
+                const old_line, const new_line = switch (old_tag) {
+                    .declaration => .{
+                        old_zir.getDeclaration(old_inst).src_line,
+                        new_zir.getDeclaration(new_inst).src_line,
+                    },
+                    .extended => switch (old_data.extended.opcode) {
+                        .struct_decl => .{
+                            old_zir.getStructDecl(old_inst).src_line,
+                            new_zir.getStructDecl(new_inst).src_line,
+                        },
+                        .union_decl => .{
+                            old_zir.getUnionDecl(old_inst).src_line,
+                            new_zir.getUnionDecl(new_inst).src_line,
+                        },
+                        .enum_decl => .{
+                            old_zir.getEnumDecl(old_inst).src_line,
+                            new_zir.getEnumDecl(new_inst).src_line,
+                        },
+                        .opaque_decl => .{
+                            old_zir.getOpaqueDecl(old_inst).src_line,
+                            new_zir.getOpaqueDecl(new_inst).src_line,
+                        },
+                        .reify_enum => .{
+                            old_zir.extraData(Zir.Inst.ReifyEnum, old_data.extended.operand).data.src_line,
+                            new_zir.extraData(Zir.Inst.ReifyEnum, new_data.extended.operand).data.src_line,
+                        },
+                        .reify_struct => .{
+                            old_zir.extraData(Zir.Inst.ReifyStruct, old_data.extended.operand).data.src_line,
+                            new_zir.extraData(Zir.Inst.ReifyStruct, new_data.extended.operand).data.src_line,
+                        },
+                        .reify_union => .{
+                            old_zir.extraData(Zir.Inst.ReifyUnion, old_data.extended.operand).data.src_line,
+                            new_zir.extraData(Zir.Inst.ReifyUnion, new_data.extended.operand).data.src_line,
+                        },
+                        else => break :debug_update_line_number,
+                    },
+                    else => break :debug_update_line_number,
+                };
+                if (old_line == new_line) break :debug_update_line_number;
+                comp.link_prog_node.increaseEstimatedTotalItems(1);
+                try comp.link_queue.enqueueZcu(comp, pt.tid, .{ .debug_update_line_number = .{
+                    .inst = tracked_inst_index,
+                    .line = new_line,
+                } });
             }
 
             if (old_zir.getAssociatedSrcHash(old_inst)) |old_hash| hash_changed: {

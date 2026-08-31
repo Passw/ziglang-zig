@@ -3416,15 +3416,16 @@ pub fn addIncrementalTests(
 
             if (options.skip_llvm and test_target.backend == .llvm) continue;
 
-            const triple_txt = resolved_target.query.zigTriple(b.allocator) catch @panic("OOM");
+            const target_str = b.fmt("{s}-{t}", .{
+                resolved_target.query.zigTriple(b.allocator) catch @panic("OOM"),
+                test_target.backend,
+            });
 
             if (options.test_target_filters.len > 0) {
                 for (options.test_target_filters) |filter| {
-                    if (std.mem.find(u8, triple_txt, filter) != null) break;
+                    if (std.mem.find(u8, target_str, filter) != null) break;
                 } else continue;
             }
-
-            const target_str = b.fmt("{s}-{t}", .{ triple_txt, test_target.backend });
 
             const run = b.addRunArtifact(incr_check);
             run.setName(b.fmt("incr-check {s} '{s}'", .{ target_str, entry.basename }));

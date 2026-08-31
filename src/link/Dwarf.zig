@@ -4627,6 +4627,7 @@ fn updateConstInner(dwarf: *Dwarf, pt: Zcu.PerThread, debug_const_index: link.Co
             }
             try diw.writeUleb128(@backingInt(AbbrevCode.null));
         },
+
         .memoized_call => unreachable, // not a value
     }
     try dwarf.debug_info.section.replaceEntry(unit, entry, dwarf, wip_nav.debug_info.written());
@@ -4651,7 +4652,7 @@ pub fn updateLineNumber(dwarf: *Dwarf, zcu: *Zcu, zir_index: InternPool.TrackedI
     const ip = &zcu.intern_pool;
 
     const inst_info = zir_index.resolveFull(ip).?;
-    assert(inst_info.inst != .main_struct_inst);
+    if (inst_info.inst == .main_struct_inst) return;
     const file = zcu.fileByIndex(inst_info.file);
 
     var line_buf: [4]u8 = undefined;

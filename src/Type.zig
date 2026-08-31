@@ -2693,8 +2693,8 @@ pub fn typeDeclSrcLine(ty: Type, zcu: *Zcu) ?u32 {
     };
     const inst = zir.instructions.get(@backingInt(info.inst));
     return switch (inst.tag) {
-        .struct_init, .struct_init_ref => zir.extraData(Zir.Inst.StructInit, inst.data.pl_node.payload_index).data.abs_line,
-        .struct_init_anon => zir.extraData(Zir.Inst.StructInitAnon, inst.data.pl_node.payload_index).data.abs_line,
+        .struct_init, .struct_init_ref => zir.extraData(Zir.Inst.StructInit, inst.data.pl_node.payload_index).data.src_line,
+        .struct_init_anon => zir.extraData(Zir.Inst.StructInitAnon, inst.data.pl_node.payload_index).data.src_line,
         .extended => switch (inst.data.extended.opcode) {
             .struct_decl => zir.getStructDecl(info.inst).src_line,
             .union_decl => zir.getUnionDecl(info.inst).src_line,

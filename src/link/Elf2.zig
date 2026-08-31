@@ -9381,8 +9381,10 @@ fn genPending(elf: *Elf, pt: Zcu.PerThread) link.Error!void {
         .strip => {},
         .dwarf => {
             const gpa = elf.base.comp.gpa;
-            while (elf.dwarf.pending_decl) |pending| {
-                elf.dwarf.pending_decl = null;
+            while (true) {
+                const pending = elf.dwarf.pending_decl;
+                if (pending.instance_val == .none) break;
+                elf.dwarf.pending_decl = .{ .di = undefined, .instance_val = .none };
                 const debug_info_ni = pending.di.get(&elf.dwarf).debug_info_ni.unwrap().?;
                 try debug_info_ni.moved(gpa, &elf.mf);
                 var di_nw: MappedFile.Node.Writer = undefined;

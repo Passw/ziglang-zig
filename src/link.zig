@@ -875,10 +875,23 @@ pub const File = struct {
         assert(pt.zcu.llvm_object == null);
         {
             const ti = ti_id.resolveFull(&pt.zcu.intern_pool).?;
-            assert(ti.inst != .main_struct_inst);
             const file = pt.zcu.fileByIndex(ti.file);
             const inst = file.zir.?.instructions.get(@backingInt(ti.inst));
-            assert(inst.tag == .declaration);
+            switch (inst.tag) {
+                .declaration => {},
+                .extended => switch (inst.data.extended.opcode) {
+                    .struct_decl,
+                    .union_decl,
+                    .enum_decl,
+                    .opaque_decl,
+                    .reify_enum,
+                    .reify_struct,
+                    .reify_union,
+                    => {},
+                    else => unreachable,
+                },
+                else => unreachable,
+            }
         }
         switch (base.tag) {
             .lld => unreachable,
