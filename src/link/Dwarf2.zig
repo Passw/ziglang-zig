@@ -1936,9 +1936,8 @@ pub fn updateComptimeNav(
     log.debug("updateComptimeNav({f})", .{nav.fqn.fmt(ip)});
     const inst_info = nav.srcInst(ip).resolveFull(ip).?;
     const nav_val: Value = .fromInterned(nav.resolved.?.value);
-    const file = zcu.fileByIndex(inst_info.file);
-    const zir = &file.zir.?;
-    const decl = zir.getDeclaration(inst_info.inst);
+    const zf = zcu.fileByIndex(inst_info.file);
+    const decl = zf.zir.?.getDeclaration(inst_info.inst);
     switch (decl.kind) {
         .unnamed_test, .@"test", .decltest => return,
         .@"comptime", .@"const", .@"var" => {},
@@ -1977,31 +1976,8 @@ pub fn updateComptimeNav(
             return;
         },
         .func => |func| if (func.owner_nav == nav_index and func.generic_owner == .none) {
-            const fi = try dwarf.getFunc(func.owner_nav);
-            const f = fi.get(dwarf);
-            switch (f.state) {
-                .unresolved => {},
-                .resolved => return,
-            }
-            const elf = dwarf.lf.cast(.elf2).?;
-            const debug_info_ni = f.debug_info_ni.unwrap().?;
-            var di_nw: MappedFile.Node.Writer = undefined;
-            debug_info_ni.writer(zcu.gpa, &elf.mf, &di_nw);
-            defer di_nw.deinit();
-            elf.resetNodeRelocs(debug_info_ni);
-            dwarf.genDeclFuncGeneric(
-                pt,
-                &di_nw,
-                zir,
-                .fromInterned(ip.namespacePtr(nav.analysis.?.namespace).owner_type),
-                &decl,
-                &ip.indexToKey(func.ty).func_type,
-                nav.name.toSlice(ip),
-                zir.getParamBody(func.zir_body_inst.resolve(ip).?),
-            ) catch |err| switch (err) {
-                else => |e| return e,
-                error.WriteFailed => return dwarf.reportWriteError(&di_nw),
-            };
+            _ = try dwarf.const_pool.get(pt, .{ .elf2 = dwarf.lf.cast(.elf2).? }, nav_val.toIntern());
+            break :done;
         } else return,
 
         else => return,
@@ -2010,42 +1986,6 @@ pub fn updateComptimeNav(
         .memoized_call => unreachable,
     }
     try dwarf.const_pool.flushPending(pt, .{ .elf2 = dwarf.lf.cast(.elf2).? });
-}
-fn genDeclFuncGeneric(
-    dwarf: *Dwarf,
-    pt: Zcu.PerThread,
-    di_nw: *MappedFile.Node.Writer,
-    zir: *const std.zig.Zir,
-    parent_ty: Type,
-    decl: *const std.zig.Zir.Inst.Declaration.Unwrapped,
-    fn_ty: *const InternPool.Key.FuncType,
-    name: []const u8,
-    param_body: []const std.zig.Zir.Inst.Index,
-) link.EmitError!void {
-    const zcu = pt.zcu;
-    const diw = &di_nw.interface;
-    try diw.writeUleb128(try dwarf.refAbbrevCode(.decl_func_generic));
-    try dwarf.refType(pt, di_nw, parent_ty);
-    try diw.writeInt(u32, decl.src_line + 1, dwarf.endian);
-    try diw.writeUleb128(decl.src_column + 1);
-    try diw.writeByte(if (decl.is_pub) DW.ACCESS.public else DW.ACCESS.private);
-    try dwarf.strp(&dwarf.debug_str, di_nw, name);
-    try dwarf.refType(pt, di_nw, .fromInterned(fn_ty.return_type));
-    var param_index: u32 = 0;
-    for (param_body) |param_inst| {
-        switch (zir.getParamName(param_inst) orelse break) {
-            .empty => try diw.writeUleb128(try dwarf.refAbbrevCode(.unnamed_param)),
-            else => |param_name| {
-                try diw.writeUleb128(try dwarf.refAbbrevCode(.param));
-                try dwarf.strp(&dwarf.debug_str, di_nw, zir.nullTerminatedString(param_name));
-            },
-        }
-        try dwarf.refType(pt, di_nw, .fromInterned(fn_ty.param_types.get(&zcu.intern_pool)[param_index]));
-        param_index += 1;
-    }
-    if (fn_ty.is_var_args) try diw.writeUleb128(try dwarf.refAbbrevCode(.is_var_args));
-    try diw.writeUleb128(@backingInt(AbbrevCode.null));
-    try dwarf.genDebugInfoPadding(diw, diw.unusedCapacityLen());
 }
 
 pub fn addConst(
@@ -2858,6 +2798,40 @@ fn updateConstInner(
         },
 
         else => return,
+        .func => |func| {
+            const fi = try dwarf.getFunc(func.owner_nav);
+            switch (fi.get(dwarf).state) {
+                .unresolved => {},
+                .resolved => return,
+            }
+            const fn_ty = ip.indexToKey(func.ty).func_type;
+            const nav = ip.getNav(func.owner_nav);
+            const inst_info = nav.srcInst(ip).resolveFull(ip).?;
+            const zf = zcu.fileByIndex(inst_info.file);
+            const decl = zf.zir.?.getDeclaration(inst_info.inst);
+            const parent_ty: Type = .fromInterned(ip.namespacePtr(nav.analysis.?.namespace).owner_type);
+            try diw.writeUleb128(try dwarf.refAbbrevCode(.decl_func_generic));
+            try dwarf.refType(pt, di_nw, parent_ty);
+            try diw.writeInt(u32, decl.src_line + 1, dwarf.endian);
+            try diw.writeUleb128(decl.src_column + 1);
+            try diw.writeByte(if (decl.is_pub) DW.ACCESS.public else DW.ACCESS.private);
+            try dwarf.strp(&dwarf.debug_str, di_nw, nav.name.toSlice(ip));
+            try dwarf.refType(pt, di_nw, .fromInterned(fn_ty.return_type));
+            var param_index: u32 = 0;
+            for (zf.zir.?.getParamBody(func.zir_body_inst.resolve(ip).?)) |param_inst| {
+                switch (zf.zir.?.getParamName(param_inst) orelse break) {
+                    .empty => try diw.writeUleb128(try dwarf.refAbbrevCode(.unnamed_param)),
+                    else => |param_name| {
+                        try diw.writeUleb128(try dwarf.refAbbrevCode(.param));
+                        try dwarf.strp(&dwarf.debug_str, di_nw, zf.zir.?.nullTerminatedString(param_name));
+                    },
+                }
+                try dwarf.refType(pt, di_nw, .fromInterned(fn_ty.param_types.get(&zcu.intern_pool)[param_index]));
+                param_index += 1;
+            }
+            if (fn_ty.is_var_args) try diw.writeUleb128(try dwarf.refAbbrevCode(.is_var_args));
+            try diw.writeUleb128(@backingInt(AbbrevCode.null));
+        },
 
         .memoized_call => unreachable, // not a value
     }
