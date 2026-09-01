@@ -31,6 +31,7 @@ pub const Unit = struct {
     cie_ni: MappedFile.Node.Index.Optional,
     debug_info_ni: MappedFile.Node.Index.Optional,
     debug_info_header_ni: MappedFile.Node.Index.Optional,
+    debug_info_footer_ni: MappedFile.Node.Index.Optional,
     debug_line_ni: MappedFile.Node.Index.Optional,
     debug_line_header_ni: MappedFile.Node.Index.Optional,
     debug_line_header_changed: bool,
@@ -1339,6 +1340,7 @@ pub fn initUnits(dwarf: *Dwarf, gpa: std.mem.Allocator, units_len: usize) std.me
         .cie_ni = .none,
         .debug_info_ni = .none,
         .debug_info_header_ni = .none,
+        .debug_info_footer_ni = .none,
         .debug_line_ni = .none,
         .debug_line_header_ni = .none,
         .debug_line_header_changed = false,
@@ -1944,6 +1946,7 @@ pub fn updateComptimeNav(
                 _ = try dwarf.const_pool.get(pt, .{ .elf2 = dwarf.lf.cast(.elf2).? }, nav_val.toIntern());
                 break :done;
             }
+            return;
         },
         .enum_type => {
             const loaded_enum = ip.loadEnumType(nav_val.toIntern());
@@ -1951,6 +1954,7 @@ pub fn updateComptimeNav(
                 _ = try dwarf.const_pool.get(pt, .{ .elf2 = dwarf.lf.cast(.elf2).? }, nav_val.toIntern());
                 break :done;
             }
+            return;
         },
         .union_type => {
             const loaded_union = ip.loadUnionType(nav_val.toIntern());
@@ -1958,6 +1962,7 @@ pub fn updateComptimeNav(
                 _ = try dwarf.const_pool.get(pt, .{ .elf2 = dwarf.lf.cast(.elf2).? }, nav_val.toIntern());
                 break :done;
             }
+            return;
         },
         .opaque_type => {
             const loaded_opaque = ip.loadOpaqueType(nav_val.toIntern());
@@ -1965,6 +1970,7 @@ pub fn updateComptimeNav(
                 _ = try dwarf.const_pool.get(pt, .{ .elf2 = dwarf.lf.cast(.elf2).? }, nav_val.toIntern());
                 break :done;
             }
+            return;
         },
         .func => |func| if (func.owner_nav == nav_index and func.generic_owner == .none) {
             const fi = try dwarf.getFunc(func.owner_nav);

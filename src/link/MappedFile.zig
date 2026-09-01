@@ -355,6 +355,10 @@ pub const Node = extern struct {
                 assert(oi != .none);
                 return oi;
             }
+
+            pub fn ifPos(oi: Optional, mf: *const MappedFile, pos: Node.Position) Optional {
+                return if ((oi.unwrap() orelse return .none).position(mf) == pos) oi else .none;
+            }
         };
 
         fn get(ni: Node.Index, mf: *const MappedFile) *Node {

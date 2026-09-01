@@ -287,11 +287,13 @@ const Node = union(enum) {
     lazy_const_data: LazyMapRef.Index(.const_data),
 
     debug_shared: Dwarf.SharedSection,
+    eh_frame_footer,
     unit_padding,
     unit_frame: Dwarf.Unit.Index,
     unit_frame_cie: Dwarf.Unit.Index,
     unit_debug_info: Dwarf.Unit.Index,
     unit_debug_info_header: Dwarf.Unit.Index,
+    unit_debug_info_footer: Dwarf.Unit.Index,
     unit_debug_line: Dwarf.Unit.Index,
     unit_debug_line_header: Dwarf.Unit.Index,
     unit_debug_rnglists: Dwarf.Unit.Index,
@@ -564,8 +566,8 @@ const Section = struct {
                 std.elf.SHN_LORESERVE...std.elf.SHN_HIRESERVE => @fromBackingInt(reserve(sec)),
             };
         }
-        pub fn toSection(s: Index) ?std.elf.Section {
-            return switch (@backingInt(s)) {
+        pub fn toSection(shndx: Index) ?std.elf.Section {
+            return switch (@backingInt(shndx)) {
                 std.elf.SHN_UNDEF...std.elf.SHN_LORESERVE - 1 => |sec| @intCast(sec),
                 std.elf.SHN_LORESERVE...reserve(std.elf.SHN_LORESERVE) - 1 => null,
                 reserve(std.elf.SHN_LORESERVE)...reserve(std.elf.SHN_HIRESERVE) => |sec| @intCast(
@@ -574,25 +576,37 @@ const Section = struct {
             };
         }
 
-        fn get(s: Index, elf: *Elf) *Section {
-            return &elf.shdrs.items[@backingInt(s) - 1]; // overflow means you tried to get the `.UNDEF` section
+        fn get(shndx: Index, elf: *Elf) *Section {
+            return &elf.shdrs.items[@backingInt(shndx) - 1]; // overflow means you tried to get the `.UNDEF` section
         }
 
-        fn name(s: Index, elf: *Elf) String(.shstrtab) {
-            return switch (elf.shdrPtr(s)) {
+        fn name(shndx: Index, elf: *Elf) String(.shstrtab) {
+            return switch (elf.shdrPtr(shndx)) {
                 inline else => |shdr| @fromBackingInt(elf.targetLoad(&shdr.name)),
             };
         }
 
-        fn vaddr(s: Index, elf: *Elf) u64 {
-            return switch (elf.shdrPtr(s)) {
+        fn vaddr(shndx: Index, elf: *Elf) u64 {
+            return switch (elf.shdrPtr(shndx)) {
                 inline else => |shdr| elf.targetLoad(&shdr.addr),
             };
         }
 
-        fn size(s: Index, elf: *Elf) u64 {
-            return switch (elf.shdrPtr(s)) {
+        fn size(shndx: Index, elf: *Elf) u64 {
+            return switch (elf.shdrPtr(shndx)) {
                 inline else => |shdr| elf.targetLoad(&shdr.size),
+            };
+        }
+
+        fn setSize(shndx: Index, elf: *Elf, new_size: u64) void {
+            return switch (elf.shdrPtr(shndx)) {
+                inline else => |shdr| {
+                    elf.targetStore(&shdr.type, switch (new_size) {
+                        0 => .NULL,
+                        else => .PROGBITS,
+                    });
+                    elf.targetStore(&shdr.size, @intCast(new_size));
+                },
             };
         }
 
@@ -853,6 +867,15 @@ const Section = struct {
         }
     };
 };
+fn debugFrameFooterSize(elf: *Elf, frame_format: Dwarf.Frame.Format) usize {
+    return switch (frame_format) {
+        .eh_frame => switch (elf.ehdrType()) {
+            .REL => 0,
+            .EXEC, .DYN => 4,
+        },
+        .debug_frame => 0,
+    };
+}
 
 const dwarf_relocs = struct {
     const Shared = struct {
@@ -3324,11 +3347,13 @@ pub fn symbolForAtom(elf: *Elf, atom: link.File.AtomId) link.File.SymbolId {
         .input_section,
         .copied_global,
         .debug_shared,
+        .eh_frame_footer,
         .unit_padding,
         .unit_frame,
         .unit_frame_cie,
         .unit_debug_info,
         .unit_debug_info_header,
+        .unit_debug_info_footer,
         .unit_debug_line,
         .unit_debug_line_header,
         .unit_debug_rnglists,
@@ -4074,7 +4099,8 @@ fn initHeaders(
     const expected_nodes_len = @as(usize, if (is_archive) 3 else 0) + // .archive, .archive_header, .archive_elf_member_header
         3 + // `.elf`, `.ehdr`, and `.shdr` nodes
         (shnum - 1) + // -1 because the SHN_UNDEF shdr does not have a `.section` node
-        (phnum -| 1); // -1 because the GNU_STACK phdr does not have a `.segment` node
+        (phnum -| 1) + // -1 because the GNU_STACK phdr does not have a `.segment` node
+        @intFromBool(have_eh_frame and @"type" != .REL); // eh_frame_footer
 
     try elf.nodes.ensureTotalCapacity(gpa, expected_nodes_len);
     try elf.shdrs.ensureTotalCapacity(gpa, shnum - 1); // -1 to exclude SHN_UNDEF
@@ -4841,7 +4867,7 @@ fn initHeaders(
             }
         }
         if (have_eh_frame) {
-            elf.ni.gnu_eh_frame = .wrap(elf.addNodeAssumeCapacity(
+            const gnu_eh_frame = elf.addNodeAssumeCapacity(
                 try elf.ni.rodata.addFloatingChild(gpa, &elf.mf, .{
                     .size = @sizeOf(Dwarf.EhFrameHdr),
                     .alignment = .@"4",
@@ -4849,10 +4875,11 @@ fn initHeaders(
                     .bubbles_moved = false,
                 }),
                 .{ .segment = phndx.gnu_eh_frame },
-            ));
+            );
+            elf.ni.gnu_eh_frame = .wrap(gnu_eh_frame);
             elf.phdrs.items[phndx.gnu_eh_frame] = elf.ni.gnu_eh_frame;
 
-            elf.shndx.eh_frame_hdr = try elf.addSection(elf.ni.gnu_eh_frame.unwrap().?, .{
+            elf.shndx.eh_frame_hdr = try elf.addSection(gnu_eh_frame, .{
                 .name = ".eh_frame_hdr",
                 .type = .PROGBITS,
                 .flags = .{ .ALLOC = true },
@@ -4864,7 +4891,9 @@ fn initHeaders(
                 .flags = .{ .ALLOC = true },
                 .addralign = addr_align,
                 .node_align = elf.mf.flags.block_size,
+                .manual_size = true,
             });
+
             const eh_frame_hdr_ni = elf.shndx.eh_frame_hdr.get(elf).ni;
             elf.eh_frame_hdr_first_symbol_reloc =
                 @fromBackingInt(@intCast(elf.symbol_relocs.items.len));
@@ -4872,6 +4901,13 @@ fn initHeaders(
                 Node.toAtom(eh_frame_hdr_ni),
                 @ptrCast(@alignCast(eh_frame_hdr_ni.slice(&elf.mf))),
                 Symbol.Id.local(elf.shndx.eh_frame.get(elf).lsi).toTypeErased(),
+            );
+            _ = elf.addNodeAssumeCapacity(
+                try elf.shndx.eh_frame.get(elf).ni.addOnlyFooterChild(gpa, &elf.mf, .{
+                    .size = addr_align.forward(4),
+                    .alignment = addr_align,
+                }),
+                .eh_frame_footer,
             );
         }
 
@@ -5057,6 +5093,7 @@ fn initHeaders(
             .flags = .{ .ALLOC = true },
             .addralign = addr_align,
             .node_align = elf.mf.flags.block_size,
+            .manual_size = true,
         });
     }
     if (elf.ni.tls.unwrap()) |tls_segment_ni| elf.shndx.tdata = try elf.addSection(tls_segment_ni, .{
@@ -5072,6 +5109,7 @@ fn initHeaders(
                 .name = ".debug_frame",
                 .addralign = addr_align,
                 .node_align = elf.mf.flags.block_size,
+                .manual_size = true,
             });
             elf.shndx.debug_info = try elf.addSection(elf.ni.elf, .{
                 .name = ".debug_info",
@@ -5189,14 +5227,19 @@ fn getNodeShndx(elf: *const Elf, ni: MappedFile.Node.Index) Section.Index {
         .lazy_code,
         .lazy_const_data,
         .debug_shared,
+        .eh_frame_footer,
         .unit_padding,
         .unit_frame,
         .unit_debug_info,
         .unit_debug_line,
         .unit_debug_rnglists,
-        => elf.getNode(ni.parent(&elf.mf).unwrap().?).section,
+        => switch (elf.getNode(ni.parent(&elf.mf).unwrap().?)) {
+            else => unreachable,
+            .section, .section_manual_size => |shndx| shndx,
+        },
         .unit_frame_cie,
         .unit_debug_info_header,
+        .unit_debug_info_footer,
         .unit_debug_line_header,
         .const_debug_info,
         .global_debug_info,
@@ -5204,7 +5247,10 @@ fn getNodeShndx(elf: *const Elf, ni: MappedFile.Node.Index) Section.Index {
         .func_debug_info,
         .func_debug_line,
         .decl_debug_info,
-        => elf.getNode(ni.parent(&elf.mf).unwrap().?.parent(&elf.mf).unwrap().?).section,
+        => switch (elf.getNode(ni.parent(&elf.mf).unwrap().?.parent(&elf.mf).unwrap().?)) {
+            else => unreachable,
+            .section, .section_manual_size => |shndx| shndx,
+        },
     };
 }
 fn getNodeVAddr(elf: *Elf, ni: MappedFile.Node.Index) u64 {
@@ -5228,11 +5274,13 @@ fn getNodeVAddr(elf: *Elf, ni: MappedFile.Node.Index) u64 {
         .lazy_const_data,
         => |i| Symbol.Id.local(i.symbol(elf)).value(elf),
         .debug_shared,
+        .eh_frame_footer,
         .unit_padding,
         .unit_frame,
         .unit_frame_cie,
         .unit_debug_info,
         .unit_debug_info_header,
+        .unit_debug_info_footer,
         .unit_debug_line,
         .unit_debug_line_header,
         .unit_debug_rnglists,
@@ -5266,14 +5314,14 @@ fn computeNodeVAddr(elf: *Elf, ni: MappedFile.Node.Index) u64 {
         .lazy_code,
         .lazy_const_data,
         => |i| Symbol.Id.local(i.symbol(elf)).value(elf),
-        .debug_shared, .unit_padding => unreachable,
+        .debug_shared, .eh_frame_footer, .unit_padding => unreachable,
         .unit_frame, .unit_debug_info, .unit_debug_line => {
-            const section_ni = parent_ni.parent(&elf.mf).unwrap().?;
             const section_offset, _ = parent_ni.location(&elf.mf).resolve(&elf.mf);
-            break :parent_vaddr elf.getNode(section_ni).section.vaddr(elf) + section_offset;
+            break :parent_vaddr elf.getNodeShndx(parent_ni).vaddr(elf) + section_offset;
         },
         .unit_frame_cie,
         .unit_debug_info_header,
+        .unit_debug_info_footer,
         .unit_debug_line_header,
         .unit_debug_rnglists,
         .const_debug_info,
@@ -5303,13 +5351,14 @@ fn computeNodeSectionOffset(elf: *Elf, ni: MappedFile.Node.Index) u64 {
         .section, .section_manual_size => 0,
         .input_section, .copied_global => unreachable,
         .nav, .uav, .lazy_code, .lazy_const_data => unreachable,
-        .debug_shared, .unit_padding => unreachable,
+        .debug_shared, .eh_frame_footer, .unit_padding => unreachable,
         .unit_frame, .unit_debug_info, .unit_debug_line => {
             const parent_section_offset, _ = parent_ni.location(&elf.mf).resolve(&elf.mf);
             break :parent_section_offset parent_section_offset;
         },
         .unit_frame_cie,
         .unit_debug_info_header,
+        .unit_debug_info_footer,
         .unit_debug_line_header,
         .unit_debug_rnglists,
         .const_debug_info,
@@ -5351,6 +5400,7 @@ pub fn resetNodeRelocs(elf: *Elf, ni: MappedFile.Node.Index) void {
         .segment,
         .copied_global,
         .debug_shared,
+        .eh_frame_footer,
         .unit_padding,
         .unit_frame,
         .unit_frame_cie,
@@ -5378,10 +5428,11 @@ pub fn resetNodeRelocs(elf: *Elf, ni: MappedFile.Node.Index) void {
         .unit_debug_info_header => |ui| .{
             .first_node_reloc = &elf.dwarf_units[@backingInt(ui)].debug_info_header_first_node_reloc,
         },
+        .unit_debug_info_footer => unreachable, // cannot contain relocs
         .unit_debug_line_header => |ui| .{
             .first_node_reloc = &elf.dwarf_units[@backingInt(ui)].debug_line_header_first_node_reloc,
         },
-        .unit_debug_rnglists => unreachable, // unsupported
+        .unit_debug_rnglists => unreachable, // cannot contain relocs
         .const_debug_info => |cpi| .{
             .first_symbol_reloc = &elf.dwarf_consts.getPtr(cpi).?.debug_info_first_symbol_reloc,
             .first_node_reloc = &elf.dwarf_consts.getPtr(cpi).?.debug_info_first_node_reloc,
@@ -6049,7 +6100,7 @@ fn uavMapIndex(
         elf.pending_uavs.appendAssumeCapacity(umi);
     } else {
         const node = uav_gop.value_ptr.lsi.index().ptr(elf).node.unwrap().?;
-        const shndx = elf.getNode(node.parent(&elf.mf).unwrap().?).section;
+        const shndx = elf.getNodeShndx(node);
         try shndx.ensureAligned(elf, resolved_align);
         if (resolved_align.order(node.alignment(&elf.mf)).compare(.gt)) {
             try node.realign(gpa, &elf.mf, resolved_align);
@@ -7261,12 +7312,16 @@ fn zcuFilesReadyInner(elf: *Elf, zcu: *Zcu) Error!void {
                     unit.debug_info_ni = .wrap(debug_info_ni);
                     break :debug_info_ni debug_info_ni;
                 };
-
                 if (unit.debug_info_header_ni == .none) unit.debug_info_header_ni = .wrap(
                     elf.addNodeAssumeCapacity(try debug_info_ni.addOnlyHeaderChild(gpa, &elf.mf, .{
                         .next_moved = true,
                         .enable_next_moved = true,
                     }), .{ .unit_debug_info_header = ui }),
+                );
+                if (unit.debug_info_footer_ni == .none) unit.debug_info_footer_ni = .wrap(
+                    elf.addNodeAssumeCapacity(try debug_info_ni.addOnlyFooterChild(gpa, &elf.mf, .{
+                        .size = comptime Dwarf.uleb128Size(@backingInt(Dwarf.AbbrevCode.null)) * 2,
+                    }), .{ .unit_debug_info_footer = ui }),
                 );
             },
         }
@@ -7284,7 +7339,6 @@ fn zcuFilesReadyInner(elf: *Elf, zcu: *Zcu) Error!void {
                     unit.debug_line_ni = .wrap(debug_line_ni);
                     break :debug_line_ni debug_line_ni;
                 };
-
                 if (unit.debug_line_header_ni == .none) unit.debug_line_header_ni = .wrap(
                     elf.addNodeAssumeCapacity(try debug_line_ni.addOnlyHeaderChild(gpa, &elf.mf, .{
                         // Idle tasks are going to try to keep this up to date before we are able to
@@ -8264,11 +8318,13 @@ fn addGotRelocAssumeCapacity(
         .segment,
         .copied_global,
         .debug_shared,
+        .eh_frame_footer,
         .unit_padding,
         .unit_frame,
         .unit_frame_cie,
         .unit_debug_info,
         .unit_debug_info_header,
+        .unit_debug_info_footer,
         .unit_debug_line,
         .unit_debug_line_header,
         .unit_debug_rnglists,
@@ -8601,6 +8657,7 @@ fn updateNavInner(elf: *Elf, pt: Zcu.PerThread, nav_index: InternPool.Nav.Index)
 
     // The NAV's node is done---now generate any UAVs or lazy code/data which the NAV needs.
     try elf.genPending(pt);
+    try elf.dwarf.const_pool.flushPending(pt, .{ .elf2 = elf });
 }
 
 pub fn updateContainerType(
@@ -8932,33 +8989,12 @@ fn updateFuncInner(
         switch (elf.symPtr(nmi.symbol(elf).index())) {
             inline else => |sym| elf.targetStore(&sym.size, @intCast(func_length)),
         }
-        debug_output: switch (debug_output) {
+        switch (debug_output) {
             .dwarf => unreachable,
-            .eh_frame => |wip_nav| {
-                wip_nav.finishDebugFrameFde(func_length);
-                const frame_ni = switch (wip_nav.frame_format) {
-                    .debug_frame => elf.shndx.debug_frame,
-                    .eh_frame => elf.shndx.eh_frame,
-                }.get(elf).ni;
-                switch (wip_nav.frame_format) {
-                    .debug_frame => {},
-                    .eh_frame => {
-                        const last_offset, const last_size =
-                            frame_ni.last(&elf.mf).unwrap().?.location(&elf.mf).resolve(&elf.mf);
-                        try frame_ni.ensureMinimumSize(gpa, &elf.mf, last_offset + last_size + 4);
-                    },
-                }
-            },
+            .eh_frame => |wip_nav| wip_nav.finishDebugFrameFde(func_length),
             .dwarf2 => |debug| {
                 try debug.finishFunc(func_length);
                 const unit = debug.wip_nav.unit.get(debug.wip_nav.dwarf);
-                {
-                    const debug_info_ni = unit.debug_info_ni.unwrap().?;
-                    const last_offset, const last_size =
-                        debug_info_ni.last(&elf.mf).unwrap().?.location(&elf.mf).resolve(&elf.mf);
-                    try debug_info_ni.ensureMinimumSize(gpa, &elf.mf, last_offset + last_size +
-                        comptime Dwarf.uleb128Size(@backingInt(Dwarf.AbbrevCode.null)) * 2);
-                }
                 {
                     var dr_nw: MappedFile.Node.Writer = undefined;
                     unit.debug_rnglists_ni.unwrap().?.writer(gpa, &elf.mf, &dr_nw);
@@ -8983,7 +9019,7 @@ fn updateFuncInner(
                             {},
                         );
                 }
-                continue :debug_output .{ .eh_frame = &debug.wip_nav };
+                debug.wip_nav.finishDebugFrameFde(func_length);
             },
             .none => {},
         }
@@ -8991,6 +9027,7 @@ fn updateFuncInner(
 
     // The NAV's node is done---now generate any UAVs or lazy code/data which the NAV needs.
     try elf.genPending(pt);
+    try elf.dwarf.const_pool.flushPending(pt, .{ .elf2 = elf });
 }
 
 pub fn updateLineNumber(
@@ -9297,7 +9334,7 @@ fn idleProgNode(
             break :name std.mem.print(&name, "{f}{f} {s}", .{
                 ii.path(elf).fmtEscapeString(),
                 fmtMemberString(ii.member(elf)),
-                elf.getNode(isi.node(elf).parent(&elf.mf).unwrap().?).section.name(elf).slice(elf),
+                elf.getNodeShndx(isi.node(elf)).name(elf).slice(elf),
             }) catch &name;
         },
         .nav => |nmi| {
@@ -9316,6 +9353,7 @@ fn idleProgNode(
         .unit_frame_cie,
         .unit_debug_info,
         .unit_debug_info_header,
+        .unit_debug_info_footer,
         .unit_debug_line,
         .unit_debug_line_header,
         .unit_debug_rnglists,
@@ -9323,7 +9361,11 @@ fn idleProgNode(
             switch (tag) {
                 else => unreachable,
                 .unit_frame, .unit_frame_cie => "unwind",
-                .unit_debug_info, .unit_debug_info_header, .unit_debug_rnglists => "debug",
+                .unit_debug_info,
+                .unit_debug_info_header,
+                .unit_debug_info_footer,
+                .unit_debug_rnglists,
+                => "debug",
                 .unit_debug_line, .unit_debug_line_header => "line",
             },
             ui.mod(&elf.dwarf).fully_qualified_name,
@@ -9393,7 +9435,6 @@ fn genPending(elf: *Elf, pt: Zcu.PerThread) link.Error!void {
                 elf.resetNodeRelocs(debug_info_ni);
                 try elf.dwarf.genDecl(pt, &di_nw, pending.instance_val);
             }
-            try elf.dwarf.const_pool.flushPending(pt, .{ .elf2 = elf });
         },
         .code_view => unreachable,
     }
@@ -9555,7 +9596,7 @@ fn flushInputSection(elf: *Elf, isi: InputSection.Index) Error!void {
     fr.seekTo(file_loc.offset) catch |err| switch (err) {
         error.Canceled => |e| return e,
         else => |e| return diags.fail("failed to read input section '{s}' from \"{f}{f}\": {t}", .{
-            elf.getNode(isi.node(elf).parent(&elf.mf).unwrap().?).section.name(elf).slice(elf),
+            elf.getNodeShndx(isi.node(elf)).name(elf).slice(elf),
             path.fmtEscapeString(),
             fmtMemberString(ii.member(elf)),
             e,
@@ -9566,7 +9607,7 @@ fn flushInputSection(elf: *Elf, isi: InputSection.Index) Error!void {
     defer nw.deinit();
     const n_bytes = nw.interface.sendFileAll(&fr, .limited(@intCast(file_loc.size))) catch |err| switch (err) {
         error.ReadFailed => return diags.fail("failed to read input section '{s}' from \"{f}{f}\": {t}", .{
-            elf.getNode(isi.node(elf).parent(&elf.mf).unwrap().?).section.name(elf).slice(elf),
+            elf.getNodeShndx(isi.node(elf)).name(elf).slice(elf),
             path.fmtEscapeString(),
             fmtMemberString(ii.member(elf)),
             fr.err orelse (fr.seek_err orelse fr.size_err.?),
@@ -9574,7 +9615,7 @@ fn flushInputSection(elf: *Elf, isi: InputSection.Index) Error!void {
         error.WriteFailed => return nw.err.?,
     };
     if (n_bytes != file_loc.size) return diags.fail("failed to read input section '{s}' from \"{f}{f}\": unexpected eof", .{
-        elf.getNode(isi.node(elf).parent(&elf.mf).unwrap().?).section.name(elf).slice(elf),
+        elf.getNodeShndx(isi.node(elf)).name(elf).slice(elf),
         path.fmtEscapeString(),
         fmtMemberString(ii.member(elf)),
     });
@@ -9797,7 +9838,7 @@ fn flushMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void
                 target_ri = target_reloc.next;
             }
         },
-        .unit_padding, .unit_frame, .unit_debug_info, .unit_debug_line => {},
+        .eh_frame_footer, .unit_padding, .unit_frame, .unit_debug_info, .unit_debug_line => {},
         .unit_frame_cie => |ui| {
             const target_section_offset = elf.computeNodeSectionOffset(ni);
             var target_ri = elf.dwarf_units[@backingInt(ui)].frame_cie_first_target_reloc;
@@ -9822,6 +9863,7 @@ fn flushMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void
                 .first_node_reloc = dwarf_unit.debug_info_header_first_node_reloc,
             });
         },
+        .unit_debug_info_footer => {},
         .unit_debug_line_header => |ui| {
             const dwarf_unit = &elf.dwarf_units[@backingInt(ui)];
             const target_section_offset = elf.computeNodeSectionOffset(ni);
@@ -10179,11 +10221,13 @@ fn flushResized(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!vo
         .lazy_code,
         .lazy_const_data,
         .debug_shared,
+        .eh_frame_footer,
         .unit_padding,
         .unit_frame,
         .unit_frame_cie,
         .unit_debug_info,
         .unit_debug_info_header,
+        .unit_debug_info_footer,
         .unit_debug_line,
         .unit_debug_line_header,
         .unit_debug_rnglists,
@@ -10219,6 +10263,8 @@ fn flushNextMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!
         .lazy_code,
         .lazy_const_data,
         .debug_shared,
+        .eh_frame_footer,
+        .unit_debug_info_footer,
         => unreachable,
 
         .archive_header => {
@@ -10261,7 +10307,7 @@ fn flushNextMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!
         => |_, tag| {
             const offset, const size = ni.location(&elf.mf).resolve(&elf.mf);
             const parent_ni = ni.parent(&elf.mf).unwrap().?;
-            const slice = if (ni.next(&elf.mf).unwrap()) |next_ni| slice: {
+            const slice = if (ni.next(&elf.mf).ifPos(&elf.mf, .floating).unwrap()) |next_ni| slice: {
                 const parent_slice = parent_ni.slicePadding(&elf.mf);
                 const next_offset, _ = next_ni.location(&elf.mf).resolve(&elf.mf);
                 break :slice parent_slice[@intCast(offset)..@intCast(next_offset)];
@@ -10269,40 +10315,35 @@ fn flushNextMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!
                 else => unreachable,
                 .unit_padding, .unit_debug_rnglists => {
                     const parent_slice = parent_ni.slicePadding(&elf.mf);
-                    switch (elf.getNode(parent_ni).section.debugFrameFormat(elf) orelse .debug_frame) {
-                        .eh_frame => {
-                            const end = parent_slice.len - 4;
-                            std.mem.writeInt(u32, parent_slice[end..][0..4], 0, elf.dwarf.endian);
-                            break :slice parent_slice[@intCast(offset)..end];
-                        },
-                        .debug_frame => break :slice parent_slice[@intCast(offset)..],
-                    }
+                    const frame_shndx = elf.getNodeShndx(parent_ni);
+                    const frame_format = frame_shndx.debugFrameFormat(elf) orelse
+                        break :slice parent_slice[@intCast(offset)..];
+                    const footer_size = elf.debugFrameFooterSize(frame_format);
+                    @memset(parent_slice[@intCast(offset + size)..][0..footer_size], 0);
+                    frame_shndx.setSize(elf, offset + size + footer_size);
+                    break :slice parent_slice[@intCast(offset)..][0..@intCast(size)];
                 },
                 .unit_frame_cie, .func_frame_fde => {
                     const parent_offset, _ = parent_ni.location(&elf.mf).resolve(&elf.mf);
                     const frame_ni = parent_ni.parent(&elf.mf).unwrap().?;
                     const frame_slice = frame_ni.slicePadding(&elf.mf);
-                    const frame_format = elf.getNode(frame_ni).section.debugFrameFormat(elf);
-                    const slice = frame_slice[@intCast(parent_offset + offset)..if (parent_ni.next(&elf.mf).unwrap()) |parent_next_ni| frame_end: {
+                    const frame_shndx = elf.getNode(frame_ni).section_manual_size;
+                    const frame_format = frame_shndx.debugFrameFormat(elf).?;
+                    if (parent_ni.next(&elf.mf).ifPos(&elf.mf, .floating).unwrap()) |parent_next_ni| {
                         const parent_next_offset, _ = parent_next_ni.location(&elf.mf).resolve(&elf.mf);
-                        break :frame_end @intCast(parent_next_offset);
-                    } else frame_end: switch (frame_format orelse .debug_frame) {
-                        .eh_frame => {
-                            const frame_end = frame_slice.len - 4;
-                            std.mem.writeInt(u32, frame_slice[frame_end..][0..4], 0, elf.dwarf.endian);
-                            break :frame_end frame_end;
-                        },
-                        .debug_frame => frame_slice.len,
-                    }];
-                    var fw: Io.Writer = .fixed(slice[@intCast(size)..]);
-                    (if (frame_format) |format|
-                        elf.dwarf.genDebugFrameCie(&fw, null, format)
-                    else
-                        elf.dwarf.genUnitPadding(&fw)) catch |err| switch (err) {
-                        error.WriteFailed => break :slice slice,
-                    };
-                    elf.dwarf.updateUnitLength(fw.buffer, fw.buffer.len);
-                    break :slice slice[0..@intCast(size)];
+                        const slice =
+                            frame_slice[@intCast(parent_offset + offset)..@intCast(parent_next_offset)];
+                        var fw: Io.Writer = .fixed(slice[@intCast(size)..]);
+                        elf.dwarf.genDebugFrameCie(&fw, null, frame_format) catch |err| switch (err) {
+                            error.WriteFailed => break :slice slice,
+                        };
+                        elf.dwarf.updateUnitLength(fw.buffer, fw.buffer.len);
+                        break :slice slice[0..@intCast(size)];
+                    }
+                    const footer_size = elf.debugFrameFooterSize(frame_format);
+                    @memset(frame_slice[@intCast(parent_offset + offset + size)..][0..footer_size], 0);
+                    frame_shndx.setSize(elf, parent_offset + offset + size + footer_size);
+                    break :slice frame_slice[@intCast(parent_offset + offset)..][0..@intCast(size)];
                 },
                 .unit_debug_info_header,
                 .unit_debug_line_header,
@@ -10315,7 +10356,9 @@ fn flushNextMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!
                     const parent_offset, _ = parent_ni.location(&elf.mf).resolve(&elf.mf);
                     const debug_ni = parent_ni.parent(&elf.mf).unwrap().?;
                     const debug_slice = debug_ni.slicePadding(&elf.mf);
-                    var fw: Io.Writer = .fixed(debug_slice[@intCast(parent_offset)..if (parent_ni.next(&elf.mf).unwrap()) |parent_next_ni| debug_end: {
+                    var fw: Io.Writer = .fixed(debug_slice[@intCast(parent_offset)..if (parent_ni
+                        .next(&elf.mf).ifPos(&elf.mf, .floating).unwrap()) |parent_next_ni|
+                    debug_end: {
                         const parent_next_offset, _ = parent_next_ni.location(&elf.mf).resolve(&elf.mf);
                         break :debug_end @intCast(parent_next_offset);
                     } else debug_slice.len]);
@@ -10383,8 +10426,12 @@ fn flushNextMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!
                 },
             }
         },
-        .unit_frame, .unit_debug_info, .unit_debug_line => if (ni.last(&elf.mf).unwrap()) |last_ni|
-            try last_ni.nextMoved(elf.base.comp.gpa, &elf.mf),
+        .unit_frame, .unit_debug_info, .unit_debug_line => {
+            var last_ni = ni.last(&elf.mf).unwrap() orelse return;
+            while (last_ni.position(&elf.mf) == .footer)
+                last_ni = last_ni.prev(&elf.mf).unwrap() orelse return;
+            try last_ni.nextMoved(elf.base.comp.gpa, &elf.mf);
+        },
     }
 }
 
@@ -10877,7 +10924,7 @@ pub fn printNode(
             try w.print("({f}{f}, {s})", .{
                 ii.path(elf).fmtEscapeString(),
                 fmtMemberString(ii.member(elf)),
-                elf.getNode(isi.node(elf).parent(&elf.mf).unwrap().?).section.name(elf).slice(elf),
+                elf.getNodeShndx(isi.node(elf)).name(elf).slice(elf),
             });
         },
         .copied_global => |name| try w.print("(copy:{s})", .{name.slice(elf)}),
@@ -10909,6 +10956,7 @@ pub fn printNode(
         .unit_frame_cie,
         .unit_debug_info,
         .unit_debug_info_header,
+        .unit_debug_info_footer,
         .unit_debug_line,
         .unit_debug_line_header,
         .unit_debug_rnglists,
