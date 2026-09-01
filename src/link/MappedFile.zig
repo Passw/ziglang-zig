@@ -355,10 +355,6 @@ pub const Node = extern struct {
                 assert(oi != .none);
                 return oi;
             }
-
-            pub fn ifPos(oi: Optional, mf: *const MappedFile, pos: Node.Position) Optional {
-                return if ((oi.unwrap() orelse return .none).position(mf) == pos) oi else .none;
-            }
         };
 
         fn get(ni: Node.Index, mf: *const MappedFile) *Node {
@@ -518,12 +514,10 @@ pub const Node = extern struct {
             return node_moved.*;
         }
         pub fn movedAssumeCapacity(ni: Node.Index, mf: *MappedFile) void {
-            if (ni.hasMoved(mf)) return;
             const node = ni.get(mf);
+            if (node.prev.unwrap()) |prev_ni| prev_ni.nextMovedAssumeCapacity(mf);
+            if (ni.hasMoved(mf)) return;
             node.flags.moved = true;
-            if (node.prev.unwrap()) |prev_ni| {
-                prev_ni.nextMovedAssumeCapacity(mf);
-            }
             if (node.flags.resized or node.flags.next_moved) return;
             mf.updates.appendAssumeCapacity(ni);
             mf.update_prog_node.increaseEstimatedTotalItems(1);

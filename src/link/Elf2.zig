@@ -7241,7 +7241,16 @@ fn prelinkInner(elf: *Elf) Error!void {
             const debug_ni = debug_shndx.get(elf).ni;
             const frame_format = debug_shndx.debugFrameFormat(elf);
             const unit_padding_ni = elf.addNodeAssumeCapacity(
-                try debug_ni.addFloatingChild(gpa, &elf.mf, .{
+                try debug_ni.addHeaderChildAfter(gpa, &elf.mf, last_header_oni: {
+                    var last_header_oni = debug_ni.last(&elf.mf);
+                    while (last_header_oni.unwrap()) |last_header_ni|
+                        switch (last_header_ni.position(&elf.mf)) {
+                            .header => break,
+                            .footer => last_header_oni = last_header_ni.prev(&elf.mf),
+                            .floating => unreachable,
+                        };
+                    break :last_header_oni last_header_oni;
+                }, .{
                     .alignment = if (frame_format) |_| switch (elf.identClass()) {
                         .NONE, _ => unreachable,
                         .@"32" => .@"4",
@@ -9311,7 +9320,7 @@ pub fn idle(elf: *Elf, tid: Zcu.PerThread.Id) link.Error!bool {
             defer sub_prog_node.end();
             if (clean_moved) try elf.flushMoved(ni);
             if (clean_resized) try elf.flushResized(ni);
-            if (clean_next_moved) try elf.flushNextMoved(ni);
+            if (clean_moved or clean_resized or clean_next_moved) try elf.flushPadding(ni);
             break :task;
         }
     }
@@ -10248,12 +10257,12 @@ fn flushResized(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!vo
     }
 }
 
-fn flushNextMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void {
+fn flushPadding(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void {
     const trace = tracy.trace(@src());
     defer trace.end();
 
     switch (elf.getNode(ni)) {
-        .deleted,
+        .deleted => unreachable,
         .archive,
         .archive_input_member,
         .archive_elf_member_header,
@@ -10272,7 +10281,7 @@ fn flushNextMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!
         .debug_shared,
         .eh_frame_footer,
         .unit_debug_info_footer,
-        => unreachable,
+        => {},
 
         .archive_header => {
             const archive = &elf.archive.?;
@@ -10314,94 +10323,139 @@ fn flushNextMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!
         => |_, tag| {
             const offset, const size = ni.location(&elf.mf).resolve(&elf.mf);
             const parent_ni = ni.parent(&elf.mf).unwrap().?;
-            const slice = if (ni.next(&elf.mf).ifPos(&elf.mf, .floating).unwrap()) |next_ni| slice: {
-                const parent_slice = parent_ni.slicePadding(&elf.mf);
-                const next_offset, _ = next_ni.location(&elf.mf).resolve(&elf.mf);
-                break :slice parent_slice[@intCast(offset)..@intCast(next_offset)];
-            } else slice: switch (tag) {
-                else => unreachable,
-                .unit_padding, .unit_debug_rnglists => {
-                    const parent_slice = parent_ni.slicePadding(&elf.mf);
-                    const frame_shndx = elf.getNodeShndx(parent_ni);
-                    const frame_format = frame_shndx.debugFrameFormat(elf) orelse
-                        break :slice parent_slice[@intCast(offset)..];
-                    const footer_size = elf.debugFrameFooterSize(frame_format);
-                    @memset(parent_slice[@intCast(offset + size)..][0..footer_size], 0);
-                    frame_shndx.setSize(elf, offset + size + footer_size);
-                    break :slice parent_slice[@intCast(offset)..][0..@intCast(size)];
-                },
-                .unit_frame_cie, .func_frame_fde => {
-                    const parent_offset, _ = parent_ni.location(&elf.mf).resolve(&elf.mf);
-                    const frame_ni = parent_ni.parent(&elf.mf).unwrap().?;
-                    const frame_slice = frame_ni.slicePadding(&elf.mf);
-                    const frame_shndx = elf.getNode(frame_ni).section_manual_size;
-                    const frame_format = frame_shndx.debugFrameFormat(elf).?;
-                    if (parent_ni.next(&elf.mf).ifPos(&elf.mf, .floating).unwrap()) |parent_next_ni| {
-                        const parent_next_offset, _ = parent_next_ni.location(&elf.mf).resolve(&elf.mf);
-                        const slice =
-                            frame_slice[@intCast(parent_offset + offset)..@intCast(parent_next_offset)];
-                        var fw: Io.Writer = .fixed(slice[@intCast(size)..]);
-                        elf.dwarf.genDebugFrameCie(&fw, null, frame_format) catch |err| switch (err) {
-                            error.WriteFailed => break :slice slice,
-                        };
-                        elf.dwarf.updateUnitLength(fw.buffer, fw.buffer.len);
-                        break :slice slice[0..@intCast(size)];
-                    }
-                    const footer_size = elf.debugFrameFooterSize(frame_format);
-                    @memset(frame_slice[@intCast(parent_offset + offset + size)..][0..footer_size], 0);
-                    frame_shndx.setSize(elf, parent_offset + offset + size + footer_size);
-                    break :slice frame_slice[@intCast(parent_offset + offset)..][0..@intCast(size)];
-                },
-                .unit_debug_info_header,
-                .unit_debug_line_header,
-                .const_debug_info,
-                .global_debug_info,
-                .func_debug_info,
-                .func_debug_line,
-                .decl_debug_info,
-                => {
-                    const parent_offset, _ = parent_ni.location(&elf.mf).resolve(&elf.mf);
-                    const debug_ni = parent_ni.parent(&elf.mf).unwrap().?;
-                    const debug_slice = debug_ni.slicePadding(&elf.mf);
-                    var fw: Io.Writer = .fixed(debug_slice[@intCast(parent_offset)..if (parent_ni
-                        .next(&elf.mf).ifPos(&elf.mf, .floating).unwrap()) |parent_next_ni|
-                    debug_end: {
-                        const parent_next_offset, _ = parent_next_ni.location(&elf.mf).resolve(&elf.mf);
-                        break :debug_end @intCast(parent_next_offset);
-                    } else debug_slice.len]);
-                    fw.end = @intCast(offset + size);
-                    switch (tag) {
-                        else => unreachable,
-                        .unit_debug_info_header,
-                        .const_debug_info,
-                        .global_debug_info,
-                        .func_debug_info,
-                        .decl_debug_info,
-                        => for (0..2) |_| fw.writeUleb128(@backingInt(Dwarf.AbbrevCode.null)) catch unreachable,
-                        .unit_debug_line_header, .func_debug_line => {},
-                    }
-                    const unit_padding_offset = fw.end;
-                    const unit_padding = fw.unusedCapacitySlice();
-                    elf.dwarf.genUnitPadding(&fw) catch |err| switch (err) {
-                        error.WriteFailed => {
-                            fw.end = unit_padding_offset;
-                            elf.dwarf.updateUnitLength(fw.buffer, fw.buffer.len);
-                            switch (tag) {
-                                else => unreachable,
-                                .unit_debug_info_header, .const_debug_info, .global_debug_info, .func_debug_info, .decl_debug_info => {
-                                    comptime assert(Dwarf.uleb128Size(@backingInt(Dwarf.AbbrevCode.null)) == 1);
-                                    @memset(fw.unusedCapacitySlice(), @backingInt(Dwarf.AbbrevCode.null));
+            const slice = slice: {
+                if (ni.next(&elf.mf).unwrap()) |next_ni| switch (next_ni.position(&elf.mf)) {
+                    .header => unreachable,
+                    .footer => {},
+                    .floating => {
+                        const parent_slice = parent_ni.slicePadding(&elf.mf);
+                        const next_offset, _ = next_ni.location(&elf.mf).resolve(&elf.mf);
+                        break :slice parent_slice[@intCast(offset)..@intCast(next_offset)];
+                    },
+                };
+                switch (tag) {
+                    else => unreachable,
+                    .unit_padding, .unit_debug_rnglists => {
+                        const parent_slice = parent_ni.slicePadding(&elf.mf);
+                        const frame_shndx = elf.getNodeShndx(parent_ni);
+                        const frame_format = frame_shndx.debugFrameFormat(elf) orelse
+                            break :slice parent_slice[@intCast(offset)..];
+                        const footer_size = elf.debugFrameFooterSize(frame_format);
+                        @memset(parent_slice[@intCast(offset + size)..][0..footer_size], 0);
+                        frame_shndx.setSize(elf, offset + size + footer_size);
+                        break :slice parent_slice[@intCast(offset)..][0..@intCast(size)];
+                    },
+                    .unit_frame_cie, .func_frame_fde => {
+                        const parent_offset, _ = parent_ni.location(&elf.mf).resolve(&elf.mf);
+                        const frame_ni = parent_ni.parent(&elf.mf).unwrap().?;
+                        const frame_slice = frame_ni.slicePadding(&elf.mf);
+                        const frame_shndx = elf.getNode(frame_ni).section_manual_size;
+                        const frame_format = frame_shndx.debugFrameFormat(elf).?;
+                        if (parent_ni.next(&elf.mf).unwrap()) |parent_next_ni| {
+                            switch (parent_next_ni.position(&elf.mf)) {
+                                .header => unreachable,
+                                .footer => {},
+                                .floating => {
+                                    const parent_next_offset, _ =
+                                        parent_next_ni.location(&elf.mf).resolve(&elf.mf);
+                                    const slice = frame_slice[@intCast(
+                                        parent_offset + offset,
+                                    )..@intCast(parent_next_offset)];
+                                    var fw: Io.Writer = .fixed(slice[@intCast(size)..]);
+                                    elf.dwarf.genDebugFrameCie(
+                                        &fw,
+                                        null,
+                                        frame_format,
+                                    ) catch |err| switch (err) {
+                                        error.WriteFailed => break :slice slice,
+                                    };
+                                    elf.dwarf.updateUnitLength(fw.buffer, fw.buffer.len);
+                                    break :slice slice[0..@intCast(size)];
                                 },
-                                .unit_debug_line_header, .func_debug_line => Dwarf.genDebugLinePadding(&fw, fw.unusedCapacityLen()) catch
-                                    unreachable,
                             }
-                            return;
-                        },
-                    };
-                    elf.dwarf.updateUnitLength(fw.buffer, unit_padding_offset);
-                    elf.dwarf.updateUnitLength(unit_padding, unit_padding.len);
-                    return;
-                },
+                        }
+                        const footer_size = elf.debugFrameFooterSize(frame_format);
+                        @memset(
+                            frame_slice[@intCast(parent_offset + offset + size)..][0..footer_size],
+                            0,
+                        );
+                        frame_shndx.setSize(elf, parent_offset + offset + size + footer_size);
+                        break :slice frame_slice[@intCast(parent_offset + offset)..][0..@intCast(size)];
+                    },
+                    .unit_debug_info_header,
+                    .unit_debug_line_header,
+                    .const_debug_info,
+                    .global_debug_info,
+                    .func_debug_info,
+                    .func_debug_line,
+                    .decl_debug_info,
+                    => {
+                        const parent_offset, _ = parent_ni.location(&elf.mf).resolve(&elf.mf);
+                        const debug_ni = parent_ni.parent(&elf.mf).unwrap().?;
+                        const debug_slice = debug_ni.slicePadding(&elf.mf);
+                        var fw: Io.Writer = .fixed(buffer: {
+                            if (parent_ni.next(&elf.mf).unwrap()) |parent_next_ni| {
+                                switch (parent_next_ni.position(&elf.mf)) {
+                                    .header => unreachable,
+                                    .footer => {},
+                                    .floating => {
+                                        const parent_next_offset, _ =
+                                            parent_next_ni.location(&elf.mf).resolve(&elf.mf);
+                                        break :buffer debug_slice[@intCast(
+                                            parent_offset,
+                                        )..@intCast(parent_next_offset)];
+                                    },
+                                }
+                            }
+                            break :buffer debug_slice[@intCast(parent_offset)..];
+                        });
+                        fw.end = @intCast(offset + size);
+                        switch (tag) {
+                            else => unreachable,
+                            .unit_debug_info_header,
+                            .const_debug_info,
+                            .global_debug_info,
+                            .func_debug_info,
+                            .decl_debug_info,
+                            => for (0..2) |_| fw.writeUleb128(@backingInt(Dwarf.AbbrevCode.null)) catch
+                                unreachable,
+                            .unit_debug_line_header, .func_debug_line => {},
+                        }
+                        const unit_padding_offset = fw.end;
+                        const unit_padding = fw.unusedCapacitySlice();
+                        elf.dwarf.genUnitPadding(&fw) catch |err| switch (err) {
+                            error.WriteFailed => {
+                                fw.end = unit_padding_offset;
+                                elf.dwarf.updateUnitLength(fw.buffer, fw.buffer.len);
+                                switch (tag) {
+                                    else => unreachable,
+                                    .unit_debug_info_header,
+                                    .const_debug_info,
+                                    .global_debug_info,
+                                    .func_debug_info,
+                                    .decl_debug_info,
+                                    => {
+                                        comptime assert(
+                                            Dwarf.uleb128Size(@backingInt(Dwarf.AbbrevCode.null)) == 1,
+                                        );
+                                        @memset(
+                                            fw.unusedCapacitySlice(),
+                                            @backingInt(Dwarf.AbbrevCode.null),
+                                        );
+                                    },
+                                    .unit_debug_line_header,
+                                    .func_debug_line,
+                                    => Dwarf.genDebugLinePadding(&fw, fw.unusedCapacityLen()) catch
+                                        unreachable,
+                                }
+                                return;
+                            },
+                        };
+                        elf.dwarf.updateUnitLength(fw.buffer, unit_padding_offset);
+                        elf.dwarf.updateUnitLength(unit_padding, unit_padding.len);
+                        return;
+                    },
+                }
             };
             var fw: Io.Writer = .fixed(slice[@intCast(size)..]);
             switch (tag) {
@@ -11007,15 +11061,17 @@ pub fn printNode(
     {
         const mf_node = &elf.mf.nodes.items[@backingInt(ni)];
         const off, const size = mf_node.location().resolve(&elf.mf);
-        try w.print(" index={d} offset=0x{x} size=0x{x} align=0x{x} {t}{s}{s}{s}{s}\n", .{
+        try w.print(" index={d} offset=0x{x} size=0x{x} align=0x{x} {t}{s}{s}{s}{s}{s}{s}\n", .{
             @backingInt(ni),
             off,
             size,
             mf_node.flags.alignment.toByteUnits(),
             mf_node.flags.position,
-            if (mf_node.flags.moved) " moved" else "",
-            if (mf_node.flags.next_moved) " next_moved" else "",
+            if (mf_node.flags.bubbles_moved) " bubbles_moved" else "",
+            if (mf_node.flags.resized) " moved" else "",
             if (mf_node.flags.resized) " resized" else "",
+            if (mf_node.flags.enable_next_moved) " enable_next_moved" else "",
+            if (mf_node.flags.next_moved) " next_moved" else "",
             if (mf_node.flags.has_content) " has_content" else "",
         });
     }

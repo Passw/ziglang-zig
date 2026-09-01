@@ -7736,12 +7736,13 @@ pub fn printNode(
     {
         const mf_node = &coff.mf.nodes.items[@backingInt(ni)];
         const off, const size = mf_node.location().resolve(&coff.mf);
-        try w.print(" index={d} offset=0x{x} size=0x{x} align=0x{x} {t}{s}{s}{s}\n", .{
+        try w.print(" index={d} offset=0x{x} size=0x{x} align=0x{x} {t}{s}{s}{s}{s}\n", .{
             @backingInt(ni),
             off,
             size,
             mf_node.flags.alignment.toByteUnits(),
             mf_node.flags.position,
+            if (mf_node.flags.bubbles_moved) " bubbles_moved" else "",
             if (mf_node.flags.moved) " moved" else "",
             if (mf_node.flags.resized) " resized" else "",
             if (mf_node.flags.has_content) " has_content" else "",

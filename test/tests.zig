@@ -2303,6 +2303,45 @@ const incremental_targets = &[_]IncrementalTarget{
     },
 };
 
+const debugger_matrix: []const DebuggerContext.TestTarget = &.{
+    .{
+        .target = .{
+            .cpu_arch = .x86_64,
+            .os_tag = .linux,
+            .abi = .none,
+        },
+        .pic = false,
+        .linker = .old,
+    },
+    .{
+        .target = .{
+            .cpu_arch = .x86_64,
+            .os_tag = .linux,
+            .abi = .none,
+        },
+        .pic = true,
+        .linker = .old,
+    },
+    .{
+        .target = .{
+            .cpu_arch = .x86_64,
+            .os_tag = .linux,
+            .abi = .none,
+        },
+        .pic = false,
+        .linker = .new,
+    },
+    .{
+        .target = .{
+            .cpu_arch = .x86_64,
+            .os_tag = .linux,
+            .abi = .none,
+        },
+        .pic = true,
+        .linker = .new,
+    },
+};
+
 fn compatible32bitArch(host: *const std.Target) ?std.Target.Cpu.Arch {
     return switch (host.os.tag) {
         .freebsd => switch (host.cpu.arch) {
@@ -3323,25 +3362,9 @@ pub fn addDebuggerTests(b: *std.Build, options: DebuggerContext.Options) ?*Step 
         .b = b,
         .options = options,
         .root_step = step,
+        .test_matrix = debugger_matrix,
     };
-    context.addTestsForTarget(&.{
-        .resolved = b.resolveTargetQuery(.{
-            .cpu_arch = .x86_64,
-            .os_tag = .linux,
-            .abi = .none,
-        }),
-        .pic = false,
-        .test_name_suffix = "x86_64-linux",
-    });
-    context.addTestsForTarget(&.{
-        .resolved = b.resolveTargetQuery(.{
-            .cpu_arch = .x86_64,
-            .os_tag = .linux,
-            .abi = .none,
-        }),
-        .pic = true,
-        .test_name_suffix = "x86_64-linux-pic",
-    });
+    context.addTests();
     return step;
 }
 
