@@ -120,9 +120,12 @@ pub const Global = struct {
 };
 
 pub const Func = struct {
+    state: State,
     fde_ni: MappedFile.Node.Index.Optional,
     debug_info_ni: MappedFile.Node.Index.Optional,
     debug_line_ni: MappedFile.Node.Index.Optional,
+
+    pub const State = enum { unresolved, resolved };
 
     pub const Index = enum(u32) {
         _,
@@ -1419,6 +1422,7 @@ pub fn getFunc(dwarf: *Dwarf, nav: InternPool.Nav.Index) link.Error!Func.Index {
     const gpa = comp.gpa;
     const func_gop = try dwarf.funcs.getOrPut(gpa, nav);
     if (!func_gop.found_existing) func_gop.value_ptr.* = .{
+        .state = .unresolved,
         .fde_ni = .none,
         .debug_info_ni = .none,
         .debug_line_ni = .none,
@@ -1975,7 +1979,10 @@ pub fn updateComptimeNav(
         .func => |func| if (func.owner_nav == nav_index and func.generic_owner == .none) {
             const fi = try dwarf.getFunc(func.owner_nav);
             const f = fi.get(dwarf);
-            if (f.fde_ni != .none or f.debug_line_ni != .none) return;
+            switch (f.state) {
+                .unresolved => {},
+                .resolved => return,
+            }
             const elf = dwarf.lf.cast(.elf2).?;
             const debug_info_ni = f.debug_info_ni.unwrap().?;
             var di_nw: MappedFile.Node.Writer = undefined;
@@ -2837,7 +2844,14 @@ fn updateConstInner(
             defer zcu.gpa.free(name);
             try diw.writeUleb128(try dwarf.refAbbrevCode(.inferred_error_set_type));
             try dwarf.strp(&dwarf.debug_str, di_nw, name);
-            try dwarf.refType(pt, di_nw, switch (ip.funcIesResolvedUnordered(func)) {
+            try dwarf.refType(pt, di_nw, switch (ies: {
+                const fi = dwarf.getFuncIfExists(ip.indexToKey(func).func.owner_nav) orelse
+                    break :ies .none;
+                break :ies switch (fi.get(dwarf).state) {
+                    .unresolved => .none,
+                    .resolved => ip.funcIesResolvedUnordered(func),
+                };
+            }) {
                 .none => .anyerror,
                 else => |ies| .fromInterned(ies),
             });
@@ -3563,10 +3577,9 @@ fn exprLoc(dwarf: *Dwarf, nw: *MappedFile.Node.Writer, loc: Loc) link.EmitError!
 
 fn strp(dwarf: *Dwarf, s: *Str, nw: *MappedFile.Node.Writer, str: []const u8) link.EmitError!void {
     const comp = dwarf.lf.comp;
-    const mf = &dwarf.lf.cast(.elf2).?.mf;
-    try dwarf.secOffset(nw, s.ni.unwrap().?, s.get(comp.gpa, mf, str) catch |err| switch (err) {
+    try dwarf.secOffset(nw, s.ni.unwrap().?, s.get(comp.gpa, nw.mf, str) catch |err| switch (err) {
         error.MappedFileIo => return comp.link_diags.fail("failed to write output file: {t}", .{
-            mf.io_err.?,
+            nw.mf.io_err.?,
         }),
         else => |e| return e,
     });

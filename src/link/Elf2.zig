@@ -8926,6 +8926,7 @@ fn updateFuncInner(
             debug.pt = pt;
             debug.any_children = false;
             debug.blocks = .empty;
+            dwarf_func.state = .resolved;
 
             const debug_info_ni = dwarf_func.debug_info_ni.unwrap().?;
             try dwarf.decls.put(zcu.comp.gpa, src_inst, .{
@@ -9020,6 +9021,11 @@ fn updateFuncInner(
                         );
                 }
                 debug.wip_nav.finishDebugFrameFde(func_length);
+                if (func.analysisUnordered(ip).inferred_error_set) {
+                    const ies = ip.getIfExists(.{ .inferred_error_set_type = func_index }).?;
+                    if (elf.dwarf.const_pool.getIfExists(ies)) |cpi|
+                        try elf.updateConstInner(pt, cpi, ies);
+                }
             },
             .none => {},
         }
