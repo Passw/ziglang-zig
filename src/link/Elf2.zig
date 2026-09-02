@@ -49,6 +49,7 @@ shndx: struct {
     debug_info: Section.Index,
     debug_line: Section.Index,
     debug_line_str: Section.Index,
+    debug_rnglists: Section.Index,
     debug_str: Section.Index,
     debug_str_offsets: Section.Index,
     // These sections are created only as needed, and are initially `.UNDEF`.
@@ -212,6 +213,8 @@ dwarf_units: std.ArrayList(struct {
     debug_info_header_first_node_reloc: NodeReloc.Index,
     debug_line_header_first_target_reloc: NodeReloc.Index,
     debug_line_header_first_node_reloc: NodeReloc.Index,
+    debug_rnglists_first_target_reloc: NodeReloc.Index,
+    debug_rnglists_symbol_relocs: std.array_hash_map.Auto(SymbolReloc.Index, void),
 }),
 dwarf_values: std.ArrayList(struct {
     debug_info_first_target_reloc: NodeReloc.Index,
@@ -304,6 +307,7 @@ const Node = union(enum) {
     unit_debug_info_header: Dwarf.Unit.Index,
     unit_debug_line: Dwarf.Unit.Index,
     unit_debug_line_header: Dwarf.Unit.Index,
+    unit_debug_rnglists: Dwarf.Unit.Index,
 
     value_debug_info: link.ConstPool.Index,
     global_debug_info: Dwarf.Global.Index,
@@ -1808,9 +1812,14 @@ const NodeReloc = struct {
             .none => {
                 const first_target_reloc = switch (elf.getNode(reloc.target)) {
                     else => unreachable,
+                    .debug_shared => |ss| &elf.dwarf_shared.getPtr(ss).first_target_reloc,
                     .unit_frame_cie => |ui| &elf.dwarf_units.items[@backingInt(ui)].frame_cie_first_target_reloc,
                     .unit_debug_info_header => |ui| &elf.dwarf_units.items[@backingInt(ui)].debug_info_header_first_target_reloc,
                     .unit_debug_line_header => |ui| &elf.dwarf_units.items[@backingInt(ui)].debug_line_header_first_target_reloc,
+                    .unit_debug_rnglists => |ui| &elf.dwarf_units.items[@backingInt(ui)].debug_rnglists_first_target_reloc,
+                    .value_debug_info => |vi| &elf.dwarf_values.items[@backingInt(vi)].debug_info_first_target_reloc,
+                    .global_debug_info => |gi| &elf.dwarf_globals.items[@backingInt(gi)].debug_info_first_target_reloc,
+                    .func_debug_info => |fi| &elf.dwarf_funcs.items[@backingInt(fi)].debug_info_first_target_reloc,
                 };
                 first_target_reloc.* = reloc.next;
             },
@@ -3258,6 +3267,7 @@ pub fn symbolForAtom(elf: *Elf, atom: link.File.AtomId) link.File.SymbolId {
         .unit_debug_info_header,
         .unit_debug_line,
         .unit_debug_line_header,
+        .unit_debug_rnglists,
         .value_debug_info,
         .global_debug_info,
         .func_frame_fde,
@@ -3276,8 +3286,8 @@ pub fn symbolForAtom(elf: *Elf, atom: link.File.AtomId) link.File.SymbolId {
 pub fn lazySymbol(elf: *Elf, lazy: link.File.LazySymbol) link.Error!link.File.SymbolId {
     const diags = &elf.base.comp.link_diags;
     return elf.lazySymbolInner(lazy) catch |err| switch (err) {
-        error.MappedFileIo => return diags.fail("failed to write output file: {t}", .{elf.mf.io_err.?}),
         else => |e| return e,
+        error.MappedFileIo => return diags.fail("failed to write output file: {t}", .{elf.mf.io_err.?}),
     };
 }
 fn lazySymbolInner(elf: *Elf, lazy: link.File.LazySymbol) Error!link.File.SymbolId {
@@ -3331,8 +3341,8 @@ pub const ExternSymbolOpts = struct {
 pub fn externSymbol(elf: *Elf, opts: ExternSymbolOpts) link.Error!link.File.SymbolId {
     const diags = &elf.base.comp.link_diags;
     return (elf.externSymbolInner(opts) catch |err| switch (err) {
-        error.MappedFileIo => return diags.fail("failed to write output file: {t}", .{elf.mf.io_err.?}),
         else => |e| return e,
+        error.MappedFileIo => return diags.fail("failed to write output file: {t}", .{elf.mf.io_err.?}),
     }).toTypeErased();
 }
 fn externSymbolInner(elf: *Elf, opts: ExternSymbolOpts) Error!Symbol.Id {
@@ -3372,15 +3382,15 @@ pub fn addReloc(
     const node: MappedFile.Node.Index = Node.fromAtom(atom);
     const diags = &elf.base.comp.link_diags;
     elf.ensureUnusedRelocCapacity(node, 1) catch |err| switch (err) {
-        error.MappedFileIo => return diags.fail("failed to write output file: {t}", .{elf.mf.io_err.?}),
         else => |e| return e,
+        error.MappedFileIo => return diags.fail("failed to write output file: {t}", .{elf.mf.io_err.?}),
     };
     elf.addRelocAssumeCapacity(node, offset, .fromTypeErased(target), addend, @"type") catch |err| switch (err) {
+        else => |e| return e,
         error.MappedFileIo => return diags.fail("failed to write output file: {t}", .{elf.mf.io_err.?}),
         error.UnknownRelocation => unreachable, // codegen bug
         error.NonStaticRelocation => unreachable, // codegen bug
         error.UnimplementedRelocation => unreachable, // codegen bug (asking Elf2 for a relocation it does not support)
-        else => |e| return e,
     };
 }
 pub fn addNodeReloc(
@@ -3393,12 +3403,12 @@ pub fn addNodeReloc(
 ) link.Error!void {
     const diags = &elf.base.comp.link_diags;
     elf.ensureUnusedRelocCapacity(node, 1) catch |err| switch (err) {
-        error.MappedFileIo => return diags.fail("failed to write output file: {t}", .{elf.mf.io_err.?}),
         else => |e| return e,
+        error.MappedFileIo => return diags.fail("failed to write output file: {t}", .{elf.mf.io_err.?}),
     };
     elf.addNodeRelocAssumeCapacity(node, offset, target, addend, @"type") catch |err| switch (err) {
-        error.MappedFileIo => return diags.fail("failed to write output file: {t}", .{elf.mf.io_err.?}),
         else => |e| return e,
+        error.MappedFileIo => return diags.fail("failed to write output file: {t}", .{elf.mf.io_err.?}),
     };
 }
 pub fn navSymbol(elf: *Elf, nav_index: InternPool.Nav.Index) link.Error!link.File.SymbolId {
@@ -3416,8 +3426,8 @@ pub fn navSymbol(elf: *Elf, nav_index: InternPool.Nav.Index) link.Error!link.Fil
         });
     }
     const nmi = elf.navMapIndex(zcu, nav_index) catch |err| switch (err) {
-        error.MappedFileIo => return diags.fail("failed to write output file: {t}", .{elf.mf.io_err.?}),
         else => |e| return e,
+        error.MappedFileIo => return diags.fail("failed to write output file: {t}", .{elf.mf.io_err.?}),
     };
     const s: Symbol.Id = .local(nmi.symbol(elf));
     return s.toTypeErased();
@@ -3429,8 +3439,8 @@ pub fn uavSymbol(
 ) link.Error!link.File.SymbolId {
     const diags = &elf.base.comp.link_diags;
     const umi = elf.uavMapIndex(uav_val, uav_align) catch |err| switch (err) {
-        error.MappedFileIo => return diags.fail("failed to write output file: {t}", .{elf.mf.io_err.?}),
         else => |e| return e,
+        error.MappedFileIo => return diags.fail("failed to write output file: {t}", .{elf.mf.io_err.?}),
     };
     const s: Symbol.Id = .local(umi.symbol(elf));
     return s.toTypeErased();
@@ -3470,8 +3480,8 @@ pub fn lowerUav(
     _ = pt;
     const diags = &elf.base.comp.link_diags;
     const umi = elf.uavMapIndex(uav_val, uav_align) catch |err| switch (err) {
-        error.MappedFileIo => return diags.fail("failed to write output file: {t}", .{elf.mf.io_err.?}),
         else => |e| return e,
+        error.MappedFileIo => return diags.fail("failed to write output file: {t}", .{elf.mf.io_err.?}),
     };
     const s: Symbol.Id = .local(umi.symbol(elf));
     return s.toTypeErased();
@@ -3705,6 +3715,7 @@ fn create(
             .debug_info = .UNDEF,
             .debug_line = .UNDEF,
             .debug_line_str = .UNDEF,
+            .debug_rnglists = .UNDEF,
             .debug_str = .UNDEF,
             .debug_str_offsets = .UNDEF,
             .init_array = .UNDEF,
@@ -3819,6 +3830,7 @@ pub fn deinit(elf: *Elf) void {
     elf.changed_symtab_index.deinit(gpa);
 
     elf.dwarf.deinit();
+    for (elf.dwarf_units.items) |*dwarf_unit| dwarf_unit.debug_rnglists_symbol_relocs.deinit(gpa);
     elf.dwarf_units.deinit(gpa);
     elf.dwarf_values.deinit(gpa);
     elf.dwarf_globals.deinit(gpa);
@@ -3900,6 +3912,7 @@ fn initHeaders(
                 shnum += 1; // .debug_info
                 shnum += 1; // .debug_line
                 shnum += 1; // .debug_line_str
+                shnum += 1; // .debug_rnglists
                 shnum += 1; // .debug_str
                 shnum += 1; // .debug_str_offsets
             },
@@ -4744,22 +4757,22 @@ fn initHeaders(
                     elf.plt_first_symbol_reloc = @fromBackingInt(@intCast(elf.symbol_relocs.items.len));
                     try elf.ensureUnusedRelocCapacity(plt_ni, 3);
                     elf.addRelocAssumeCapacity(plt_ni, 0, got_plt_sym, 0, .{ .LARCH = .PCALA_HI20 }) catch |err| switch (err) {
+                        else => |e| return e,
                         error.UnknownRelocation => unreachable,
                         error.NonStaticRelocation => unreachable,
                         error.UnimplementedRelocation => unreachable,
-                        else => |e| return e,
                     };
                     elf.addRelocAssumeCapacity(plt_ni, 8, got_plt_sym, 0, .{ .LARCH = .PCALA_LO12 }) catch |err| switch (err) {
+                        else => |e| return e,
                         error.UnknownRelocation => unreachable,
                         error.NonStaticRelocation => unreachable,
                         error.UnimplementedRelocation => unreachable,
-                        else => |e| return e,
                     };
                     elf.addRelocAssumeCapacity(plt_ni, 16, got_plt_sym, 0, .{ .LARCH = .PCALA_LO12 }) catch |err| switch (err) {
+                        else => |e| return e,
                         error.UnknownRelocation => unreachable,
                         error.NonStaticRelocation => unreachable,
                         error.UnimplementedRelocation => unreachable,
-                        else => |e| return e,
                     };
                 },
                 .SPARCV9 => {},
@@ -5008,6 +5021,10 @@ fn initHeaders(
                 .name = ".debug_line_str",
                 .flags = .{ .MERGE = true, .STRINGS = true },
             });
+            elf.shndx.debug_rnglists = try elf.addSection(elf.ni.elf, .{
+                .name = ".debug_rnglists",
+                .node_align = elf.mf.flags.block_size,
+            });
             elf.shndx.debug_str = try elf.addSection(elf.ni.elf, .{
                 .name = ".debug_str",
                 .flags = .{ .MERGE = true, .STRINGS = true },
@@ -5118,6 +5135,7 @@ fn getNodeShndx(elf: *const Elf, ni: MappedFile.Node.Index) Section.Index {
         .unit_frame,
         .unit_debug_info,
         .unit_debug_line,
+        .unit_debug_rnglists,
         => elf.getNode(ni.parent(&elf.mf).unwrap().?).section,
         .unit_frame_cie,
         .unit_debug_info_header,
@@ -5157,6 +5175,7 @@ fn getNodeVAddr(elf: *Elf, ni: MappedFile.Node.Index) u64 {
         .unit_debug_info_header,
         .unit_debug_line,
         .unit_debug_line_header,
+        .unit_debug_rnglists,
         .value_debug_info,
         .global_debug_info,
         .func_frame_fde,
@@ -5190,6 +5209,7 @@ fn computeNodeVAddr(elf: *Elf, ni: MappedFile.Node.Index) u64 {
         .unit_frame_cie,
         .unit_debug_info_header,
         .unit_debug_line_header,
+        .unit_debug_rnglists,
         .value_debug_info,
         .global_debug_info,
         .func_frame_fde,
@@ -5210,7 +5230,12 @@ fn getNodeElfOffset(elf: *Elf, ni: MappedFile.Node.Index) u64 {
 /// Asserts that `ni` must be a node which supports relocations (see `Elf.Node`). Does not support
 /// the special-case sections '.plt', '.dynamic', and '.eh_frame_hdr'.
 fn resetNodeRelocs(elf: *Elf, ni: MappedFile.Node.Index) void {
-    const symbol_relocs: ?*SymbolReloc.Index, const node_relocs: ?*NodeReloc.Index, const got_relocs: ?*GotReloc.Index = switch (elf.getNode(ni)) {
+    const opts: struct {
+        ignore_node: MappedFile.Node.Index.Optional = .none,
+        first_symbol_reloc: ?*SymbolReloc.Index = null,
+        first_node_reloc: ?*NodeReloc.Index = null,
+        first_got_reloc: ?*GotReloc.Index = null,
+    } = switch (elf.getNode(ni)) {
         .archive,
         .archive_header,
         .archive_input_member,
@@ -5231,65 +5256,55 @@ fn resetNodeRelocs(elf: *Elf, ni: MappedFile.Node.Index) void {
         .section_manual_size,
         => unreachable, // cannot contain relocs (.plt, .dynamic, and .eh_frame_hdr unsupported)
         .input_section => |isi| .{
-            &elf.input_sections.items[@backingInt(isi)].first_symbol_reloc,
-            null,
-            &elf.input_sections.items[@backingInt(isi)].first_got_reloc,
+            .first_symbol_reloc = &elf.input_sections.items[@backingInt(isi)].first_symbol_reloc,
+            .first_got_reloc = &elf.input_sections.items[@backingInt(isi)].first_got_reloc,
         },
         .nav => |nmi| .{
-            &elf.navs.values()[@backingInt(nmi)].first_symbol_reloc,
-            null,
-            &elf.navs.values()[@backingInt(nmi)].first_got_reloc,
+            .first_symbol_reloc = &elf.navs.values()[@backingInt(nmi)].first_symbol_reloc,
+            .first_got_reloc = &elf.navs.values()[@backingInt(nmi)].first_got_reloc,
         },
         .uav => |umi| .{
-            &elf.uavs.values()[@backingInt(umi)].first_symbol_reloc,
-            null,
-            null,
+            .first_symbol_reloc = &elf.uavs.values()[@backingInt(umi)].first_symbol_reloc,
         },
         inline .lazy_code, .lazy_const_data => |lmi| .{
-            &elf.lazy.getPtr(lmi.ref().kind).map.values()[lmi.ref().index].first_symbol_reloc,
-            null,
-            &elf.lazy.getPtr(lmi.ref().kind).map.values()[lmi.ref().index].first_got_reloc,
+            .first_symbol_reloc = &elf.lazy.getPtr(lmi.ref().kind).map.values()[lmi.ref().index].first_symbol_reloc,
+            .first_got_reloc = &elf.lazy.getPtr(lmi.ref().kind).map.values()[lmi.ref().index].first_got_reloc,
         },
         .unit_debug_info_header => |ui| .{
-            null,
-            &elf.dwarf_units.items[@backingInt(ui)].debug_info_header_first_node_reloc,
-            null,
+            .first_node_reloc = &elf.dwarf_units.items[@backingInt(ui)].debug_info_header_first_node_reloc,
         },
         .unit_debug_line_header => |ui| .{
-            null,
-            &elf.dwarf_units.items[@backingInt(ui)].debug_line_header_first_node_reloc,
-            null,
+            .first_node_reloc = &elf.dwarf_units.items[@backingInt(ui)].debug_line_header_first_node_reloc,
         },
+        .unit_debug_rnglists => unreachable, // unsupported
         .value_debug_info => |vi| .{
-            &elf.dwarf_values.items[@backingInt(vi)].debug_info_first_symbol_reloc,
-            &elf.dwarf_values.items[@backingInt(vi)].debug_info_first_node_reloc,
-            null,
+            .first_symbol_reloc = &elf.dwarf_values.items[@backingInt(vi)].debug_info_first_symbol_reloc,
+            .first_node_reloc = &elf.dwarf_values.items[@backingInt(vi)].debug_info_first_node_reloc,
         },
         .global_debug_info => |gi| .{
-            &elf.dwarf_globals.items[@backingInt(gi)].debug_info_first_symbol_reloc,
-            &elf.dwarf_globals.items[@backingInt(gi)].debug_info_first_node_reloc,
-            null,
+            .first_symbol_reloc = &elf.dwarf_globals.items[@backingInt(gi)].debug_info_first_symbol_reloc,
+            .first_node_reloc = &elf.dwarf_globals.items[@backingInt(gi)].debug_info_first_node_reloc,
         },
         .func_frame_fde => |fi| .{
-            &elf.dwarf_funcs.items[@backingInt(fi)].frame_fde_first_symbol_reloc,
-            &elf.dwarf_funcs.items[@backingInt(fi)].frame_fde_first_node_reloc,
-            null,
+            .first_symbol_reloc = &elf.dwarf_funcs.items[@backingInt(fi)].frame_fde_first_symbol_reloc,
+            .first_node_reloc = &elf.dwarf_funcs.items[@backingInt(fi)].frame_fde_first_node_reloc,
         },
         .func_debug_info => |fi| .{
-            &elf.dwarf_funcs.items[@backingInt(fi)].debug_info_first_symbol_reloc,
-            &elf.dwarf_funcs.items[@backingInt(fi)].debug_info_first_node_reloc,
-            null,
+            .ignore_node = fi.get(&elf.dwarf).debug_line_ni,
+            .first_symbol_reloc = &elf.dwarf_funcs.items[@backingInt(fi)].debug_info_first_symbol_reloc,
+            .first_node_reloc = &elf.dwarf_funcs.items[@backingInt(fi)].debug_info_first_node_reloc,
         },
         .func_debug_line => |fi| .{
-            &elf.dwarf_funcs.items[@backingInt(fi)].debug_line_first_symbol_reloc,
-            &elf.dwarf_funcs.items[@backingInt(fi)].debug_line_first_node_reloc,
-            null,
+            .ignore_node = fi.get(&elf.dwarf).debug_info_ni,
+            .first_symbol_reloc = &elf.dwarf_funcs.items[@backingInt(fi)].debug_line_first_symbol_reloc,
+            .first_node_reloc = &elf.dwarf_funcs.items[@backingInt(fi)].debug_line_first_node_reloc,
         },
     };
 
-    if (symbol_relocs) |ptr| {
+    if (opts.first_symbol_reloc) |ptr| {
         if (ptr.* != .none) {
             for (elf.symbol_relocs.items[@backingInt(ptr.*)..], @backingInt(ptr.*)..) |*reloc, index| {
+                if (reloc.node.toOptional() == opts.ignore_node) continue;
                 if (reloc.node != ni) break;
                 reloc.delete(elf, @fromBackingInt(@intCast(index)));
             }
@@ -5297,9 +5312,10 @@ fn resetNodeRelocs(elf: *Elf, ni: MappedFile.Node.Index) void {
         ptr.* = @fromBackingInt(@intCast(elf.symbol_relocs.items.len));
     }
 
-    if (node_relocs) |ptr| {
+    if (opts.first_node_reloc) |ptr| {
         if (ptr.* != .none) {
             for (elf.node_relocs.items[@backingInt(ptr.*)..]) |*reloc| {
+                if (reloc.node.toOptional() == opts.ignore_node) continue;
                 if (reloc.node != ni) break;
                 reloc.delete(elf);
             }
@@ -5307,9 +5323,10 @@ fn resetNodeRelocs(elf: *Elf, ni: MappedFile.Node.Index) void {
         ptr.* = @fromBackingInt(@intCast(elf.node_relocs.items.len));
     }
 
-    if (got_relocs) |ptr| {
+    if (opts.first_got_reloc) |ptr| {
         if (ptr.* != .none) {
             for (elf.got_relocs.items[@backingInt(ptr.*)..]) |*reloc| {
+                if (reloc.node == opts.ignore_node) continue;
                 if (reloc.node != ni.toOptional()) break;
                 reloc.delete(elf);
             }
@@ -5324,12 +5341,16 @@ fn flushMovedNodeRelocs(
     elf: *Elf,
     node: MappedFile.Node.Index,
     node_vaddr: u64,
-    first_symbol_reloc: SymbolReloc.Index,
-    first_node_reloc: NodeReloc.Index,
-    first_got_reloc: GotReloc.Index,
+    opts: struct {
+        ignore_node: MappedFile.Node.Index.Optional = .none,
+        first_symbol_reloc: SymbolReloc.Index = .none,
+        first_node_reloc: NodeReloc.Index = .none,
+        first_got_reloc: GotReloc.Index = .none,
+    },
 ) void {
-    if (first_symbol_reloc != .none) {
-        for (elf.symbol_relocs.items[@backingInt(first_symbol_reloc)..]) |*reloc| {
+    if (opts.first_symbol_reloc != .none) {
+        for (elf.symbol_relocs.items[@backingInt(opts.first_symbol_reloc)..]) |*reloc| {
+            if (reloc.node.toOptional() == opts.ignore_node) continue;
             if (reloc.node != node) break;
             if (reloc.rela_index.unwrap()) |rela_index| {
                 // The node has moved, so the offset of the relocation within the section might have
@@ -5345,8 +5366,9 @@ fn flushMovedNodeRelocs(
         }
     }
 
-    if (first_node_reloc != .none) {
-        for (elf.node_relocs.items[@backingInt(first_node_reloc)..]) |*reloc| {
+    if (opts.first_node_reloc != .none) {
+        for (elf.node_relocs.items[@backingInt(opts.first_node_reloc)..]) |*reloc| {
+            if (reloc.node.toOptional() == opts.ignore_node) continue;
             if (reloc.node != node) break;
             if (reloc.rela_index.unwrap()) |rela_index| {
                 assert(elf.ehdrType() == .REL);
@@ -5360,8 +5382,9 @@ fn flushMovedNodeRelocs(
         }
     }
 
-    if (first_got_reloc != .none) {
-        for (elf.got_relocs.items[@backingInt(first_got_reloc)..]) |*reloc| {
+    if (opts.first_got_reloc != .none) {
+        for (elf.got_relocs.items[@backingInt(opts.first_got_reloc)..]) |*reloc| {
+            if (reloc.node == opts.ignore_node) continue;
             if (reloc.node != node.toOptional()) break;
             reloc.apply(elf);
         }
@@ -5814,6 +5837,7 @@ fn navMapIndex(elf: *Elf, zcu: *Zcu, nav_index: InternPool.Nav.Index) Error!Node
                 })) |shndx| {
                     break :section shndx;
                 } else |err| switch (err) {
+                    else => |e| return e,
                     error.StripSection,
                     error.TlsSectionUnavailable,
                     error.UnsupportedSectionFlags,
@@ -5821,7 +5845,6 @@ fn navMapIndex(elf: *Elf, zcu: *Zcu, nav_index: InternPool.Nav.Index) Error!Node
                     error.SectionFlagsConflict,
                     => {}, // fall back to default behavior below
 
-                    else => |e| return e,
                 }
             }
             if (elf.base.comp.config.any_non_single_threaded and nav.resolved.?.@"threadlocal") {
@@ -6074,8 +6097,8 @@ fn loadArchive(elf: *Elf, path: std.Build.Cache.Path, fr: *Io.File.Reader) (Load
             strtab.clearRetainingCapacity();
             try strtab.ensureTotalCapacityPrecise(size);
             r.streamExact(&strtab.writer, size) catch |err| switch (err) {
-                error.WriteFailed => return error.OutOfMemory,
                 else => |e| return e,
+                error.WriteFailed => return error.OutOfMemory,
             };
             continue;
         }
@@ -6106,8 +6129,8 @@ fn loadArchive(elf: *Elf, path: std.Build.Cache.Path, fr: *Io.File.Reader) (Load
         }
         try fr.seekTo(std.mem.alignForward(u64, offset + size, 2));
     } else |err| switch (err) {
-        error.EndOfStream => if (!fr.atEnd()) return error.EndOfStream,
         else => |e| return e,
+        error.EndOfStream => if (!fr.atEnd()) return error.EndOfStream,
     }
 }
 fn fmtMemberString(member: ?[]const u8) std.fmt.Alt(?[]const u8, memberStringEscape) {
@@ -6273,6 +6296,7 @@ fn loadObject(
                             .flags = section.shdr.flags.shf,
                             .entsize = section.shdr.entsize,
                         }) catch |err| switch (err) {
+                            else => |e| return e,
                             error.StripSection => continue,
                             error.TlsSectionUnavailable => return diags.failParse(
                                 path,
@@ -6303,7 +6327,6 @@ fn loadObject(
                                 "flags of section '{s}' conflict with other inputs",
                                 .{name},
                             ),
-                            else => |e| return e,
                         };
                         if (section.shdr.flags.shf.COMPRESSED) {
                             // SHF_COMPRESSED is only allowed on non-alloc sections.
@@ -6585,6 +6608,7 @@ fn loadObject(
                                     rel.addend,
                                     rt,
                                 ) catch |err| switch (err) {
+                                    else => |e| return e,
                                     error.UnknownRelocation => diags.addParseError(
                                         path,
                                         "unknown relocation type '{f}'",
@@ -6600,7 +6624,6 @@ fn loadObject(
                                         "TODO(Elf2): unimplemented relocation type '{f}'",
                                         .{rt.fmt(elf)},
                                     ),
-                                    else => |e| return e,
                                 };
                             }
                         },
@@ -6997,7 +7020,7 @@ pub fn prelink(elf: *Elf, prog_node: std.Progress.Node) link.Error!void {
 fn prelinkInner(elf: *Elf) Error!void {
     const comp = elf.base.comp;
     const gpa = comp.gpa;
-    if (comp.zcu) |zcu| self_hosted_codegen: {
+    if (comp.zcu) |_| self_hosted_codegen: {
         if (comp.config.use_llvm) break :self_hosted_codegen;
 
         // We're using self-hosted codegen---add an input representing the Zig "object".
@@ -7019,15 +7042,32 @@ fn prelinkInner(elf: *Elf) Error!void {
             .extra = .{ .file_symbol = zcu_file_symbol },
         };
         elf.input_pending_index += 1;
+    }
+}
 
+pub fn zcuFilesReady(elf: *Elf, zcu: *Zcu) link.Error!void {
+    elf.zcuFilesReadyInner(zcu) catch |err| switch (err) {
+        else => |e| return e,
+        error.MappedFileIo => return elf.base.comp.link_diags.fail(
+            "failed to write output file: {t}",
+            .{elf.mf.io_err.?},
+        ),
+    };
+}
+fn zcuFilesReadyInner(elf: *Elf, zcu: *Zcu) Error!void {
+    const gpa = zcu.gpa;
+
+    if (elf.dwarf.units.count() == 0) {
         try elf.dwarf.initUnits(zcu);
-        try elf.nodes.ensureUnusedCapacity(gpa, 4 + 4 + (4 + 4) * elf.dwarf.units.count());
+        try elf.nodes.ensureUnusedCapacity(gpa, 4 + 5 + 5 * elf.dwarf.units.count());
         try elf.dwarf_units.appendNTimes(gpa, .{
             .frame_cie_first_target_reloc = .none,
             .debug_info_header_first_target_reloc = .none,
             .debug_info_header_first_node_reloc = .none,
             .debug_line_header_first_target_reloc = .none,
             .debug_line_header_first_node_reloc = .none,
+            .debug_rnglists_first_target_reloc = .none,
+            .debug_rnglists_symbol_relocs = .empty,
         }, elf.dwarf.units.count());
 
         elf.dwarf.debug_abbrev.ni =
@@ -7046,11 +7086,12 @@ fn prelinkInner(elf: *Elf) Error!void {
             .wrap(try elf.shndx.debug_str_offsets.get(elf).ni.addFloatingChild(&elf.mf, gpa, .{}));
         elf.nodes.appendAssumeCapacity(.{ .debug_shared = .debug_str_offsets });
 
-        for ([4]Section.Index{
+        for ([5]Section.Index{
             elf.shndx.eh_frame,
             elf.shndx.debug_frame,
             elf.shndx.debug_info,
             elf.shndx.debug_line,
+            elf.shndx.debug_rnglists,
         }) |debug_shndx| {
             if (debug_shndx == .UNDEF) continue;
             const debug_ni = debug_shndx.get(elf).ni;
@@ -7085,7 +7126,6 @@ fn prelinkInner(elf: *Elf) Error!void {
                     const debug_info_ni =
                         try debug_info_shndx.get(elf).ni.addFloatingChild(&elf.mf, gpa, .{
                             .alignment = elf.mf.flags.block_size,
-                            .next_moved = true,
                             .enable_next_moved = true,
                         });
                     unit.debug_info_ni = .wrap(debug_info_ni);
@@ -7105,7 +7145,6 @@ fn prelinkInner(elf: *Elf) Error!void {
                     const debug_line_ni =
                         try debug_line_shndx.get(elf).ni.addFloatingChild(&elf.mf, gpa, .{
                             .alignment = elf.mf.flags.block_size,
-                            .next_moved = true,
                             .enable_next_moved = true,
                         });
                     unit.debug_line_ni = .wrap(debug_line_ni);
@@ -7113,43 +7152,72 @@ fn prelinkInner(elf: *Elf) Error!void {
 
                     unit.debug_line_header_ni =
                         .wrap(try debug_line_ni.addOnlyHeaderChild(&elf.mf, gpa, .{
-                            .next_moved = true,
+                            // Idle tasks are going to try to keep this up to date before we are able to
+                            // write out the full header, so just reserve space for them to do so.
+                            .size = elf.dwarf.unitLengthSize(),
                             .enable_next_moved = true,
                         }));
                     elf.nodes.appendAssumeCapacity(.{ .unit_debug_line_header = ui });
                 },
             }
+            switch (elf.shndx.debug_rnglists) {
+                .UNDEF => {},
+                else => |debug_rnglists_shndx| {
+                    unit.debug_rnglists_ni =
+                        .wrap(try debug_rnglists_shndx.get(elf).ni.addFloatingChild(&elf.mf, gpa, .{
+                            .next_moved = true,
+                            .enable_next_moved = true,
+                        }));
+                    elf.nodes.appendAssumeCapacity(.{ .unit_debug_rnglists = ui });
+                },
+            }
         }
 
-        for (0.., elf.dwarf.units.values()) |unit_index, *unit| {
-            const ui: Dwarf.Unit.Index = @fromBackingInt(@intCast(unit_index));
-            if (elf.shndx.debug_info != .UNDEF) {
-                var header_nw: MappedFile.Node.Writer = undefined;
-                const debug_info_header_ni = unit.debug_info_header_ni.unwrap().?;
-                debug_info_header_ni.writer(&elf.mf, gpa, &header_nw);
-                defer header_nw.deinit();
-                elf.resetNodeRelocs(debug_info_header_ni);
-                elf.dwarf.genDebugInfoHeader(&header_nw, ui, zcu) catch |err| switch (err) {
-                    error.WriteFailed => return header_nw.err.?,
+        for (elf.dwarf.units.keys(), elf.dwarf.units.values()) |mod, *unit| {
+            var drh_nw: MappedFile.Node.Writer = undefined;
+            unit.debug_rnglists_ni.unwrap().?.writer(&elf.mf, gpa, &drh_nw);
+            defer drh_nw.deinit();
+            const debug_rnglists_offsets_table_offset =
+                elf.dwarf.genDebugRnglistsHeader(unit, &drh_nw) catch |err| switch (err) {
                     else => |e| return e,
+                    error.WriteFailed => return drh_nw.err.?,
                 };
-            }
-            if (elf.shndx.debug_line != .UNDEF) {
-                var header_nw: MappedFile.Node.Writer = undefined;
-                const debug_line_header_ni = unit.debug_line_header_ni.unwrap().?;
-                debug_line_header_ni.writer(&elf.mf, gpa, &header_nw);
-                defer header_nw.deinit();
-                elf.resetNodeRelocs(debug_line_header_ni);
-                elf.dwarf.genDebugLineHeader(&header_nw.interface) catch |err| switch (err) {
-                    error.WriteFailed => return header_nw.err.?,
-                };
-            }
+
+            var dih_nw: MappedFile.Node.Writer = undefined;
+            const debug_info_header_ni = unit.debug_info_header_ni.unwrap().?;
+            debug_info_header_ni.writer(&elf.mf, gpa, &dih_nw);
+            defer dih_nw.deinit();
+            elf.resetNodeRelocs(debug_info_header_ni);
+            elf.dwarf.genDebugInfoHeader(
+                mod,
+                unit,
+                &dih_nw,
+                debug_rnglists_offsets_table_offset,
+                zcu,
+            ) catch |err| switch (err) {
+                else => |e| return e,
+                error.WriteFailed => return dih_nw.err.?,
+            };
         }
     }
 }
 
-pub fn zcuFilesReady(elf: *Elf) link.Error!void {
-    _ = elf; // TODO jacobly
+fn flushFiles(elf: *Elf) Error!void {
+    const gpa = elf.base.comp.gpa;
+    if (elf.shndx.debug_line != .UNDEF) for (elf.dwarf.units.keys(), elf.dwarf.units.values()) |mod, *unit| {
+        if (!unit.cleanFilesChanged()) continue;
+        const debug_line_header_ni = unit.debug_line_header_ni.unwrap().?;
+        try debug_line_header_ni.moved(gpa, &elf.mf);
+        try debug_line_header_ni.nextMoved(gpa, &elf.mf);
+        var dlh_nw: MappedFile.Node.Writer = undefined;
+        debug_line_header_ni.writer(&elf.mf, gpa, &dlh_nw);
+        defer dlh_nw.deinit();
+        elf.resetNodeRelocs(debug_line_header_ni);
+        elf.dwarf.genDebugLineHeader(mod, unit, &dlh_nw, elf.base.comp.zcu.?) catch |err| switch (err) {
+            else => |e| return e,
+            error.WriteFailed => return dlh_nw.err.?,
+        };
+    };
 }
 
 fn prepareDynamic(elf: *Elf) Error!void {
@@ -7952,6 +8020,10 @@ fn addNodeRelocAssumeCapacity(
         .unit_frame_cie => |ui| &elf.dwarf_units.items[@backingInt(ui)].frame_cie_first_target_reloc,
         .unit_debug_info_header => |ui| &elf.dwarf_units.items[@backingInt(ui)].debug_info_header_first_target_reloc,
         .unit_debug_line_header => |ui| &elf.dwarf_units.items[@backingInt(ui)].debug_line_header_first_target_reloc,
+        .unit_debug_rnglists => |ui| &elf.dwarf_units.items[@backingInt(ui)].debug_rnglists_first_target_reloc,
+        .value_debug_info => |vi| &elf.dwarf_values.items[@backingInt(vi)].debug_info_first_target_reloc,
+        .global_debug_info => |gi| &elf.dwarf_globals.items[@backingInt(gi)].debug_info_first_target_reloc,
+        .func_debug_info => |fi| &elf.dwarf_funcs.items[@backingInt(fi)].debug_info_first_target_reloc,
     };
     const next = first_target_reloc.*;
     const ri: NodeReloc.Index = @fromBackingInt(@intCast(elf.node_relocs.items.len));
@@ -8052,6 +8124,7 @@ fn addGotRelocAssumeCapacity(
         .unit_debug_info_header,
         .unit_debug_line,
         .unit_debug_line_header,
+        .unit_debug_rnglists,
         .value_debug_info,
         .global_debug_info,
         .func_frame_fde,
@@ -8331,10 +8404,12 @@ fn maybeAddCopyRelocation(elf: *Elf, global_name: String(.strtab)) Error!bool {
 }
 
 pub fn updateNav(elf: *Elf, pt: Zcu.PerThread, nav_index: InternPool.Nav.Index) link.Error!void {
-    const diags = &elf.base.comp.link_diags;
     elf.updateNavInner(pt, nav_index) catch |err| switch (err) {
-        error.MappedFileIo => return diags.fail("failed to write output file: {t}", .{elf.mf.io_err.?}),
         else => |e| return e,
+        error.MappedFileIo => return elf.base.comp.link_diags.fail(
+            "failed to write output file: {t}",
+            .{elf.mf.io_err.?},
+        ),
     };
 }
 fn updateNavInner(elf: *Elf, pt: Zcu.PerThread, nav_index: InternPool.Nav.Index) Error!void {
@@ -8365,8 +8440,8 @@ fn updateNavInner(elf: *Elf, pt: Zcu.PerThread, nav_index: InternPool.Nav.Index)
             &nw.interface,
             .{ .atom_index = Node.toAtom(ni) },
         ) catch |err| switch (err) {
-            error.WriteFailed => return nw.err.?,
             else => |e| return e,
+            error.WriteFailed => return nw.err.?,
         };
         switch (elf.symPtr(nmi.symbol(elf).index())) {
             inline else => |sym| elf.targetStore(&sym.size, @intCast(nw.interface.end)),
@@ -8383,10 +8458,12 @@ pub fn updateFunc(
     func_index: InternPool.Index,
     mir: *const codegen.AnyMir,
 ) link.Error!void {
-    const diags = &elf.base.comp.link_diags;
     elf.updateFuncInner(pt, func_index, mir) catch |err| switch (err) {
-        error.MappedFileIo => return diags.fail("failed to write output file: {t}", .{elf.mf.io_err.?}),
         else => |e| return e,
+        error.MappedFileIo => return elf.base.comp.link_diags.fail(
+            "failed to write output file: {t}",
+            .{elf.mf.io_err.?},
+        ),
     };
 }
 fn updateFuncInner(
@@ -8403,7 +8480,8 @@ fn updateFuncInner(
 
     const nmi = try elf.navMapIndex(zcu, func.owner_nav);
     log.debug("updateFunc({f}) = {d}", .{ nav.fqn.fmt(ip), nmi.symbol(elf) });
-    const ni = nmi.symbol(elf).index().ptr(elf).node.unwrap().?;
+    const lsi = nmi.symbol(elf);
+    const ni = lsi.index().ptr(elf).node.unwrap().?;
 
     // Ensure the NAV is marked as moved so that once we're done, `flushMoved` will eventually be
     // called to apply the NAV's new relocations.
@@ -8421,7 +8499,7 @@ fn updateFuncInner(
             if (mod.strip and mod.unwind_tables == .none) break :debug_output .{ .none, undefined };
 
             try elf.nodes.ensureUnusedCapacity(gpa, 5);
-            const dwarf_func_index = try dwarf.getFunc(func.owner_nav);
+            const dwarf_fi = try dwarf.getFunc(func.owner_nav);
             try elf.dwarf_funcs.appendNTimes(gpa, .{
                 .frame_fde_first_symbol_reloc = .none,
                 .frame_fde_first_node_reloc = .none,
@@ -8430,14 +8508,14 @@ fn updateFuncInner(
                 .debug_info_first_node_reloc = .none,
                 .debug_line_first_symbol_reloc = .none,
                 .debug_line_first_node_reloc = .none,
-            }, @backingInt(dwarf_func_index) + 1 -| elf.dwarf_funcs.items.len);
+            }, @backingInt(dwarf_fi) + 1 -| elf.dwarf_funcs.items.len);
 
             const wip_nav = &debug_output_buf.wip_nav;
             wip_nav.* = .{
                 .dwarf = dwarf,
                 .unit = dwarf.getUnit(mod),
-                .func = dwarf_func_index,
-                .func_si = Symbol.Id.local(nmi.symbol(elf)).toTypeErased(),
+                .func = dwarf_fi,
+                .func_si = Symbol.Id.local(lsi).toTypeErased(),
                 .cfi = .{
                     .loc = 0,
                     .cfa = dwarf.frame.header.initial_instructions[0].def_cfa,
@@ -8462,7 +8540,6 @@ fn updateFuncInner(
                     .eh_frame => elf.shndx.eh_frame,
                 }.get(elf).ni.addFloatingChild(&elf.mf, gpa, .{
                     .alignment = frame_align.max(elf.mf.flags.block_size),
-                    .next_moved = true,
                     .enable_next_moved = true,
                 });
                 unit.frame_ni = .wrap(frame_ni);
@@ -8487,7 +8564,7 @@ fn updateFuncInner(
                     error.WriteFailed => return cie_nw.err.?,
                 };
             };
-            const dwarf_func = dwarf_func_index.get(dwarf);
+            const dwarf_func = dwarf_fi.get(dwarf);
             const fde_ni = if (dwarf_func.fde_ni.unwrap()) |fde_ni| fde_ni: {
                 try fde_ni.moved(gpa, &elf.mf);
                 try fde_ni.nextMoved(gpa, &elf.mf);
@@ -8510,24 +8587,34 @@ fn updateFuncInner(
             debug.pt = pt;
             debug.any_children = false;
             debug.blocks = .empty;
-            const debug_info_ni = dwarf_func.debug_info_ni.unwrap() orelse debug_info_ni: {
+            const debug_info_ni = if (dwarf_func.debug_info_ni.unwrap()) |debug_info_ni| debug_info_ni: {
+                try debug_info_ni.moved(gpa, &elf.mf);
+                try debug_info_ni.nextMoved(gpa, &elf.mf);
+                break :debug_info_ni debug_info_ni;
+            } else debug_info_ni: {
                 const debug_info_ni =
                     try unit.debug_info_ni.unwrap().?.addFloatingChild(&elf.mf, gpa, .{
+                        .moved = true,
                         .next_moved = true,
                         .enable_next_moved = true,
                     });
                 dwarf_func.debug_info_ni = .wrap(debug_info_ni);
-                elf.nodes.appendAssumeCapacity(.{ .func_debug_info = dwarf_func_index });
+                elf.nodes.appendAssumeCapacity(.{ .func_debug_info = dwarf_fi });
                 break :debug_info_ni debug_info_ni;
             };
             debug_info_ni.writer(&elf.mf, gpa, &debug.info_writer);
-            const debug_line_ni = dwarf_func.debug_line_ni.unwrap() orelse debug_line_ni: {
+            const debug_line_ni = if (dwarf_func.debug_line_ni.unwrap()) |debug_line_ni| debug_line_ni: {
+                try debug_line_ni.moved(gpa, &elf.mf);
+                try debug_line_ni.nextMoved(gpa, &elf.mf);
+                break :debug_line_ni debug_line_ni;
+            } else debug_line_ni: {
                 const debug_line_ni =
                     try unit.debug_line_ni.unwrap().?.addFloatingChild(&elf.mf, gpa, .{
+                        .moved = true,
                         .next_moved = true,
                         .enable_next_moved = true,
                     });
-                elf.nodes.appendAssumeCapacity(.{ .func_debug_line = dwarf_func_index });
+                elf.nodes.appendAssumeCapacity(.{ .func_debug_line = dwarf_fi });
                 break :debug_line_ni debug_line_ni;
             };
             debug_line_ni.writer(&elf.mf, gpa, &debug.line_writer);
@@ -8549,7 +8636,8 @@ fn updateFuncInner(
                 elf.resetNodeRelocs(dwarf_func.fde_ni.unwrap().?);
                 try debug.wip_nav.genDebugFrameHeader();
                 elf.resetNodeRelocs(dwarf_func.debug_info_ni.unwrap().?);
-                try debug.startDebugInfo();
+                elf.resetNodeRelocs(dwarf_func.debug_line_ni.unwrap().?);
+                try debug.startFunc();
             },
             .none => {},
         }
@@ -8563,10 +8651,8 @@ fn updateFuncInner(
             &nw.interface,
             debug_output,
         ) catch |err| switch (err) {
-            error.WriteFailed => {
-                if (nw.err) |e| return e;
-            },
             else => |e| return e,
+            error.WriteFailed => if (nw.err) |e| return e,
         };
         const func_length = nw.interface.end;
         switch (elf.symPtr(nmi.symbol(elf).index())) {
@@ -8591,18 +8677,43 @@ fn updateFuncInner(
                 }
             },
             .dwarf2 => |debug| {
-                try debug.finishFunc();
-                for ([2]Section.Index{
+                try debug.finishFunc(func_length);
+                for ([3]Section.Index{
                     elf.shndx.debug_info,
                     elf.shndx.debug_line,
+                    elf.shndx.debug_rnglists,
                 }) |debug_shndx| try debug_shndx.get(elf).ni.trimStart(&elf.mf, gpa);
+                const unit = debug.wip_nav.unit.get(debug.wip_nav.dwarf);
                 {
-                    const debug_info_ni =
-                        debug.wip_nav.unit.get(debug.wip_nav.dwarf).debug_info_ni.unwrap().?;
+                    const debug_info_ni = unit.debug_info_ni.unwrap().?;
                     const last_offset, const last_size =
                         debug_info_ni.last(&elf.mf).unwrap().?.location(&elf.mf).resolve(&elf.mf);
                     try debug_info_ni.ensureMinimumSize(&elf.mf, gpa, last_offset + last_size +
                         comptime Dwarf.uleb128Bytes(@backingInt(Dwarf.AbbrevCode.null)) * 2);
+                }
+                {
+                    var dr_nw: MappedFile.Node.Writer = undefined;
+                    unit.debug_rnglists_ni.unwrap().?.writer(&elf.mf, gpa, &dr_nw);
+                    defer dr_nw.deinit();
+                    const first_symbol_reloc = elf.symbol_relocs.items.len;
+                    debug.wip_nav.dwarf.genDebugRnglists(
+                        unit,
+                        &dr_nw,
+                        debug.wip_nav.func_si,
+                        func_length,
+                    ) catch |err| switch (err) {
+                        else => |e| return e,
+                        error.WriteFailed => return dr_nw.err.?,
+                    };
+                    const symbol_relocs = &elf.dwarf_units.items[@backingInt(debug.wip_nav.unit)]
+                        .debug_rnglists_symbol_relocs;
+                    try symbol_relocs.ensureUnusedCapacity(gpa, elf.symbol_relocs.items.len -
+                        first_symbol_reloc);
+                    for (first_symbol_reloc..elf.symbol_relocs.items.len) |symbol_ri|
+                        symbol_relocs.putAssumeCapacityNoClobber(
+                            @fromBackingInt(@intCast(symbol_ri)),
+                            {},
+                        );
                 }
                 continue :debug_output .{ .eh_frame = &debug.wip_nav };
             },
@@ -8615,13 +8726,15 @@ fn updateFuncInner(
 }
 
 pub fn updateErrorData(elf: *Elf, pt: Zcu.PerThread) link.Error!void {
-    const diags = &elf.base.comp.link_diags;
     elf.genLazy(pt, .{
         .kind = .const_data,
         .index = @intCast(elf.lazy.getPtr(.const_data).map.getIndex(.anyerror_type) orelse return),
     }) catch |err| switch (err) {
-        error.MappedFileIo => return diags.fail("failed to write output file: {t}", .{elf.mf.io_err.?}),
         else => |e| return e,
+        error.MappedFileIo => return elf.base.comp.link_diags.fail(
+            "failed to write output file: {t}",
+            .{elf.mf.io_err.?},
+        ),
     };
 }
 
@@ -8632,8 +8745,11 @@ pub fn flush(
     prog_node: std.Progress.Node,
 ) link.Error!void {
     elf.flushInner(arena, tid, prog_node) catch |err| switch (err) {
-        error.MappedFileIo => return elf.base.comp.link_diags.fail("failed to write output file: {t}", .{elf.mf.io_err.?}),
         else => |e| return e,
+        error.MappedFileIo => return elf.base.comp.link_diags.fail(
+            "failed to write output file: {t}",
+            .{elf.mf.io_err.?},
+        ),
     };
 }
 fn flushInner(
@@ -8648,6 +8764,8 @@ fn flushInner(
 
     const sub_prog_node = prog_node.start("ELF Flush", 0);
     defer sub_prog_node.end();
+
+    try elf.flushFiles();
 
     if (comp.config.output_mode == .Exe) {
         var any_undef = false;
@@ -8714,7 +8832,7 @@ fn flushInner(
 
     if (elf.options.enable_link_snapshots)
         elf.dumpStderr(tid) catch |err|
-            return comp.link_diags.fail("dumping link snapshot failed: {t}", .{err});
+            return diags.fail("dumping link snapshot failed: {t}", .{err});
 }
 
 pub fn idle(elf: *Elf, tid: Zcu.PerThread.Id) link.Error!bool {
@@ -8737,8 +8855,8 @@ pub fn idle(elf: *Elf, tid: Zcu.PerThread.Id) link.Error!bool {
             const sub_prog_node = elf.idleProgNode(tid, elf.input_prog_node, elf.getNode(ii.node(elf)));
             defer sub_prog_node.end();
             elf.flushInput(ii) catch |err| switch (err) {
-                error.MappedFileIo => return diags.fail("failed to write output file: {t}", .{elf.mf.io_err.?}),
                 else => |e| return e,
+                error.MappedFileIo => return diags.fail("failed to write output file: {t}", .{elf.mf.io_err.?}),
             };
             break :task;
         }
@@ -8748,8 +8866,8 @@ pub fn idle(elf: *Elf, tid: Zcu.PerThread.Id) link.Error!bool {
             const sub_prog_node = elf.idleProgNode(tid, elf.input_prog_node, elf.getNode(isi.node(elf)));
             defer sub_prog_node.end();
             elf.flushInputSection(isi) catch |err| switch (err) {
-                error.MappedFileIo => return diags.fail("failed to write output file: {t}", .{elf.mf.io_err.?}),
                 else => |e| return e,
+                error.MappedFileIo => return diags.fail("failed to write output file: {t}", .{elf.mf.io_err.?}),
             };
             break :task;
         }
@@ -8907,11 +9025,12 @@ fn idleProgNode(
         .unit_debug_info_header,
         .unit_debug_line,
         .unit_debug_line_header,
+        .unit_debug_rnglists,
         => |ui, tag| std.mem.print(&name, "{s} info for {s}", .{
             switch (tag) {
                 else => unreachable,
                 .unit_frame, .unit_frame_cie => "unwind",
-                .unit_debug_info, .unit_debug_info_header => "debug",
+                .unit_debug_info, .unit_debug_info_header, .unit_debug_rnglists => "debug",
                 .unit_debug_line, .unit_debug_line_header => "line",
             },
             ui.mod(&elf.dwarf).fully_qualified_name,
@@ -8996,8 +9115,8 @@ fn genUav(
         &nw.interface,
         .{ .atom_index = Node.toAtom(ni) },
     ) catch |err| switch (err) {
-        error.WriteFailed => return nw.err.?,
         else => |e| return e,
+        error.WriteFailed => return nw.err.?,
     };
     switch (elf.symPtr(umi.symbol(elf).index())) {
         inline else => |sym| elf.targetStore(&sym.size, @intCast(nw.interface.end)),
@@ -9032,8 +9151,8 @@ fn genLazy(elf: *Elf, pt: Zcu.PerThread, lmr: Node.LazyMapRef) Error!void {
         .none,
         .{ .atom_index = Node.toAtom(ni) },
     ) catch |err| switch (err) {
-        error.WriteFailed => return nw.err.?,
         else => |e| return e,
+        error.WriteFailed => return nw.err.?,
     };
     switch (elf.symPtr(lmr.symbol(elf).index())) {
         inline else => |sym| elf.targetStore(&sym.size, @intCast(nw.interface.end)),
@@ -9241,14 +9360,18 @@ fn flushMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void
                     reloc.apply(elf);
                 }
             } else if (shndx == elf.shndx.plt) {
-                elf.flushMovedNodeRelocs(ni, addr, elf.plt_first_symbol_reloc, .none, .none);
+                elf.flushMovedNodeRelocs(ni, addr, .{
+                    .first_symbol_reloc = elf.plt_first_symbol_reloc,
+                });
                 elf.flushMovedPltSection(.plt, old_addr, addr);
             } else if (shndx == elf.shndx.got_plt) {
                 elf.flushMovedPltSection(.got_plt, old_addr, addr);
             } else if (shndx == elf.shndx.plt_sec) {
                 elf.flushMovedPltSection(.plt_sec, old_addr, addr);
             } else if (shndx == elf.shndx.eh_frame_hdr) {
-                elf.flushMovedNodeRelocs(ni, addr, elf.eh_frame_hdr_first_symbol_reloc, .none, .none);
+                elf.flushMovedNodeRelocs(ni, addr, .{
+                    .first_symbol_reloc = elf.eh_frame_hdr_first_symbol_reloc,
+                });
             }
         },
         .input_section => |isi| {
@@ -9295,13 +9418,10 @@ fn flushMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void
                 }
             }
 
-            elf.flushMovedNodeRelocs(
-                ni,
-                new_section_addr,
-                isi.ptrConst(elf).first_symbol_reloc,
-                .none,
-                isi.ptrConst(elf).first_got_reloc,
-            );
+            elf.flushMovedNodeRelocs(ni, new_section_addr, .{
+                .first_symbol_reloc = isi.ptrConst(elf).first_symbol_reloc,
+                .first_got_reloc = isi.ptrConst(elf).first_got_reloc,
+            });
         },
         .copied_global => |global_name| {
             const copied_global = elf.copied_globals.getPtr(global_name) orelse {
@@ -9327,13 +9447,10 @@ fn flushMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void
                     name = elf.globalByName(name).?.next_in_node;
                 }
             }
-            elf.flushMovedNodeRelocs(
-                ni,
-                new_addr,
-                mi.firstSymbolReloc(elf),
-                .none,
-                mi.firstGotReloc(elf),
-            );
+            elf.flushMovedNodeRelocs(ni, new_addr, .{
+                .first_symbol_reloc = mi.firstSymbolReloc(elf),
+                .first_got_reloc = mi.firstGotReloc(elf),
+            });
         },
         .debug_shared => |ss| {
             var target_ri = elf.dwarf_shared.getPtr(ss).first_target_reloc;
@@ -9364,13 +9481,9 @@ fn flushMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void
                 target_reloc.apply(elf);
                 target_ri = target_reloc.next;
             }
-            elf.flushMovedNodeRelocs(
-                ni,
-                elf.computeNodeVAddr(ni),
-                .none,
-                dwarf_unit.debug_info_header_first_node_reloc,
-                .none,
-            );
+            elf.flushMovedNodeRelocs(ni, elf.computeNodeVAddr(ni), .{
+                .first_node_reloc = dwarf_unit.debug_info_header_first_node_reloc,
+            });
         },
         .unit_debug_line_header => |ui| {
             const dwarf_unit = &elf.dwarf_units.items[@backingInt(ui)];
@@ -9381,13 +9494,32 @@ fn flushMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void
                 target_reloc.apply(elf);
                 target_ri = target_reloc.next;
             }
-            elf.flushMovedNodeRelocs(
-                ni,
-                elf.computeNodeVAddr(ni),
-                .none,
-                dwarf_unit.debug_line_header_first_node_reloc,
-                .none,
-            );
+            elf.flushMovedNodeRelocs(ni, elf.computeNodeVAddr(ni), .{
+                .first_node_reloc = dwarf_unit.debug_line_header_first_node_reloc,
+            });
+        },
+        .unit_debug_rnglists => |ui| {
+            const dwarf_unit = &elf.dwarf_units.items[@backingInt(ui)];
+            var target_ri = dwarf_unit.debug_rnglists_first_target_reloc;
+            while (target_ri != .none) {
+                const target_reloc = target_ri.get(elf);
+                assert(target_reloc.target == ni);
+                target_reloc.apply(elf);
+                target_ri = target_reloc.next;
+            }
+            const node_vaddr = elf.computeNodeVAddr(ni);
+            for (dwarf_unit.debug_rnglists_symbol_relocs.keys()) |symbol_ri| {
+                const symbol_reloc = symbol_ri.get(elf);
+                assert(symbol_reloc.node == ni);
+                if (symbol_reloc.rela_index.unwrap()) |rela_index| {
+                    // The node has moved, so the offset of the relocation within the section might have
+                    // changed, so update the `offset` field of the `ElfN.Rela` entry.
+                    symbol_reloc.relaSection(elf).relaSetOffset(elf, rela_index, node_vaddr + symbol_reloc.offset);
+                }
+                if (elf.ehdrType() != .REL) {
+                    symbol_reloc.apply(elf);
+                }
+            }
         },
         .value_debug_info => |vi| {
             const dwarf_value = &elf.dwarf_values.items[@backingInt(vi)];
@@ -9398,13 +9530,10 @@ fn flushMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void
                 target_reloc.apply(elf);
                 target_ri = target_reloc.next;
             }
-            elf.flushMovedNodeRelocs(
-                ni,
-                elf.computeNodeVAddr(ni),
-                dwarf_value.debug_info_first_symbol_reloc,
-                dwarf_value.debug_info_first_node_reloc,
-                .none,
-            );
+            elf.flushMovedNodeRelocs(ni, elf.computeNodeVAddr(ni), .{
+                .first_symbol_reloc = dwarf_value.debug_info_first_symbol_reloc,
+                .first_node_reloc = dwarf_value.debug_info_first_node_reloc,
+            });
         },
         .global_debug_info => |vi| {
             const dwarf_global = &elf.dwarf_globals.items[@backingInt(vi)];
@@ -9415,13 +9544,10 @@ fn flushMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void
                 target_reloc.apply(elf);
                 target_ri = target_reloc.next;
             }
-            elf.flushMovedNodeRelocs(
-                ni,
-                elf.computeNodeVAddr(ni),
-                dwarf_global.debug_info_first_symbol_reloc,
-                dwarf_global.debug_info_first_node_reloc,
-                .none,
-            );
+            elf.flushMovedNodeRelocs(ni, elf.computeNodeVAddr(ni), .{
+                .first_symbol_reloc = dwarf_global.debug_info_first_symbol_reloc,
+                .first_node_reloc = dwarf_global.debug_info_first_node_reloc,
+            });
         },
         .func_frame_fde => |fi| {
             const dwarf_func = &elf.dwarf_funcs.items[@backingInt(fi)];
@@ -9433,13 +9559,10 @@ fn flushMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void
                     elf.dwarf.updateEhFrameFde(ni.slice(&elf.mf), offset);
                 },
             }
-            elf.flushMovedNodeRelocs(
-                ni,
-                elf.computeNodeVAddr(ni),
-                dwarf_func.frame_fde_first_symbol_reloc,
-                dwarf_func.frame_fde_first_node_reloc,
-                .none,
-            );
+            elf.flushMovedNodeRelocs(ni, elf.computeNodeVAddr(ni), .{
+                .first_symbol_reloc = dwarf_func.frame_fde_first_symbol_reloc,
+                .first_node_reloc = dwarf_func.frame_fde_first_node_reloc,
+            });
         },
         .func_debug_info => |fi| {
             const dwarf_func = &elf.dwarf_funcs.items[@backingInt(fi)];
@@ -9450,23 +9573,19 @@ fn flushMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void
                 target_reloc.apply(elf);
                 target_ri = target_reloc.next;
             }
-            elf.flushMovedNodeRelocs(
-                ni,
-                elf.computeNodeVAddr(ni),
-                dwarf_func.debug_info_first_symbol_reloc,
-                dwarf_func.debug_info_first_node_reloc,
-                .none,
-            );
+            elf.flushMovedNodeRelocs(ni, elf.computeNodeVAddr(ni), .{
+                .ignore_node = fi.get(&elf.dwarf).debug_line_ni,
+                .first_symbol_reloc = dwarf_func.debug_info_first_symbol_reloc,
+                .first_node_reloc = dwarf_func.debug_info_first_node_reloc,
+            });
         },
         .func_debug_line => |fi| {
             const dwarf_func = &elf.dwarf_funcs.items[@backingInt(fi)];
-            elf.flushMovedNodeRelocs(
-                ni,
-                elf.computeNodeVAddr(ni),
-                dwarf_func.debug_line_first_symbol_reloc,
-                dwarf_func.debug_line_first_node_reloc,
-                .none,
-            );
+            elf.flushMovedNodeRelocs(ni, elf.computeNodeVAddr(ni), .{
+                .ignore_node = fi.get(&elf.dwarf).debug_info_ni,
+                .first_symbol_reloc = dwarf_func.debug_line_first_symbol_reloc,
+                .first_node_reloc = dwarf_func.debug_line_first_node_reloc,
+            });
         },
     }
     try ni.childrenMoved(elf.base.comp.gpa, &elf.mf);
@@ -9712,6 +9831,7 @@ fn flushResized(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!vo
         .unit_debug_info_header,
         .unit_debug_line,
         .unit_debug_line_header,
+        .unit_debug_rnglists,
         .value_debug_info,
         .global_debug_info,
         .func_frame_fde,
@@ -9774,6 +9894,7 @@ fn flushNextMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!
         .unit_frame_cie,
         .unit_debug_info_header,
         .unit_debug_line_header,
+        .unit_debug_rnglists,
         .value_debug_info,
         .global_debug_info,
         .func_frame_fde,
@@ -9788,15 +9909,15 @@ fn flushNextMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!
                 break :slice parent_slice[@intCast(offset)..@intCast(next_offset)];
             } else slice: switch (tag) {
                 else => unreachable,
-                .unit_padding => {
-                    const frame_slice = parent_ni.slicePadding(&elf.mf);
+                .unit_padding, .unit_debug_rnglists => {
+                    const parent_slice = parent_ni.slicePadding(&elf.mf);
                     switch (elf.getNode(parent_ni).section.debugFrameFormat(elf) orelse .debug_frame) {
                         .eh_frame => {
-                            const end = frame_slice.len - 4;
-                            std.mem.writeInt(u32, frame_slice[end..][0..4], 0, elf.dwarf.endian);
-                            break :slice frame_slice[@intCast(offset)..end];
+                            const end = parent_slice.len - 4;
+                            std.mem.writeInt(u32, parent_slice[end..][0..4], 0, elf.dwarf.endian);
+                            break :slice parent_slice[@intCast(offset)..end];
                         },
-                        .debug_frame => break :slice frame_slice[@intCast(offset)..],
+                        .debug_frame => break :slice parent_slice[@intCast(offset)..],
                     }
                 },
                 .unit_frame_cie, .func_frame_fde => {
@@ -9840,36 +9961,64 @@ fn flushNextMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!
                         break :debug_end @intCast(parent_next_offset);
                     } else debug_slice.len]);
                     fw.end = @intCast(offset + size);
-                    for (0..2) |_| fw.writeUleb128(@backingInt(Dwarf.AbbrevCode.null)) catch
-                        unreachable; // ensured by `updateFunc`
-                    elf.dwarf.updateUnitLength(fw.buffer, fw.end);
+                    switch (tag) {
+                        else => unreachable,
+                        .unit_debug_info_header,
+                        .value_debug_info,
+                        .global_debug_info,
+                        .func_debug_info,
+                        => for (0..2) |_| fw.writeUleb128(@backingInt(Dwarf.AbbrevCode.null)) catch unreachable,
+                        .unit_debug_line_header, .func_debug_line => {},
+                    }
+                    const unit_padding_offset = fw.end;
                     const unit_padding = fw.unusedCapacitySlice();
                     elf.dwarf.genUnitPadding(&fw) catch |err| switch (err) {
                         error.WriteFailed => {
-                            comptime assert(Dwarf.uleb128Bytes(@backingInt(Dwarf.AbbrevCode.null)) == 1);
-                            @memset(fw.buffer, @backingInt(Dwarf.AbbrevCode.null));
+                            fw.end = unit_padding_offset;
+                            elf.dwarf.updateUnitLength(fw.buffer, fw.buffer.len);
+                            switch (tag) {
+                                else => unreachable,
+                                .unit_debug_info_header, .value_debug_info, .global_debug_info, .func_debug_info => {
+                                    comptime assert(Dwarf.uleb128Bytes(@backingInt(Dwarf.AbbrevCode.null)) == 1);
+                                    @memset(fw.unusedCapacitySlice(), @backingInt(Dwarf.AbbrevCode.null));
+                                },
+                                .unit_debug_line_header, .func_debug_line => Dwarf.genDebugLinePadding(&fw, fw.unusedCapacityLen()) catch
+                                    unreachable,
+                            }
+                            return;
                         },
                     };
+                    elf.dwarf.updateUnitLength(fw.buffer, unit_padding_offset);
                     elf.dwarf.updateUnitLength(unit_padding, unit_padding.len);
                     return;
                 },
             };
+            var fw: Io.Writer = .fixed(slice[@intCast(size)..]);
             switch (tag) {
                 else => unreachable,
                 .unit_padding => elf.dwarf.updateUnitLength(slice, slice.len),
                 .unit_frame_cie, .func_frame_fde => {
                     elf.dwarf.updateUnitLength(slice, slice.len);
-                    @memset(slice[@intCast(size)..], std.dwarf.CFA.nop);
+                    @memset(fw.buffer, std.dwarf.CFA.nop);
                 },
                 .unit_debug_info_header,
-                .unit_debug_line_header,
                 .value_debug_info,
                 .global_debug_info,
                 .func_debug_info,
+                => elf.dwarf.genDebugInfoPadding(&fw, fw.buffer.len) catch unreachable,
+                .unit_debug_line_header,
                 .func_debug_line,
-                => {
-                    var fw: Io.Writer = .fixed(slice[@intCast(size)..]);
-                    elf.dwarf.genDebugInfoPadding(&fw, fw.unusedCapacityLen()) catch unreachable;
+                => Dwarf.genDebugLinePadding(&fw, fw.buffer.len) catch unreachable,
+                .unit_debug_rnglists => {
+                    elf.dwarf.genUnitPadding(&fw) catch |err| switch (err) {
+                        error.WriteFailed => {
+                            elf.dwarf.updateUnitLength(slice, slice.len);
+                            @memset(fw.buffer, std.dwarf.RLE.end_of_list);
+                            return;
+                        },
+                    };
+                    elf.dwarf.updateUnitLength(slice, size);
+                    elf.dwarf.updateUnitLength(fw.buffer, fw.buffer.len);
                 },
             }
         },
@@ -10229,11 +10378,10 @@ pub fn updateExports(
     pt: Zcu.PerThread,
     export_indices: []const Zcu.Export.Index,
 ) link.Error!void {
-    const diags = &elf.base.comp.link_diags;
     for (export_indices) |export_index| {
         elf.updateExportInner(pt, export_index) catch |err| switch (err) {
             else => |e| return e,
-            error.MappedFileIo => return diags.fail("failed to write output file: {t}", .{elf.mf.io_err.?}),
+            error.MappedFileIo => return elf.base.comp.link_diags.fail("failed to write output file: {t}", .{elf.mf.io_err.?}),
         };
     }
 }
@@ -10377,7 +10525,7 @@ pub fn printNode(
             const ip = &zcu.intern_pool;
             const nav = ip.getNav(nmi.navIndex(elf));
             try w.print("({f}, {f})", .{
-                Type.fromInterned(ip.typeOf(nav.resolved.?.value)).fmt(.{ .zcu = zcu, .tid = tid }),
+                Type.fromInterned(nav.resolved.?.type).fmt(.{ .zcu = zcu, .tid = tid }),
                 nav.fqn.fmt(ip),
             });
         },
@@ -10402,9 +10550,8 @@ pub fn printNode(
         .unit_debug_info_header,
         .unit_debug_line,
         .unit_debug_line_header,
-        => |ui| try w.print("({s})", .{
-            ui.mod(&elf.dwarf).fully_qualified_name,
-        }),
+        .unit_debug_rnglists,
+        => |ui| try w.print("({s})", .{ui.mod(&elf.dwarf).fully_qualified_name}),
         .value_debug_info => |cpi| try w.print("({f})", .{
             Value.fromInterned(cpi.val(&elf.dwarf.const_pool))
                 .fmtValue(.{ .zcu = elf.base.comp.zcu.?, .tid = tid }),
@@ -10414,7 +10561,7 @@ pub fn printNode(
             const ip = &zcu.intern_pool;
             const nav = ip.getNav(gi.nav(&elf.dwarf));
             try w.print("({f}, {f})", .{
-                Type.fromInterned(ip.typeOf(nav.resolved.?.value)).fmt(.{ .zcu = zcu, .tid = tid }),
+                Type.fromInterned(nav.resolved.?.type).fmt(.{ .zcu = zcu, .tid = tid }),
                 nav.fqn.fmt(ip),
             });
         },
@@ -10423,7 +10570,7 @@ pub fn printNode(
             const ip = &zcu.intern_pool;
             const nav = ip.getNav(fi.nav(&elf.dwarf));
             try w.print("({f}, {f})", .{
-                Type.fromInterned(ip.typeOf(nav.resolved.?.value)).fmt(.{ .zcu = zcu, .tid = tid }),
+                Type.fromInterned(nav.resolved.?.type).fmt(.{ .zcu = zcu, .tid = tid }),
                 nav.fqn.fmt(ip),
             });
         },

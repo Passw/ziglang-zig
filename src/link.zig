@@ -805,20 +805,20 @@ pub const File = struct {
     /// * `updateLineNumber`
     ///
     /// Asserts that the ZCU is not using the LLVM backend.
-    fn zcuFilesReady(base: *File) Error!void {
-        assert(base.comp.zcu.?.llvm_object == null);
+    fn zcuFilesReady(base: *File, zcu: *Zcu) Error!void {
+        assert(zcu.llvm_object == null);
         switch (base.tag) {
             else => {},
             inline .elf2 => |tag| {
                 dev.check(tag.devFeature());
-                return @as(*tag.Type(), @fieldParentPtr("base", base)).zcuFilesReady();
+                return @as(*tag.Type(), @fieldParentPtr("base", base)).zcuFilesReady(zcu);
             },
         }
     }
 
     /// Asserts that the ZCU is not using the LLVM backend.
     fn updateNav(base: *File, pt: Zcu.PerThread, nav_index: InternPool.Nav.Index) Error!void {
-        assert(base.comp.zcu.?.llvm_object == null);
+        assert(pt.zcu.llvm_object == null);
         const nav = pt.zcu.intern_pool.getNav(nav_index);
         assert(nav.resolved.?.value != .none);
 
@@ -834,7 +834,7 @@ pub const File = struct {
 
     /// Never called when LLVM is codegenning the ZCU.
     fn updateContainerType(base: *File, pt: Zcu.PerThread, ty: InternPool.Index, success: bool) Error!void {
-        assert(base.comp.zcu.?.llvm_object == null);
+        assert(pt.zcu.llvm_object == null);
         switch (base.tag) {
             .lld => unreachable,
             else => {},
@@ -856,7 +856,7 @@ pub const File = struct {
         /// take ownership of an embedded slice and replace it with `&.{}` in `mir`.
         mir: *codegen.AnyMir,
     ) Error!void {
-        assert(base.comp.zcu.?.llvm_object == null);
+        assert(pt.zcu.llvm_object == null);
         switch (base.tag) {
             .lld => unreachable,
             .plan9 => unreachable,
@@ -871,7 +871,7 @@ pub const File = struct {
     /// its line number has changed. The ZIR instruction `ti_id` has tag `.declaration`.
     /// Never called when LLVM is codegenning the ZCU.
     fn updateLineNumber(base: *File, pt: Zcu.PerThread, ti_id: InternPool.TrackedInst.Index) Error!void {
-        assert(base.comp.zcu.?.llvm_object == null);
+        assert(pt.zcu.llvm_object == null);
         {
             const ti = ti_id.resolveFull(&pt.zcu.intern_pool).?;
             const file = pt.zcu.fileByIndex(ti.file);
@@ -996,7 +996,7 @@ pub const File = struct {
         pt: Zcu.PerThread,
         export_indices: []const Zcu.Export.Index,
     ) Error!void {
-        assert(base.comp.zcu.?.llvm_object == null);
+        assert(pt.zcu.llvm_object == null);
 
         crash_report.LinkerOp.start(base, pt.tid);
         defer crash_report.LinkerOp.stop(base, pt.tid);
@@ -1031,7 +1031,7 @@ pub const File = struct {
     /// the block/atom.
     /// Never called when LLVM is codegenning the ZCU.
     pub fn getNavVAddr(base: *File, pt: Zcu.PerThread, nav_index: InternPool.Nav.Index, reloc_info: RelocInfo) Error!u64 {
-        assert(base.comp.zcu.?.llvm_object == null);
+        assert(pt.zcu.llvm_object == null);
 
         switch (base.tag) {
             .lld => unreachable,
@@ -1054,7 +1054,7 @@ pub const File = struct {
         decl_val: InternPool.Index,
         decl_align: InternPool.Alignment,
     ) Error!SymbolId {
-        assert(base.comp.zcu.?.llvm_object == null);
+        assert(pt.zcu.llvm_object == null);
 
         switch (base.tag) {
             .lld => unreachable,
@@ -1635,7 +1635,7 @@ pub fn doZcuTask(comp: *Compilation, tid: Zcu.PerThread.Id, task: ZcuTask) void 
         .files_ready => {
             if (zcu.llvm_object != null) return;
             const lf = comp.bin_file orelse return;
-            lf.zcuFilesReady() catch |err| switch (err) {
+            lf.zcuFilesReady(zcu) catch |err| switch (err) {
                 error.Canceled => io.recancel(),
                 error.AlreadyReported => return,
                 error.OutOfMemory => return diags.setAllocFailure(),
