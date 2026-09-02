@@ -27,15 +27,15 @@ pub const Unit = struct {
     alive: bool,
     dirs: std.array_hash_map.Auto(Unit.Index, void),
     files: std.array_hash_map.Auto(Zcu.File.Index, void),
-    frame_ni: MappedFile.Node.Index.Optional,
-    cie_ni: MappedFile.Node.Index.Optional,
-    debug_info_ni: MappedFile.Node.Index.Optional,
-    debug_info_header_ni: MappedFile.Node.Index.Optional,
-    debug_info_footer_ni: MappedFile.Node.Index.Optional,
-    debug_line_ni: MappedFile.Node.Index.Optional,
-    debug_line_header_ni: MappedFile.Node.Index.Optional,
+    frame_ni: link.MappedFile.Node.Index.Optional,
+    cie_ni: link.MappedFile.Node.Index.Optional,
+    debug_info_ni: link.MappedFile.Node.Index.Optional,
+    debug_info_header_ni: link.MappedFile.Node.Index.Optional,
+    debug_info_footer_ni: link.MappedFile.Node.Index.Optional,
+    debug_line_ni: link.MappedFile.Node.Index.Optional,
+    debug_line_header_ni: link.MappedFile.Node.Index.Optional,
     debug_line_header_changed: bool,
-    debug_rnglists_ni: MappedFile.Node.Index.Optional,
+    debug_rnglists_ni: link.MappedFile.Node.Index.Optional,
     debug_rnglists_offsets_table_offset: usize,
     debug_rnglists_end: usize,
 
@@ -96,7 +96,7 @@ pub const Unit = struct {
 };
 
 pub const Const = struct {
-    debug_info_ni: MappedFile.Node.Index.Optional,
+    debug_info_ni: link.MappedFile.Node.Index.Optional,
 
     pub fn get(cpi: link.ConstPool.Index, dwarf: *Dwarf) *Const {
         return &dwarf.consts.items[@backingInt(cpi)];
@@ -104,7 +104,7 @@ pub const Const = struct {
 };
 
 pub const Global = struct {
-    debug_info_ni: MappedFile.Node.Index.Optional,
+    debug_info_ni: link.MappedFile.Node.Index.Optional,
 
     pub const Index = enum(u32) {
         _,
@@ -121,9 +121,9 @@ pub const Global = struct {
 
 pub const Func = struct {
     state: State,
-    fde_ni: MappedFile.Node.Index.Optional,
-    debug_info_ni: MappedFile.Node.Index.Optional,
-    debug_line_ni: MappedFile.Node.Index.Optional,
+    fde_ni: link.MappedFile.Node.Index.Optional,
+    debug_info_ni: link.MappedFile.Node.Index.Optional,
+    debug_line_ni: link.MappedFile.Node.Index.Optional,
 
     pub const State = enum { unresolved, resolved };
 
@@ -141,7 +141,7 @@ pub const Func = struct {
 };
 
 pub const Decl = struct {
-    debug_info_ni: MappedFile.Node.Index.Optional,
+    debug_info_ni: link.MappedFile.Node.Index.Optional,
 
     pub const Index = enum(u32) {
         _,
@@ -170,7 +170,7 @@ pub const Frame = struct {
 };
 
 pub const Abbrev = struct {
-    ni: MappedFile.Node.Index.Optional,
+    ni: link.MappedFile.Node.Index.Optional,
     end: usize,
     set: std.enums.EnumSet(AbbrevCode),
 };
@@ -191,16 +191,16 @@ pub const Line = struct {
 };
 
 pub const Str = struct {
-    ni: MappedFile.Node.Index.Optional,
+    ni: link.MappedFile.Node.Index.Optional,
     offset: usize,
     map: std.HashMapUnmanaged(usize, void, Context, std.hash_map.default_max_load_percentage),
 
     fn get(
         s: *Str,
         gpa: std.mem.Allocator,
-        mf: *MappedFile,
+        mf: *link.MappedFile,
         str: []const u8,
-    ) MappedFile.Error!usize {
+    ) link.MappedFile.Error!usize {
         const ni = s.ni.unwrap().?;
         const slice = ni.sliceConst(mf);
         const gop = try s.map.getOrPutContextAdapted(
@@ -250,7 +250,7 @@ pub const Rnglists = struct {
 };
 
 pub const StrOffsets = struct {
-    ni: MappedFile.Node.Index.Optional,
+    ni: link.MappedFile.Node.Index.Optional,
     offset: usize,
 };
 
@@ -268,13 +268,13 @@ pub const Loc = union(enum) {
     push_object_address,
     call: struct {
         args: []const Loc = &.{},
-        node: MappedFile.Node.Index,
+        node: link.MappedFile.Node.Index,
     },
     form_tls_address: *const Loc,
     implicit_value: []const u8,
     stack_value: *const Loc,
     implicit_pointer: struct {
-        node: MappedFile.Node.Index,
+        node: link.MappedFile.Node.Index,
         offset: i65 = 0,
     },
     wasm_ext: union(enum) {
@@ -311,7 +311,7 @@ pub const Loc = union(enum) {
 
     fn write(loc: Loc, writer: union(enum) {
         io: *std.Io.Writer,
-        mf: *MappedFile.Node.Writer,
+        mf: *link.MappedFile.Node.Writer,
     }, dwarf: *Dwarf) link.EmitError!void {
         const w = switch (writer) {
             .io => |w| w,
@@ -631,7 +631,7 @@ pub const WipNav = struct {
         cfa: Cfa.RegOff,
     },
     frame_format: Frame.Format,
-    fde_writer: MappedFile.Node.Writer,
+    fde_writer: link.MappedFile.Node.Writer,
     frame_func_length: struct { offset: usize, size: AddressSize },
 
     pub const Debug = struct {
@@ -643,9 +643,9 @@ pub const WipNav = struct {
             low_pc_off: usize,
             high_pc: u32,
         }),
-        info_writer: MappedFile.Node.Writer,
+        info_writer: link.MappedFile.Node.Writer,
         info_func_length_offset: usize,
-        line_writer: MappedFile.Node.Writer,
+        line_writer: link.MappedFile.Node.Writer,
 
         pub fn deinit(debug: *Debug) void {
             const gpa = debug.pt.zcu.gpa;
@@ -1268,7 +1268,7 @@ pub fn init(lf: *link.File, format: DW.Format) Dwarf {
         },
         .frame = .{
             .header = if (target.cpu.arch == .x86_64 and target.ofmt == .elf) header: {
-                dev.check(.x86_64_backend);
+                dev.checkAny(&.{ .llvm_backend, .x86_64_backend });
                 const Register = @import("../codegen/x86_64/bits.zig").Register;
                 break :header comptime .{
                     .code_alignment_factor = 1,
@@ -1385,7 +1385,7 @@ pub fn getUnit(dwarf: *Dwarf, mod: *Module) Unit.Index {
 
 pub fn getConst(dwarf: *Dwarf, pt: Zcu.PerThread, val: Value) link.Error!link.ConstPool.Index {
     assert(val.typeOf(pt.zcu).comptimeOnly(pt.zcu));
-    return dwarf.const_pool.get(pt, .{ .elf2 = dwarf.lf.cast(.elf2).? }, val.toIntern());
+    return dwarf.const_pool.get(pt, dwarf.constPoolUser(), val.toIntern());
 }
 
 pub fn getGlobal(dwarf: *Dwarf, nav: InternPool.Nav.Index) link.Error!Global.Index {
@@ -1514,7 +1514,7 @@ pub fn getDecl(
     dwarf: *Dwarf,
     pt: Zcu.PerThread,
     instance_val: InternPool.Index,
-) link.Error!MappedFile.Node.Index {
+) link.Error!link.MappedFile.Node.Index {
     assert(dwarf.pending_decl.instance_val == .none);
     const comp = dwarf.lf.comp;
     const gpa = comp.gpa;
@@ -1634,7 +1634,7 @@ pub fn genDebugFrameCie(
     switch (arch orelse return) {
         else => unreachable,
         .x86_64 => {
-            dev.check(.x86_64_backend);
+            dev.checkAny(&.{ .llvm_backend, .x86_64_backend });
             const Register = @import("../codegen/x86_64/bits.zig").Register;
             switch (format) {
                 .eh_frame => try df_w.writeAll("zR\x00"),
@@ -1682,7 +1682,7 @@ pub fn genDebugInfoHeader(
     zcu: *Zcu,
     mod: *Module,
     unit: *Unit,
-    dih_nw: *MappedFile.Node.Writer,
+    dih_nw: *link.MappedFile.Node.Writer,
 ) link.EmitError!void {
     const comp = zcu.comp;
     const dih_w = &dih_nw.interface;
@@ -1728,7 +1728,7 @@ pub fn genDebugInfoHeader(
 
 fn genModuleDependency(
     dwarf: *Dwarf,
-    di_nw: *MappedFile.Node.Writer,
+    di_nw: *link.MappedFile.Node.Writer,
     name: []const u8,
     dep: *Module,
     module_offset: usize,
@@ -1773,7 +1773,7 @@ pub fn genDebugInfoPadding(dwarf: *Dwarf, di_w: *std.Io.Writer, size: u64) std.I
 pub fn genDebugLineHeader(
     dwarf: *Dwarf,
     unit: *Unit,
-    dlh_nw: *MappedFile.Node.Writer,
+    dlh_nw: *link.MappedFile.Node.Writer,
     zcu: *Zcu,
 ) link.EmitError!void {
     const comp = zcu.comp;
@@ -1911,7 +1911,7 @@ pub fn genDebugLinePadding(dl_w: *std.Io.Writer, size: u64) std.Io.Writer.Error!
 pub fn genDebugRnglistsHeader(
     dwarf: *Dwarf,
     unit: *Unit,
-    drh_nw: *MappedFile.Node.Writer,
+    drh_nw: *link.MappedFile.Node.Writer,
 ) std.Io.Writer.Error!void {
     const drh_w = &drh_nw.interface;
     try dwarf.genUnitLength(drh_w);
@@ -1931,7 +1931,7 @@ pub fn genDebugRnglistsHeader(
 pub fn genDebugRnglists(
     dwarf: *Dwarf,
     unit: *Unit,
-    dr_nw: *MappedFile.Node.Writer,
+    dr_nw: *link.MappedFile.Node.Writer,
     func_si: link.File.SymbolId,
     func_length: u64,
 ) link.EmitError!void {
@@ -1965,7 +1965,7 @@ pub fn updateComptimeNav(
         .struct_type => {
             const loaded_struct = ip.loadStructType(nav_val.toIntern());
             if (nav_index.toOptional() == loaded_struct.name_nav) {
-                _ = try dwarf.const_pool.get(pt, .{ .elf2 = dwarf.lf.cast(.elf2).? }, nav_val.toIntern());
+                _ = try dwarf.const_pool.get(pt, dwarf.constPoolUser(), nav_val.toIntern());
                 break :done;
             }
             return;
@@ -1973,7 +1973,7 @@ pub fn updateComptimeNav(
         .enum_type => {
             const loaded_enum = ip.loadEnumType(nav_val.toIntern());
             if (nav_index.toOptional() == loaded_enum.name_nav) {
-                _ = try dwarf.const_pool.get(pt, .{ .elf2 = dwarf.lf.cast(.elf2).? }, nav_val.toIntern());
+                _ = try dwarf.const_pool.get(pt, dwarf.constPoolUser(), nav_val.toIntern());
                 break :done;
             }
             return;
@@ -1981,7 +1981,7 @@ pub fn updateComptimeNav(
         .union_type => {
             const loaded_union = ip.loadUnionType(nav_val.toIntern());
             if (nav_index.toOptional() == loaded_union.name_nav) {
-                _ = try dwarf.const_pool.get(pt, .{ .elf2 = dwarf.lf.cast(.elf2).? }, nav_val.toIntern());
+                _ = try dwarf.const_pool.get(pt, dwarf.constPoolUser(), nav_val.toIntern());
                 break :done;
             }
             return;
@@ -1989,13 +1989,13 @@ pub fn updateComptimeNav(
         .opaque_type => {
             const loaded_opaque = ip.loadOpaqueType(nav_val.toIntern());
             if (nav_index.toOptional() == loaded_opaque.name_nav) {
-                _ = try dwarf.const_pool.get(pt, .{ .elf2 = dwarf.lf.cast(.elf2).? }, nav_val.toIntern());
+                _ = try dwarf.const_pool.get(pt, dwarf.constPoolUser(), nav_val.toIntern());
                 break :done;
             }
             return;
         },
         .func => |func| if (func.owner_nav == nav_index and func.generic_owner == .none) {
-            _ = try dwarf.const_pool.get(pt, .{ .elf2 = dwarf.lf.cast(.elf2).? }, nav_val.toIntern());
+            _ = try dwarf.const_pool.get(pt, dwarf.constPoolUser(), nav_val.toIntern());
             break :done;
         } else return,
 
@@ -2004,7 +2004,7 @@ pub fn updateComptimeNav(
         // memoization, not values
         .memoized_call => unreachable,
     }
-    try dwarf.const_pool.flushPending(pt, .{ .elf2 = dwarf.lf.cast(.elf2).? });
+    try dwarf.const_pool.flushPending(pt, dwarf.constPoolUser());
 }
 
 pub fn addConst(
@@ -2015,7 +2015,7 @@ pub fn addConst(
         lf: *link.File,
         ui: Unit.Index,
         cpi: link.ConstPool.Index,
-    ) link.Error!MappedFile.Node.Index,
+    ) link.Error!link.MappedFile.Node.Index,
 ) link.Error!void {
     const zcu = dwarf.lf.comp.zcu.?;
     const ip = &zcu.intern_pool;
@@ -2053,7 +2053,7 @@ pub fn addConst(
 pub fn updateConst(
     dwarf: *Dwarf,
     pt: Zcu.PerThread,
-    di_nw: *MappedFile.Node.Writer,
+    di_nw: *link.MappedFile.Node.Writer,
     val: InternPool.Index,
 ) link.Error!void {
     switch (val) {
@@ -2068,7 +2068,7 @@ pub fn updateConst(
 fn updateConstInner(
     dwarf: *Dwarf,
     pt: Zcu.PerThread,
-    di_nw: *MappedFile.Node.Writer,
+    di_nw: *link.MappedFile.Node.Writer,
     val: InternPool.Index,
 ) link.EmitError!void {
     const zcu = pt.zcu;
@@ -2956,7 +2956,7 @@ fn optRepr(opt_child_type: Type, zcu: *const Zcu) enum { unpacked, opv_null, err
 pub fn updateConstIncomplete(
     dwarf: *Dwarf,
     pt: Zcu.PerThread,
-    di_nw: *MappedFile.Node.Writer,
+    di_nw: *link.MappedFile.Node.Writer,
     val: InternPool.Index,
 ) link.Error!void {
     log.debug("updateConstIncomplete({f})", .{Value.fromInterned(val).fmtValue(pt)});
@@ -2968,7 +2968,7 @@ pub fn updateConstIncomplete(
 fn updateConstIncompleteInner(
     dwarf: *Dwarf,
     pt: Zcu.PerThread,
-    di_nw: *MappedFile.Node.Writer,
+    di_nw: *link.MappedFile.Node.Writer,
     val: InternPool.Index,
 ) link.EmitError!void {
     const zcu = pt.zcu;
@@ -3185,7 +3185,7 @@ fn updateConstIncompleteInner(
 fn genCaptures(
     dwarf: *Dwarf,
     pt: Zcu.PerThread,
-    di_nw: *MappedFile.Node.Writer,
+    di_nw: *link.MappedFile.Node.Writer,
     captures: anytype,
 ) link.EmitError!void {
     const zcu = pt.zcu;
@@ -3229,7 +3229,7 @@ fn genCaptures(
 pub fn genDecl(
     dwarf: *Dwarf,
     pt: Zcu.PerThread,
-    di_nw: *MappedFile.Node.Writer,
+    di_nw: *link.MappedFile.Node.Writer,
     instance_val: InternPool.Index,
 ) link.Error!void {
     log.debug("genDecl({f})", .{Value.fromInterned(instance_val).fmtValue(pt)});
@@ -3241,7 +3241,7 @@ pub fn genDecl(
 fn genDeclInner(
     dwarf: *Dwarf,
     pt: Zcu.PerThread,
-    di_nw: *MappedFile.Node.Writer,
+    di_nw: *link.MappedFile.Node.Writer,
     instance_val: InternPool.Index,
 ) link.EmitError!void {
     const zcu = pt.zcu;
@@ -3458,7 +3458,7 @@ fn genDeclInner(
 
 pub fn updateLineNumber(
     dwarf: *Dwarf,
-    mf: *MappedFile,
+    mf: *link.MappedFile,
     inst: InternPool.TrackedInst.Index,
     line: u32,
 ) void {
@@ -3472,7 +3472,7 @@ pub fn updateLineNumber(
     );
 }
 
-pub fn lostTracking(dwarf: *Dwarf, di_nw: *MappedFile.Node.Writer) link.EmitError!void {
+pub fn lostTracking(dwarf: *Dwarf, di_nw: *link.MappedFile.Node.Writer) link.EmitError!void {
     try dwarf.abbrevCode(di_nw, .decl_lost);
 }
 
@@ -3485,14 +3485,14 @@ fn refAbbrevCodeIfExists(
 }
 fn refAbbrevCode(
     dwarf: *Dwarf,
-    mf: *MappedFile,
+    mf: *link.MappedFile,
     abbrev_code: AbbrevCode,
 ) link.Error!@typeInfo(AbbrevCode).@"enum".tag_type {
     if (dwarf.refAbbrevCodeIfExists(abbrev_code)) |backing_int| {
         @branchHint(.likely);
         return backing_int;
     }
-    var da_nw: MappedFile.Node.Writer = undefined;
+    var da_nw: link.MappedFile.Node.Writer = undefined;
     dwarf.debug_abbrev.ni.unwrap().?.writer(dwarf.lf.comp.gpa, mf, &da_nw);
     defer da_nw.deinit();
     dwarf.genDebugAbbrev(&da_nw, abbrev_code) catch |err| switch (err) {
@@ -3504,7 +3504,7 @@ fn refAbbrevCode(
 }
 fn abbrevCode(
     dwarf: *Dwarf,
-    nw: *MappedFile.Node.Writer,
+    nw: *link.MappedFile.Node.Writer,
     abbrev_code: AbbrevCode,
 ) link.EmitError!void {
     try nw.interface.writeUleb128(try dwarf.refAbbrevCode(nw.mf, abbrev_code));
@@ -3512,7 +3512,7 @@ fn abbrevCode(
 
 fn genDebugAbbrev(
     dwarf: *Dwarf,
-    da_nw: *MappedFile.Node.Writer,
+    da_nw: *link.MappedFile.Node.Writer,
     abbrev_code: AbbrevCode,
 ) link.EmitError!void {
     const abbrev = AbbrevCode.abbrevs.get(abbrev_code);
@@ -3543,8 +3543,8 @@ fn secOffsetPlaceholder(dwarf: *Dwarf, w: *std.Io.Writer) std.Io.Writer.Error!vo
 }
 fn secOffset(
     dwarf: *Dwarf,
-    nw: *MappedFile.Node.Writer,
-    target_ni: MappedFile.Node.Index,
+    nw: *link.MappedFile.Node.Writer,
+    target_ni: link.MappedFile.Node.Index,
     addend: usize,
 ) link.EmitError!void {
     const offset = nw.interface.end;
@@ -3566,7 +3566,7 @@ fn addrPlaceholder(dwarf: *Dwarf, w: *std.Io.Writer) std.Io.Writer.Error!void {
 }
 fn addrSym(
     dwarf: *Dwarf,
-    nw: *MappedFile.Node.Writer,
+    nw: *link.MappedFile.Node.Writer,
     target_si: link.File.SymbolId,
     addend: usize,
 ) link.EmitError!void {
@@ -3584,7 +3584,7 @@ fn addrSym(
 fn blockConst(
     dwarf: *Dwarf,
     pt: Zcu.PerThread,
-    nw: *MappedFile.Node.Writer,
+    nw: *link.MappedFile.Node.Writer,
     val: Value,
 ) link.EmitError!void {
     const ty = val.typeOf(pt.zcu);
@@ -3604,7 +3604,7 @@ fn blockConst(
 fn refType(
     dwarf: *Dwarf,
     pt: Zcu.PerThread,
-    nw: *MappedFile.Node.Writer,
+    nw: *link.MappedFile.Node.Writer,
     ty: Type,
 ) link.EmitError!void {
     return dwarf.refConst(pt, nw, ty.toValue());
@@ -3612,7 +3612,7 @@ fn refType(
 fn refConst(
     dwarf: *Dwarf,
     pt: Zcu.PerThread,
-    nw: *MappedFile.Node.Writer,
+    nw: *link.MappedFile.Node.Writer,
     val: Value,
 ) link.EmitError!void {
     try dwarf.secOffset(nw, Const.get(try dwarf.getConst(pt, val), dwarf).debug_info_ni.unwrap().?, 0);
@@ -3685,7 +3685,7 @@ fn enumConstValue(
     );
 }
 
-fn exprLoc(dwarf: *Dwarf, nw: *MappedFile.Node.Writer, loc: Loc) link.EmitError!void {
+fn exprLoc(dwarf: *Dwarf, nw: *link.MappedFile.Node.Writer, loc: Loc) link.EmitError!void {
     var buf: [@max(8, std.atomic.cache_line)]u8 = undefined;
     var dw: std.Io.Writer.Discarding = .init(&buf);
     try loc.write(.{ .io = &dw.writer }, dwarf);
@@ -3694,7 +3694,7 @@ fn exprLoc(dwarf: *Dwarf, nw: *MappedFile.Node.Writer, loc: Loc) link.EmitError!
     try loc.write(.{ .mf = nw }, dwarf);
 }
 
-fn strp(dwarf: *Dwarf, s: *Str, nw: *MappedFile.Node.Writer, str: []const u8) link.EmitError!void {
+fn strp(dwarf: *Dwarf, s: *Str, nw: *link.MappedFile.Node.Writer, str: []const u8) link.EmitError!void {
     const comp = dwarf.lf.comp;
     try dwarf.secOffset(nw, s.ni.unwrap().?, s.get(comp.gpa, nw.mf, str) catch |err| switch (err) {
         error.MappedFileIo => return comp.link_diags.fail("failed to write output file: {t}", .{
@@ -3704,7 +3704,7 @@ fn strp(dwarf: *Dwarf, s: *Str, nw: *MappedFile.Node.Writer, str: []const u8) li
     });
 }
 
-fn reportWriteError(dwarf: *Dwarf, nw: *const MappedFile.Node.Writer) link.Error {
+fn reportWriteError(dwarf: *Dwarf, nw: *const link.MappedFile.Node.Writer) link.Error {
     switch (nw.err.?) {
         else => |e| return e,
         error.MappedFileIo => return dwarf.lf.comp.link_diags.fail(
@@ -3712,6 +3712,12 @@ fn reportWriteError(dwarf: *Dwarf, nw: *const MappedFile.Node.Writer) link.Error
             .{nw.mf.io_err.?},
         ),
     }
+}
+
+fn constPoolUser(dwarf: *Dwarf) link.ConstPool.User {
+    return if (dwarf.lf.cast(.elf2)) |elf| .{
+        .elf2 = elf,
+    } else unreachable;
 }
 
 fn DeclValEnum(comptime T: type) type {
@@ -5239,7 +5245,6 @@ const Dwarf = @This();
 const InternPool = @import("../InternPool.zig");
 const link = @import("../link.zig");
 const log = std.log.scoped(.dwarf);
-const MappedFile = @import("MappedFile.zig");
 const Module = @import("../Module.zig");
 const std = @import("std");
 const target_info = @import("../target.zig");

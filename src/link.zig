@@ -97,7 +97,6 @@ pub const Diags = struct {
             return switch (msg.source_location) {
                 .none => try bundle.addString(msg.msg),
                 .wasm => |sl| {
-                    dev.check(.wasm_linker);
                     const wasm = base.?.cast(.wasm).?;
                     return sl.string(msg.msg, bundle, wasm);
                 },
@@ -396,8 +395,6 @@ pub const Diags = struct {
     }
 };
 
-pub const producer_string = if (builtin.is_test) "zig test" else "zig " ++ build_options.version;
-
 pub const File = struct {
     tag: Tag,
 
@@ -655,7 +652,6 @@ pub const File = struct {
                 base.file = try emit.root_dir.handle.openFile(io, emit.sub_path, .{ .mode = .read_write });
             },
             .elf2, .coff2 => if (base.file == null) {
-                dev.checkAny(&.{ .elf2_linker, .coff2_linker });
                 const mf = if (base.cast(.elf2)) |elf|
                     &elf.mf
                 else if (base.cast(.coff2)) |coff|
@@ -1347,7 +1343,7 @@ pub const File = struct {
             };
         }
 
-        pub fn devFeature(tag: Tag) dev.Feature {
+        fn devFeature(tag: Tag) dev.Feature {
             return @field(dev.Feature, @tagName(tag) ++ "_linker");
         }
     };

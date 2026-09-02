@@ -122,7 +122,7 @@ const DebugFrame = struct {
                 uleb128Bytes(1) + 1,
         } + switch (target.cpu.arch) {
             .x86_64 => len: {
-                dev.check(.x86_64_backend);
+                dev.checkAny(&.{ .llvm_backend, .x86_64_backend });
                 const Register = @import("../codegen/x86_64/bits.zig").Register;
                 break :len uleb128Bytes(1) + sleb128Bytes(-8) + uleb128Bytes(Register.rip.dwarfNum()) +
                     1 + uleb128Bytes(Register.rsp.dwarfNum()) + sleb128Bytes(-1) +
@@ -2092,7 +2092,7 @@ pub const WipNav = struct {
             assert(value.typeOf(wip_nav.pt.zcu).comptimeOnly(wip_nav.pt.zcu));
         }
         const dwarf = wip_nav.dwarf;
-        const index = try dwarf.const_pool.get(wip_nav.pt, .{ .dwarf = dwarf }, value.toIntern());
+        const index = try dwarf.const_pool.get(wip_nav.pt, dwarf.constPoolUser(), value.toIntern());
         return dwarf.values.items[@backingInt(index)];
     }
 
@@ -3005,7 +3005,7 @@ fn finishWipNavWriterError(
     try dwarf.debug_line.section.replaceEntry(wip_nav.unit, wip_nav.entry, dwarf, wip_nav.debug_line.written());
     try dwarf.debug_loclists.section.replaceEntry(wip_nav.unit, wip_nav.entry, dwarf, wip_nav.debug_loclists.written());
 
-    try dwarf.const_pool.flushPending(pt, .{ .dwarf = dwarf });
+    try dwarf.const_pool.flushPending(pt, dwarf.constPoolUser());
 }
 
 pub fn updateComptimeNav(dwarf: *Dwarf, pt: Zcu.PerThread, nav_index: InternPool.Nav.Index) link.Error!void {
@@ -3067,8 +3067,8 @@ fn updateComptimeNavInner(dwarf: *Dwarf, pt: Zcu.PerThread, nav_index: InternPoo
             const loaded_struct = ip.loadStructType(nav_val.toIntern());
             if (nav_index.toOptional() == loaded_struct.name_nav) {
                 // This Nav's entry is populated by the type, not the actual Nav.
-                _ = try dwarf.const_pool.get(pt, .{ .dwarf = dwarf }, nav_val.toIntern());
-                try dwarf.const_pool.flushPending(pt, .{ .dwarf = dwarf });
+                _ = try dwarf.const_pool.get(pt, dwarf.constPoolUser(), nav_val.toIntern());
+                try dwarf.const_pool.flushPending(pt, dwarf.constPoolUser());
                 return;
             }
             break :tag .alias;
@@ -3077,8 +3077,8 @@ fn updateComptimeNavInner(dwarf: *Dwarf, pt: Zcu.PerThread, nav_index: InternPoo
             const loaded_enum = ip.loadEnumType(nav_val.toIntern());
             if (nav_index.toOptional() == loaded_enum.name_nav) {
                 // This Nav's entry is populated by the type, not the actual Nav.
-                _ = try dwarf.const_pool.get(pt, .{ .dwarf = dwarf }, nav_val.toIntern());
-                try dwarf.const_pool.flushPending(pt, .{ .dwarf = dwarf });
+                _ = try dwarf.const_pool.get(pt, dwarf.constPoolUser(), nav_val.toIntern());
+                try dwarf.const_pool.flushPending(pt, dwarf.constPoolUser());
                 return;
             }
             break :tag .alias;
@@ -3087,8 +3087,8 @@ fn updateComptimeNavInner(dwarf: *Dwarf, pt: Zcu.PerThread, nav_index: InternPoo
             const loaded_union = ip.loadUnionType(nav_val.toIntern());
             if (nav_index.toOptional() == loaded_union.name_nav) {
                 // This Nav's entry is populated by the type, not the actual Nav.
-                _ = try dwarf.const_pool.get(pt, .{ .dwarf = dwarf }, nav_val.toIntern());
-                try dwarf.const_pool.flushPending(pt, .{ .dwarf = dwarf });
+                _ = try dwarf.const_pool.get(pt, dwarf.constPoolUser(), nav_val.toIntern());
+                try dwarf.const_pool.flushPending(pt, dwarf.constPoolUser());
                 return;
             }
             break :tag .alias;
@@ -3097,8 +3097,8 @@ fn updateComptimeNavInner(dwarf: *Dwarf, pt: Zcu.PerThread, nav_index: InternPoo
             const loaded_opaque = ip.loadOpaqueType(nav_val.toIntern());
             if (nav_index.toOptional() == loaded_opaque.name_nav) {
                 // This Nav's entry is populated by the type, not the actual Nav.
-                _ = try dwarf.const_pool.get(pt, .{ .dwarf = dwarf }, nav_val.toIntern());
-                try dwarf.const_pool.flushPending(pt, .{ .dwarf = dwarf });
+                _ = try dwarf.const_pool.get(pt, dwarf.constPoolUser(), nav_val.toIntern());
+                try dwarf.const_pool.flushPending(pt, dwarf.constPoolUser());
                 return;
             }
             break :tag .alias;
@@ -3274,7 +3274,7 @@ fn updateComptimeNavInner(dwarf: *Dwarf, pt: Zcu.PerThread, nav_index: InternPoo
         },
     }
     try dwarf.debug_info.section.replaceEntry(unit, wip_nav.entry, dwarf, wip_nav.debug_info.written());
-    try dwarf.const_pool.flushPending(pt, .{ .dwarf = dwarf });
+    try dwarf.const_pool.flushPending(pt, dwarf.constPoolUser());
 }
 
 pub fn updateContainerType(
@@ -3283,7 +3283,7 @@ pub fn updateContainerType(
     ty: InternPool.Index,
     success: bool,
 ) !void {
-    try dwarf.const_pool.updateContainerType(pt, .{ .dwarf = dwarf }, ty, success);
+    try dwarf.const_pool.updateContainerType(pt, dwarf.constPoolUser(), ty, success);
 }
 /// Should only be called by the `link.ConstPool` implementation.
 pub fn addConst(dwarf: *Dwarf, pt: Zcu.PerThread, index: link.ConstPool.Index, val: InternPool.Index) Allocator.Error!void {
@@ -4702,7 +4702,7 @@ fn flushWriterError(dwarf: *Dwarf, pt: Zcu.PerThread) (UpdateError || Writer.Err
 
     // Update `anyerror` based on the finished global error set.
     {
-        const index = try dwarf.const_pool.get(pt, .{ .dwarf = dwarf }, .anyerror_type);
+        const index = try dwarf.const_pool.get(pt, dwarf.constPoolUser(), .anyerror_type);
         const unit, const entry = dwarf.values.items[@backingInt(index)];
         var wip_nav: WipNav = .{
             .dwarf = dwarf,
@@ -4737,7 +4737,7 @@ fn flushWriterError(dwarf: *Dwarf, pt: Zcu.PerThread) (UpdateError || Writer.Err
         }
         if (global_error_set_names.len > 0) try diw.writeUleb128(@backingInt(AbbrevCode.null));
         try dwarf.debug_info.section.replaceEntry(wip_nav.unit, wip_nav.entry, dwarf, wip_nav.debug_info.written());
-        try dwarf.const_pool.flushPending(pt, .{ .dwarf = dwarf });
+        try dwarf.const_pool.flushPending(pt, dwarf.constPoolUser());
     }
 
     for (dwarf.mods.keys(), dwarf.mods.values()) |mod, *mod_info| {
@@ -4789,7 +4789,7 @@ fn flushWriterError(dwarf: *Dwarf, pt: Zcu.PerThread) (UpdateError || Writer.Err
             .debug_frame => unreachable,
             .eh_frame => switch (target.cpu.arch) {
                 .x86_64 => {
-                    dev.check(.x86_64_backend);
+                    dev.checkAny(&.{ .llvm_backend, .x86_64_backend });
                     const Register = @import("../codegen/x86_64/bits.zig").Register;
                     for (dwarf.debug_frame.section.units.items) |*unit| {
                         header_aw.clearRetainingCapacity();
@@ -6305,6 +6305,14 @@ const AbbrevCode = enum {
 fn getFile(dwarf: *Dwarf) ?Io.File {
     if (dwarf.bin_file.cast(.macho)) |macho_file| if (macho_file.d_sym) |*d_sym| return d_sym.file;
     return dwarf.bin_file.file;
+}
+
+fn constPoolUser(dwarf: *Dwarf) link.ConstPool.User {
+    return switch (dwarf.bin_file.tag) {
+        else => unreachable,
+        .elf => .{ .elf = dwarf },
+        .macho => .{ .macho = dwarf },
+    };
 }
 
 fn addCommonEntry(dwarf: *Dwarf, unit: Unit.Index) UpdateError!Entry.Index {

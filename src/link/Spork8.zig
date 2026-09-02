@@ -18,7 +18,6 @@ const Mir = @import("../codegen/spork8/Mir.zig");
 const link = @import("../link.zig");
 const Compilation = @import("../Compilation.zig");
 const Liveness = @import("../Air/Liveness.zig");
-const dev = @import("../dev.zig");
 const Value = @import("../Value.zig");
 
 base: link.File,
@@ -89,7 +88,6 @@ pub fn updateFunc(
     func_index: InternPool.Index,
     any_mir: *const codegen.AnyMir,
 ) !void {
-    dev.check(.spork8_backend);
     // This linker implementation only works with `std.lang.CompilerBackend.zsf_spork8`.
     const mir = &any_mir.spork8;
     const zcu = pt.zcu;

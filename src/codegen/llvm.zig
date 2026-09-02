@@ -10,7 +10,6 @@ const build_options = @import("build_options");
 const Air = @import("../Air.zig");
 const codegen = @import("../codegen.zig");
 const Compilation = @import("../Compilation.zig");
-const dev = @import("../dev.zig");
 const InternPool = @import("../InternPool.zig");
 const link = @import("../link.zig");
 const Module = @import("../Module.zig");
@@ -155,12 +154,11 @@ pub const Object = struct {
     /// Values for `@llvm.used`.
     used: std.ArrayList(Builder.Constant),
 
-    pub const Ptr = if (dev.env.supports(.llvm_backend)) *Object else noreturn;
+    pub const Ptr = if (@import("../dev.zig").env.supports(.llvm_backend)) *Object else noreturn;
 
     const TypeMap = std.AutoHashMapUnmanaged(InternPool.Index, Builder.Type);
 
     pub fn create(arena: Allocator, zcu: *Zcu) !Ptr {
-        dev.check(.llvm_backend);
         const comp = zcu.comp;
         const gpa = comp.gpa;
         const target = zcu.getTarget();

@@ -744,7 +744,6 @@ fn lowerUavRef(
         .c => unreachable,
         .spirv => unreachable,
         .wasm => {
-            dev.check(link.File.Tag.wasm.devFeature());
             const wasm = lf.cast(.wasm).?;
             assert(reloc_parent == .none);
             try wasm.addUavReloc(w.end, uav.val, uav.orig_ty, @intCast(offset));
@@ -797,7 +796,6 @@ fn lowerNavRef(
         .c => unreachable,
         .spirv => unreachable,
         .wasm => {
-            dev.check(link.File.Tag.wasm.devFeature());
             const wasm = lf.cast(.wasm).?;
             assert(reloc_parent == .none);
             try wasm.addNavReloc(w.end, nav_index, nav_ty, @intCast(offset));

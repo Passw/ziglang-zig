@@ -4461,8 +4461,7 @@ pub fn runCodegen(pt: Zcu.PerThread, func_index: InternPool.Index, air: *Air) Ru
                 comp.config.use_llvm,
             )) {
                 else => unreachable, // assertion failure
-                .stage2_llvm,
-                => {},
+                .stage2_llvm => {},
             },
             error.Canceled => |e| return e,
         }

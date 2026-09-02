@@ -4572,13 +4572,17 @@ pub fn callconvSupported(zcu: *Zcu, cc: std.lang.CallingConvention) union(enum) 
             if (allowed_arch == target.cpu.arch) break;
         } else return .{ .bad_arch = cc.archs() },
     }
-    const backend_ok = switch (backend) {
+    const backend_ok = ok: switch (backend) {
         .stage1 => unreachable,
         .other => unreachable,
         _ => unreachable,
 
-        .stage2_llvm => @import("codegen/llvm.zig").toLlvmCallConv(cc, target) != null,
-        .stage2_c => ok: {
+        .stage2_llvm => {
+            dev.check(.llvm_backend);
+            break :ok @import("codegen/llvm.zig").toLlvmCallConv(cc, target) != null;
+        },
+        .stage2_c => {
+            dev.check(.c_backend);
             if (target.cCallingConvention()) |default_c| {
                 if (cc.eql(default_c)) {
                     break :ok true;
@@ -4636,74 +4640,107 @@ pub fn callconvSupported(zcu: *Zcu, cc: std.lang.CallingConvention) union(enum) 
                 else => false,
             };
         },
-        .stage2_wasm => switch (cc) {
-            .wasm_mvp => |opts| opts.incoming_stack_alignment == null,
-            else => false,
-        },
-        .stage2_arm => switch (cc) {
-            .arm_aapcs => |opts| opts.incoming_stack_alignment == null,
-            .naked => true,
-            else => false,
-        },
-        .stage2_x86_64 => switch (cc) {
-            .x86_64_sysv, .x86_64_win, .naked => true, // incoming stack alignment supported
-            else => false,
-        },
-        .stage2_aarch64 => switch (cc) {
-            .aarch64_aapcs, .aarch64_aapcs_darwin, .naked => true,
-            else => false,
-        },
-        .stage2_x86 => switch (cc) {
-            .x86_sysv,
-            .x86_win,
-            .x86_mingw,
-            => |opts| opts.incoming_stack_alignment == null and opts.register_params == 0,
-            .naked => true,
-            else => false,
-        },
-        .stage2_powerpc => switch (target.cpu.arch) {
-            .powerpc, .powerpcle => switch (cc) {
-                .powerpc_sysv,
-                .powerpc_sysv_altivec,
-                .powerpc_aix,
-                .powerpc_aix_altivec,
-                .naked,
-                => true,
+        .stage2_wasm => {
+            dev.check(.wasm_backend);
+            break :ok switch (cc) {
+                .wasm_mvp => |opts| opts.incoming_stack_alignment == null,
                 else => false,
-            },
-            .powerpc64, .powerpc64le => switch (cc) {
-                .powerpc64_elf,
-                .powerpc64_elf_altivec,
-                .powerpc64_elf_v2,
-                .naked,
-                => true,
+            };
+        },
+        .stage2_arm => {
+            dev.check(.arm_backend);
+            break :ok switch (cc) {
+                .arm_aapcs => |opts| opts.incoming_stack_alignment == null,
+                .naked => true,
                 else => false,
-            },
-            else => unreachable,
+            };
         },
-        .stage2_riscv64 => switch (cc) {
-            .riscv64_lp64 => |opts| opts.incoming_stack_alignment == null,
-            .naked => true,
-            else => false,
+        .stage2_x86_64 => {
+            dev.check(.x86_64_backend);
+            break :ok switch (cc) {
+                .x86_64_sysv, .x86_64_win, .naked => true, // incoming stack alignment supported
+                else => false,
+            };
         },
-        .stage2_sparc64 => switch (cc) {
-            .sparc64_sysv => |opts| opts.incoming_stack_alignment == null,
-            .naked => true,
-            else => false,
+        .stage2_aarch64 => {
+            dev.check(.aarch64_backend);
+            break :ok switch (cc) {
+                .aarch64_aapcs, .aarch64_aapcs_darwin, .naked => true,
+                else => false,
+            };
         },
-        .stage2_spirv => switch (cc) {
-            .spirv_device, .spirv_kernel => true,
-            .spirv_fragment, .spirv_vertex => target.os.tag == .vulkan or target.os.tag == .opengl,
-            .spirv_task, .spirv_mesh => target.os.tag == .vulkan,
-            else => false,
+        .stage2_x86 => {
+            dev.check(.x86_backend);
+            break :ok switch (cc) {
+                .x86_sysv,
+                .x86_win,
+                .x86_mingw,
+                => |opts| opts.incoming_stack_alignment == null and opts.register_params == 0,
+                .naked => true,
+                else => false,
+            };
         },
-        .stage2_loongarch => switch (cc) {
-            .loongarch64_lp64, .loongarch32_ilp32, .naked => true,
-            else => false,
+        .stage2_powerpc => {
+            dev.check(.powerpc_backend);
+            break :ok switch (target.cpu.arch) {
+                .powerpc, .powerpcle => switch (cc) {
+                    .powerpc_sysv,
+                    .powerpc_sysv_altivec,
+                    .powerpc_aix,
+                    .powerpc_aix_altivec,
+                    .naked,
+                    => true,
+                    else => false,
+                },
+                .powerpc64, .powerpc64le => switch (cc) {
+                    .powerpc64_elf,
+                    .powerpc64_elf_altivec,
+                    .powerpc64_elf_v2,
+                    .naked,
+                    => true,
+                    else => false,
+                },
+                else => unreachable,
+            };
         },
-        .zsf_spork8 => switch (cc) {
-            .spork8, .naked => true,
-            else => false,
+        .stage2_riscv64 => {
+            dev.check(.riscv64_backend);
+            break :ok switch (cc) {
+                .riscv64_lp64 => |opts| opts.incoming_stack_alignment == null,
+                .naked => true,
+                else => false,
+            };
+        },
+        .stage2_sparc64 => {
+            dev.check(.sparc64_backend);
+            break :ok switch (cc) {
+                .sparc64_sysv => |opts| opts.incoming_stack_alignment == null,
+                .naked => true,
+                else => false,
+            };
+        },
+        .stage2_spirv => {
+            dev.check(.spirv_backend);
+            break :ok switch (cc) {
+                .spirv_device, .spirv_kernel => true,
+                .spirv_fragment, .spirv_vertex => target.os.tag == .vulkan or target.os.tag == .opengl,
+                .spirv_task, .spirv_mesh => target.os.tag == .vulkan,
+                else => false,
+            };
+        },
+        .stage2_loongarch => {
+            dev.check(.loongarch_backend);
+            break :ok switch (cc) {
+                .loongarch64_lp64, .loongarch32_ilp32, .naked => true,
+                else => false,
+            };
+        },
+        .zsf_spork8 => {
+            dev.check(.spork8_backend);
+            break :ok switch (cc) {
+                .spork8, .naked => true,
+                else => false,
+            };
         },
     };
     if (!backend_ok) return .{ .bad_backend = backend };
@@ -5243,7 +5280,7 @@ pub const CodegenTaskPool = struct {
     /// memory on AIR/MIR, we see a limit of around 10 MiB of AIR in-flight.
     const max_air_bytes_in_flight = 10 * 1024 * 1024;
 
-    const max_funcs_in_flight = @import("link.zig").Queue.buffer_size;
+    const max_funcs_in_flight = link.Queue.buffer_size;
 
     available_air_bytes: u32,
 

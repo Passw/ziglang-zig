@@ -1744,6 +1744,7 @@ const TlvInitializerTable = std.array_hash_map.Auto(Atom.Index, TlvInitializer);
 
 const x86_64 = struct {
     fn writeTrampolineCode(source_addr: u64, target_addr: u64, buf: *[max_trampoline_len]u8) ![]u8 {
+        dev.checkAny(&.{ .llvm_backend, .x86_64_backend });
         const disp = @as(i64, @intCast(target_addr)) - @as(i64, @intCast(source_addr)) - 5;
         var bytes = [_]u8{
             0xe9, 0x00, 0x00, 0x00, 0x00, // jmp rel32
@@ -1758,6 +1759,7 @@ const x86_64 = struct {
 const assert = std.debug.assert;
 const builtin = @import("builtin");
 const codegen = @import("../../codegen.zig");
+const dev = @import("../../dev.zig");
 const link = @import("../../link.zig");
 const log = std.log.scoped(.link);
 const macho = std.macho;

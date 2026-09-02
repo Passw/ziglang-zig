@@ -2384,6 +2384,7 @@ pub fn create(gpa: Allocator, arena: Allocator, io: Io, diag: *CreateDiagnostic,
                 comp.verbose_llvm_bc != null))
         {
             if (opt_zcu) |zcu| {
+                dev.check(.llvm_backend);
                 zcu.llvm_object = try LlvmObject.create(arena, zcu);
             }
         }

@@ -7,11 +7,10 @@ const log = std.log.scoped(.link);
 
 const codegen = @import("../codegen.zig");
 const Compilation = @import("../Compilation.zig");
-const dev = @import("../dev.zig");
 const Dwarf = @import("Dwarf2.zig");
 const InternPool = @import("../InternPool.zig");
 const link = @import("../link.zig");
-const MappedFile = @import("MappedFile.zig");
+const MappedFile = link.MappedFile;
 const target_util = @import("../target.zig");
 const tracy = @import("../tracy.zig");
 const Type = @import("../Type.zig");

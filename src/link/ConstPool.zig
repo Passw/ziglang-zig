@@ -45,10 +45,21 @@ pub const Index = enum(u32) {
 };
 
 pub const User = union(enum) {
-    dwarf: *@import("Dwarf.zig"),
+    elf: *@import("Dwarf.zig"),
     elf2: *@import("Elf2.zig"),
+    macho: *@import("Dwarf.zig"),
     c: *@import("C.zig"),
     llvm: @import("../codegen/llvm.zig").Object.Ptr,
+
+    fn devFeature(tag: @typeInfo(User).@"union".tag_type.?) dev.Feature {
+        return switch (tag) {
+            .elf => .elf_linker,
+            .elf2 => .elf2_linker,
+            .macho => .macho_linker,
+            .c => .c_linker,
+            .llvm => .llvm_backend,
+        };
+    }
 
     /// Inform the debug info implementation that the new constant `val` was added to the pool at
     /// the given index (which equals the current pool length) due to a `get` call. It is guaranteed
@@ -61,7 +72,10 @@ pub const User = union(enum) {
         val: InternPool.Index,
     ) link.Error!void {
         switch (user) {
-            inline else => |impl| return impl.addConst(pt, index, val),
+            inline else => |impl, tag| {
+                dev.check(devFeature(tag));
+                return impl.addConst(pt, index, val);
+            },
         }
     }
 
@@ -76,7 +90,10 @@ pub const User = union(enum) {
         val: InternPool.Index,
     ) link.Error!void {
         switch (user) {
-            inline else => |impl| return impl.updateConst(pt, index, val),
+            inline else => |impl, tag| {
+                dev.check(devFeature(tag));
+                return impl.updateConst(pt, index, val);
+            },
         }
     }
 
@@ -92,7 +109,10 @@ pub const User = union(enum) {
         val: InternPool.Index,
     ) link.Error!void {
         switch (user) {
-            inline else => |impl| return impl.updateConstIncomplete(pt, index, val),
+            inline else => |impl, tag| {
+                dev.check(devFeature(tag));
+                return impl.updateConstIncomplete(pt, index, val);
+            },
         }
     }
 };
@@ -289,6 +309,7 @@ fn registerTypeDeps(pool: *ConstPool, root: Index, ty: Type, zcu: *const Zcu) Al
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
+const dev = @import("../dev.zig");
 const InternPool = @import("../InternPool.zig");
 const link = @import("../link.zig");
 const Type = @import("../Type.zig");

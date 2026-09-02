@@ -7,7 +7,6 @@ const Allocator = mem.Allocator;
 const Writer = std.Io.Writer;
 
 const codegen = @import("../codegen.zig");
-const dev = @import("../dev.zig");
 const link = @import("../link.zig");
 const Zcu = @import("../Zcu.zig");
 const Module = @import("../Module.zig");
@@ -25,7 +24,7 @@ const BigIntLimb = std.math.big.Limb;
 const BigInt = std.math.big.int;
 
 pub fn legalizeFeatures(_: *const std.Target) ?*const Air.Legalize.Features {
-    return comptime switch (dev.env.supports(.legalize)) {
+    return comptime switch (@import("../dev.zig").env.supports(.legalize)) {
         inline false, true => |supports_legalize| &.init(.{
             // we don't currently ask zig1 to use safe optimization modes
             .expand_bit_cast_safe = supports_legalize,
