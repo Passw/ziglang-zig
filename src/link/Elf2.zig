@@ -9053,13 +9053,15 @@ pub fn lostTracking(
     const di = elf.dwarf.getDeclIfExists(inst) orelse return;
     const decl_ni = di.get(&elf.dwarf).debug_info_ni.unwrap() orelse return;
     const comp = elf.base.comp;
-    var diw: std.Io.Writer = .fixed(decl_ni.slice(&elf.mf));
+    var di_nw: MappedFile.Node.Writer = undefined;
+    decl_ni.writer(comp.gpa, &elf.mf, &di_nw);
+    defer di_nw.deinit();
     elf.resetNodeRelocs(decl_ni);
-    elf.dwarf.lostTracking(&diw) catch |err| switch (err) {
+    elf.dwarf.lostTracking(&di_nw) catch |err| switch (err) {
         else => |e| return e,
         error.WriteFailed => unreachable,
     };
-    decl_ni.resizeLeaf(comp.gpa, &elf.mf, diw.end) catch |err| switch (err) {
+    decl_ni.resizeLeaf(comp.gpa, &elf.mf, di_nw.interface.end) catch |err| switch (err) {
         else => |e| return e,
         error.MappedFileIo => return comp.link_diags.fail("failed to write output file: {t}", .{
             elf.mf.io_err.?,
