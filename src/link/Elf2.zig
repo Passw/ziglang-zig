@@ -8753,7 +8753,7 @@ pub fn updateConst(
 ) link.Error!void {
     switch (val) {
         .anyerror_type => {}, // handled in `updateErrorData` instead
-        else => try elf.updateConstInner(pt, cpi, val),
+        else => try elf.updateConstInner(pt, cpi, val, .complete),
     }
 }
 fn updateConstInner(
@@ -8761,11 +8761,22 @@ fn updateConstInner(
     pt: Zcu.PerThread,
     cpi: link.ConstPool.Index,
     val: InternPool.Index,
+    complete: enum { incomplete, complete },
 ) link.Error!void {
     switch (elf.base.comp.config.debug_format) {
         .strip => {},
         .dwarf => {
             {
+                switch (pt.zcu.intern_pool.indexToKey(val)) {
+                    else => {},
+                    .func => |func| {
+                        const fi = try elf.dwarf.getFunc(func.owner_nav);
+                        switch (fi.get(&elf.dwarf).state) {
+                            .unresolved => {},
+                            .resolved => return,
+                        }
+                    },
+                }
                 const gpa = elf.base.comp.gpa;
                 const debug_info_ni = Dwarf.Const.get(cpi, &elf.dwarf).debug_info_ni.unwrap().?;
                 try debug_info_ni.moved(gpa, &elf.mf);
@@ -8773,7 +8784,10 @@ fn updateConstInner(
                 debug_info_ni.writer(gpa, &elf.mf, &di_nw);
                 defer di_nw.deinit();
                 elf.resetNodeRelocs(debug_info_ni);
-                try elf.dwarf.updateConst(pt, &di_nw, val);
+                switch (complete) {
+                    .incomplete => try elf.dwarf.updateConstIncomplete(pt, &di_nw, val),
+                    .complete => try elf.dwarf.updateConst(pt, &di_nw, val),
+                }
             }
             try elf.genPending(pt);
         },
@@ -8787,23 +8801,7 @@ pub fn updateConstIncomplete(
     cpi: link.ConstPool.Index,
     val: InternPool.Index,
 ) link.Error!void {
-    switch (elf.base.comp.config.debug_format) {
-        .strip => {},
-        .dwarf => {
-            {
-                const gpa = elf.base.comp.gpa;
-                const debug_info_ni = Dwarf.Const.get(cpi, &elf.dwarf).debug_info_ni.unwrap().?;
-                try debug_info_ni.moved(gpa, &elf.mf);
-                var di_nw: MappedFile.Node.Writer = undefined;
-                debug_info_ni.writer(gpa, &elf.mf, &di_nw);
-                defer di_nw.deinit();
-                elf.resetNodeRelocs(debug_info_ni);
-                try elf.dwarf.updateConstIncomplete(pt, &di_nw, val);
-            }
-            try elf.genPending(pt);
-        },
-        .code_view => unreachable,
-    }
+    return elf.updateConstInner(pt, cpi, val, .incomplete);
 }
 
 pub fn updateFunc(
@@ -9032,7 +9030,7 @@ fn updateFuncInner(
                 if (func.analysisUnordered(ip).inferred_error_set) {
                     const ies = ip.getIfExists(.{ .inferred_error_set_type = func_index }).?;
                     if (elf.dwarf.const_pool.getIfExists(ies)) |cpi|
-                        try elf.updateConstInner(pt, cpi, ies);
+                        try elf.updateConstInner(pt, cpi, ies, .complete);
                 }
             },
             .none => {},
@@ -9083,7 +9081,7 @@ pub fn updateErrorData(elf: *Elf, pt: Zcu.PerThread) link.Error!void {
         .index = @intCast(lmi),
     });
     if (elf.dwarf.const_pool.getIfExists(.anyerror_type)) |cpi|
-        try elf.updateConstInner(pt, cpi, .anyerror_type);
+        try elf.updateConstInner(pt, cpi, .anyerror_type, .complete);
 }
 
 pub fn flush(

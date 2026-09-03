@@ -1058,7 +1058,6 @@ pub const WipNav = struct {
                 0
             else
                 zcu.navSrcLine(zcu.funcInfo(debug.wip_nav.func).owner_nav) + 1) + line);
-            try di_w.writeUleb128(line);
             try di_w.writeUleb128(column + 1);
             block.low_pc_off = code_off;
             try dwarf.addrSym(di_nw, debug.wip_nav.func_si, code_off);
@@ -2898,11 +2897,6 @@ fn updateConstInner(
 
         else => return,
         .func => |func| {
-            const fi = try dwarf.getFunc(func.owner_nav);
-            switch (fi.get(dwarf).state) {
-                .unresolved => {},
-                .resolved => return,
-            }
             const fn_ty = ip.indexToKey(func.ty).func_type;
             const nav = ip.getNav(func.owner_nav);
             const inst_info = nav.srcInst(ip).resolveFull(ip).?;
