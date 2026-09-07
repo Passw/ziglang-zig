@@ -102,14 +102,15 @@ pub fn Uint(comptime max_bits: comptime_int) type {
         /// Creates a new big integer from a primitive type.
         /// This function may not run in constant time.
         pub fn fromPrimitive(comptime T: type, init_value: T) OverflowError!Self {
-            var x = init_value;
+            const U = @Int(.unsigned, @bitSizeOf(T));
+            var x = math.cast(U, init_value) orelse return error.Overflow;
             var out: Self = .{
                 .limbs_buffer = undefined,
                 .limbs_len = max_limbs_count,
             };
             for (&out.limbs_buffer) |*limb| {
                 limb.* = if (@bitSizeOf(T) > t_bits) @as(TLimb, @truncate(x)) else x;
-                x = math.shr(T, x, t_bits);
+                x = math.shr(U, x, t_bits);
             }
             if (x != 0) {
                 return error.Overflow;
@@ -120,18 +121,21 @@ pub fn Uint(comptime max_bits: comptime_int) type {
         /// Converts a big integer to a primitive type.
         /// This function may not run in constant time.
         pub fn toPrimitive(self: Self, comptime T: type) OverflowError!T {
-            var x: T = 0;
+            const U = @Int(.unsigned, @bitSizeOf(T));
+            var x: U = 0;
             var i = self.limbs_len - 1;
             while (true) : (i -= 1) {
-                if (@bitSizeOf(T) >= t_bits and math.shr(T, x, @bitSizeOf(T) - t_bits) != 0) {
+                // Check for overflow before shifting, even when the destination is narrower than a limb.
+                const discarded = if (@bitSizeOf(U) >= t_bits) math.shr(U, x, @bitSizeOf(U) - t_bits) else x;
+                if (discarded != 0) {
                     return error.Overflow;
                 }
-                x = math.shl(T, x, t_bits);
-                const v = math.cast(T, self.limbsConst()[i]) orelse return error.Overflow;
+                x = math.shl(U, x, t_bits);
+                const v = math.cast(U, self.limbsConst()[i]) orelse return error.Overflow;
                 x |= v;
                 if (i == 0) break;
             }
-            return x;
+            return math.cast(T, x) orelse error.Overflow;
         }
 
         /// Encodes a big integer into a byte array.
@@ -1084,4 +1088,21 @@ fn testCt(ct_: anytype) !void {
 test ct {
     try testCt(ct_protected);
     try testCt(ct_unprotected);
+}
+
+test "Uint serialization and predicates" {
+    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest;
+
+    const U = Uint(256);
+    const x = try U.fromPrimitive(u128, (1 << t_bits) + 5);
+    try testing.expectError(error.Overflow, Uint(64).fromPrimitive(u256, 1 << 200));
+    try testing.expectError(error.Overflow, x.toPrimitive(u8));
+    try testing.expectError(error.Overflow, x.toPrimitive(@Int(.unsigned, t_bits)));
+    try testing.expectEqual((1 << t_bits) + 5, try x.toPrimitive(@Int(.unsigned, t_bits + 1)));
+    const max = try U.fromPrimitive(u128, (1 << t_bits) - 1);
+    try testing.expectEqual((1 << t_bits) - 1, try max.toPrimitive(@Int(.unsigned, t_bits)));
+    try testing.expectError(error.Overflow, max.toPrimitive(@Int(.unsigned, t_bits - 1)));
+    const signed_max = try U.fromPrimitive(u128, math.maxInt(i128));
+    try testing.expectEqual(math.maxInt(i128), try signed_max.toPrimitive(i128));
+    try testing.expectError(error.Overflow, (try U.fromPrimitive(u128, 1 << 127)).toPrimitive(i128));
 }
