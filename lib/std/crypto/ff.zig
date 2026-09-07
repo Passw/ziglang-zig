@@ -424,6 +424,10 @@ pub fn Modulus(comptime max_bits: comptime_int) type {
             return self.limbs_count() * t_bits - self.leading;
         }
 
+        pub fn encodedLen(self: Self) usize {
+            return @divCeil(self.bits(), 8);
+        }
+
         /// Returns the element `1`.
         pub fn one(self: Self) Fe {
             var fe = self.zero;
@@ -485,6 +489,10 @@ pub fn Modulus(comptime max_bits: comptime_int) type {
         /// Serializes the modulus to a byte string.
         pub fn toBytes(self: Self, bytes: []u8, comptime endian: Endian) OverflowError!void {
             return self.v.toBytes(bytes, endian);
+        }
+
+        pub fn toUint(self: Self) FeUint {
+            return self.v;
         }
 
         /// Rejects field elements that are not in the canonical form.
