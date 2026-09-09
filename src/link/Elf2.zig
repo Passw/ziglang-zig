@@ -75,32 +75,30 @@ dynamic: struct {
     soname: String(.dynstr),
 },
 symtab: std.ArrayList(Symbol),
-globals: struct {
-    strong_def: std.array_hash_map.Auto(String(.strtab), Symbol.Global),
-    weak_def: std.array_hash_map.Auto(String(.strtab), Symbol.Global),
-    strong_undef: std.array_hash_map.Auto(String(.strtab), Symbol.Global),
-    weak_undef: std.array_hash_map.Auto(String(.strtab), Symbol.Global),
-},
-/// Key is the name of an undef global for which we have created a "copy relocation" (`R_*_COPY`).
-copied_globals: std.array_hash_map.Auto(String(.strtab), struct {
+globals: std.ArrayList(Symbol.Global),
+/// Accessed with `Symbol.Global.NameAdapter`. Items map 1--1 to `globals`.
+globals_by_name: std.array_hash_map.Custom(void, void, void, true),
+/// Set of all strong undef globals which we have also not yet seen defined in any input DSO. We
+/// maintain this set to allow efficient reporting of "undefined global symbol" errors.
+unknown_globals: std.array_hash_map.Auto(Symbol.Global.Index, void),
+/// Key is an undef global for which we have created a "copy relocation" (`R_*_COPY`).
+copied_globals: std.array_hash_map.Auto(Symbol.Global.Index, struct {
     node: MappedFile.Node.Index,
     /// The index of this global's runtime relocation in `.rela.dyn`.
     rela_index: Section.RelaIndex,
 }),
-/// Key is the name of an undef global for which we would *like* to create a copy relocation
-/// (`R_*_COPY`),but cannot because we have not seen an appropriate definition in a linked DSO yet.
+/// Key is an undef global for which we would *like* to create a copy relocation (`R_*_COPY`), but
+/// cannot because we have not seen an appropriate definition in a linked DSO yet.
 ///
 /// Therefore, if, when scanning a DSO input, we discover a definition for one of these symbols, we
 /// will remove it from this map and call `maybeAddCopyRelocation`.
-want_copied_globals: std.array_hash_map.Auto(String(.strtab), void),
-/// Key is a node which is a valid `Symbol.node` value, value is the name of the first global symbol
-/// in that node. That symbol is the head of a linked list: see `Symbol.Global.next_in_node`.
-///
-/// Value is never `.empty`.
+want_copied_globals: std.array_hash_map.Auto(Symbol.Global.Index, void),
+/// Key is a node which is a valid `Symbol.node` value, value is the first global symbol in that
+/// node. That symbol is the head of a linked list: see `Symbol.Global.next_in_node`.
 ///
 /// We use a separate hash map for this data rather than storing it in `navs` etc to save memory,
 /// because the vast majority of nodes which can export global symbols actually will not.
-node_global_symbols: std.array_hash_map.Auto(MappedFile.Node.Index, String(.strtab)),
+node_global_symbols: std.array_hash_map.Auto(MappedFile.Node.Index, Symbol.Global.Index),
 /// Contains all globals symbols defined in any needed DSO. This map serves three purposes:
 ///
 /// * If we discover an undefined reference to one of these symbols, we know whether the symbol has
@@ -132,7 +130,7 @@ dynstr: StringTable,
 ///
 /// Value is the output relocation in `.rela.dyn` for the GOT entry.
 got: std.array_hash_map.Auto(GotKey, Section.RelaIndex.Optional),
-/// Key is the name of a global.
+/// Key is a global with a PLT entry.
 ///
 /// Indices map 1--1 to indices into the actual `.got.plt` section. These also equal indices into
 /// the relocations in `.rela.plt`, because every PLT entry has one output relocation (if a runtime
@@ -140,7 +138,7 @@ got: std.array_hash_map.Auto(GotKey, Section.RelaIndex.Optional),
 ///
 /// PLT entries in this map may be "dead", meaning the PLT entry has been deemed unnecessary so is
 /// available for reuse---see `Elf.pltEntryIsDead`. Such entries must not be targeted by relocs.
-plt: std.array_hash_map.Auto(String(.strtab), void),
+plt: std.array_hash_map.Auto(Symbol.Global.Index, void),
 /// The `.plt` section contains zero or more symbol relocations starting at this index.
 plt_first_symbol_reloc: SymbolReloc.Index,
 /// The `.eh_frame_hdr` section contains zero or more symbol relocations starting at this index.
@@ -203,12 +201,13 @@ got_relocs: std.ArrayList(GotReloc),
 tls_size_symbol_relocs: std.array_hash_map.Auto(SymbolReloc.Index, void),
 /// Index matches the index into `shdrs`. Like `shdrs`, this map excludes `SHN_UNDEF`.
 section_by_name: std.array_hash_map.Auto(String(.shstrtab), void),
-/// Key is the name of a global symbol which has been moved to a new symtab index. Any relocation
+/// Key is a global symbol which has been moved to a new index in the symbol table. Any relocation
 /// entries which target that symbol must be updated to reference the correct symbol index.
 ///
-/// When emitting a relocatable (`ET_REL`), this refers to the index in `.symtab`. Otherwise, it
-/// refers to the index in `.dynsym`.
-changed_symtab_index: std.array_hash_map.Auto(String(.strtab), void),
+/// * In an `ET_REL`, this means the index in `.symtab` has changed.
+/// * In a DSO (or static PIE), this means the index in `.dynsym` has changed.
+/// * Otherwise this is always empty.
+changed_symtab_index: std.array_hash_map.Auto(Symbol.Global.Index, void),
 /// Counts how many relocations are currently in `.rela.dyn` which would require a `DT_TEXTREL`
 /// entry in the `.dynamic` section. This allows adding `DT_TEXTREL` to the output `.dynamic`
 /// section in `flush` only when it is actually necessary. See also `nodeWantsDsoRelocation`.
@@ -271,14 +270,14 @@ const Node = union(enum) {
     section_manual_size: Section.Index,
     /// May contain relocations.
     input_section: InputSection.Index,
-    /// Value is the name of a global which has an entry in `elf.copied_globals`, so, a global for
-    /// which we have emitted a copy relocation.
+    /// Value is a global which has an entry in `elf.copied_globals`, so, a global for which we have
+    /// emitted a copy relocation.
     ///
     /// TODO it would be better to emit these into `.bss` or `.bss.rel.ro`, once we support those.
     ///
     /// TODO: currently, the `elf.copied_globals` entry may not be there---this case exists because
     /// `MappedFile` does not (yet?) support deleting nodes. See logic in `setGlobalSymbolValue`.
-    copied_global: String(.strtab),
+    copied_global: Symbol.Global.Index,
     /// May contain relocations.
     nav: NavMapIndex,
     /// May contain relocations.
@@ -2200,10 +2199,9 @@ fn ensureUnusedSymbolCapacity(elf: *Elf, len: u32, kind: enum { all_local, maybe
     switch (kind) {
         .all_local => {},
         .maybe_global => {
-            try elf.globals.strong_def.ensureUnusedCapacity(gpa, len);
-            try elf.globals.weak_def.ensureUnusedCapacity(gpa, len);
-            try elf.globals.strong_undef.ensureUnusedCapacity(gpa, len);
-            try elf.globals.weak_undef.ensureUnusedCapacity(gpa, len);
+            try elf.globals.ensureUnusedCapacity(gpa, len);
+            try elf.globals_by_name.ensureUnusedCapacity(gpa, len);
+            try elf.unknown_globals.ensureUnusedCapacity(gpa, len);
 
             try elf.node_global_symbols.ensureUnusedCapacity(gpa, len);
 
@@ -2283,10 +2281,10 @@ fn ensureDynsymHashCapacity(elf: *Elf, max_dynsym_count: u32) Error!void {
             chains[0] = 0;
             for (1..cur_dynsym_count, chains[1..]) |dynsym_index_usize, *chain| {
                 const dynsym_index: u32 = @intCast(dynsym_index_usize);
-                const sym_name: String(.dynstr) = switch (elf.dynsymPtr(dynsym_index)) {
+                const dynsym_name: String(.dynstr) = switch (elf.dynsymPtr(dynsym_index)) {
                     inline else => |sym| @fromBackingInt(elf.targetLoad(&sym.name)),
                 };
-                const b = std.elf.hash.calculate(sym_name.slice(elf)) % buckets.len;
+                const b = std.elf.hash.calculate(dynsym_name.slice(elf)) % buckets.len;
                 // Make this symbol the head of that bucket, and chain to the old head.
                 chain.* = buckets[b];
                 elf.targetStore(&buckets[b], dynsym_index);
@@ -2326,10 +2324,10 @@ fn populateDynsymHashEntry(elf: *Elf, dynsym_index: u32) void {
             const buckets: []info.Int() = trailing[0..@intCast(elf.targetLoad(&header.nbucket))];
             const chains: []info.Int() = trailing[@intCast(elf.targetLoad(&header.nbucket))..][0..@intCast(elf.targetLoad(&header.nchain))];
 
-            const sym_name: String(.dynstr) = switch (elf.dynsymPtr(dynsym_index)) {
+            const dynsym_name: String(.dynstr) = switch (elf.dynsymPtr(dynsym_index)) {
                 inline else => |sym| @fromBackingInt(elf.targetLoad(&sym.name)),
             };
-            const b = std.elf.hash.calculate(sym_name.slice(elf)) % buckets.len;
+            const b = std.elf.hash.calculate(dynsym_name.slice(elf)) % buckets.len;
             // Make this symbol the head of that bucket, and chain to the old head.
             chains[dynsym_index] = buckets[b];
             elf.targetStore(&buckets[b], dynsym_index);
@@ -2367,10 +2365,10 @@ fn clearDynsymHashEntry(elf: *Elf, dynsym_index: u32) void {
             const buckets: []info.Int() = trailing[0..@intCast(elf.targetLoad(&header.nbucket))];
             const chains: []info.Int() = trailing[@intCast(elf.targetLoad(&header.nbucket))..][0..@intCast(elf.targetLoad(&header.nchain))];
 
-            const sym_name: String(.dynstr) = switch (elf.dynsymPtr(dynsym_index)) {
+            const dynsym_name: String(.dynstr) = switch (elf.dynsymPtr(dynsym_index)) {
                 inline else => |sym| @fromBackingInt(elf.targetLoad(&sym.name)),
             };
-            const b = std.elf.hash.calculate(sym_name.slice(elf)) % buckets.len;
+            const b = std.elf.hash.calculate(dynsym_name.slice(elf)) % buckets.len;
 
             const next_dynsym_index = elf.targetLoad(&chains[dynsym_index]);
             elf.targetStore(&chains[dynsym_index], 0);
@@ -2479,11 +2477,12 @@ fn addLocalSymbolAssumeCapacity(elf: *Elf, opts: AddLocalSymbolOptions) Symbol.L
                 new_index.ptr(elf).* = target_index.ptr(elf).*;
                 // ...then update the `elf.globals` tracking.
                 const global_name: String(.strtab) = @fromBackingInt(elf.targetLoad(&new_sym.name));
-                elf.globalByName(global_name).?.symtab_index = new_index;
+                const gsi = elf.globalByName(global_name.slice(elf)).?;
+                gsi.ptr(elf).symtab_index = new_index;
 
                 if (elf.ehdrType() == .REL and target_index.ptr(elf).first_target_reloc != .none) {
                     // This symbol's index is changing, so queue an update of relocs targeting it.
-                    elf.changed_symtab_index.putAssumeCapacity(global_name, {});
+                    elf.changed_symtab_index.putAssumeCapacity(gsi, {});
                 }
             }
 
@@ -2509,140 +2508,84 @@ fn addLocalSymbolAssumeCapacity(elf: *Elf, opts: AddLocalSymbolOptions) Symbol.L
     }
 }
 
-const AddGlobalSymbolOptions = struct {
-    const Name = struct {
-        strtab: String(.strtab),
-        dynstr: String(.dynstr),
-        fn string(elf: *Elf, slice: []const u8) Error!Name {
-            return .{
-                .strtab = try elf.string(.strtab, slice),
-                .dynstr = switch (elf.shndx.dynsym) {
-                    .UNDEF => .empty,
-                    else => try elf.string(.dynstr, slice),
-                },
-            };
-        }
-    };
-
+fn addGlobalSymbolAssumeCapacity(elf: *Elf, opts: struct {
     node: MappedFile.Node.Index.Optional,
-    name: Name,
+    name: []const u8,
     lib_name: ?[]const u8 = null,
     value: u64,
     size: u64,
     type: std.elf.STT,
-    bind: enum { strong, weak },
+    bind: Symbol.Global.Bind,
     visibility: std.elf.STV,
     shndx: Section.Index,
-};
-fn addGlobalSymbolAssumeCapacity(elf: *Elf, opts: AddGlobalSymbolOptions) error{MultipleDefinitions}!Symbol.Id {
+}) (error{MultipleDefinitions} || Error)!Symbol.Global.Index {
     _ = opts.lib_name; // TODO
 
-    if (elf.shndx.dynsym == .UNDEF) {
-        assert(opts.name.dynstr == .empty);
-    } else {
-        assert(std.mem.eql(u8, opts.name.dynstr.slice(elf), opts.name.strtab.slice(elf)));
+    const adapter: Symbol.Global.NameAdapter = .{ .elf = elf };
+    const gop = elf.globals_by_name.getOrPutAssumeCapacityAdapted(opts.name, adapter);
+    const gsi: Symbol.Global.Index = @fromBackingInt(@intCast(gop.index));
+
+    if (gop.found_existing) {
+        // There's already a symbol with this name, we just need to potentially set its value, and
+        // to update its bind and visibility.
+        const new_bind: Symbol.Global.Bind = new_bind: {
+            if (opts.shndx == .UNDEF) {
+                // We are not defining the symbol, so we won't set its value and we should only
+                // update its bind if it is undefined and we won't weaken it.
+                if (!Symbol.Id.global(gsi).defined(elf) and
+                    gsi.bind(elf) == .weak and
+                    opts.bind == .strong)
+                {
+                    // Since the symbol is not only undefined but is now also strong, we now *need*
+                    // to see a definition for it at some point.
+                    if (!elf.dso_globals.contains(Symbol.Id.global(gsi).name(elf))) {
+                        elf.unknown_globals.putAssumeCapacityNoClobber(gsi, {});
+                    }
+                    break :new_bind .strong;
+                } else {
+                    break :new_bind gsi.bind(elf);
+                }
+            }
+            // We're providing a definition. If there is no other definition yet, that's easy, but
+            // if there is, we need to figure out which to keep.
+            if (!Symbol.Id.global(gsi).defined(elf)) {
+                _ = elf.unknown_globals.swapRemove(gsi); // previously undef so might be here
+                elf.setGlobalSymbolValue(gsi, .{
+                    .node = opts.node,
+                    .value = opts.value,
+                    .size = opts.size,
+                    .type = opts.type,
+                    .shndx = opts.shndx,
+                });
+                break :new_bind opts.bind;
+            }
+            switch (opts.bind) {
+                .strong => switch (gsi.bind(elf)) {
+                    .strong => return error.MultipleDefinitions,
+                    .weak => {
+                        elf.setGlobalSymbolValue(gsi, .{
+                            .node = opts.node,
+                            .value = opts.value,
+                            .size = opts.size,
+                            .type = opts.type,
+                            .shndx = opts.shndx,
+                        });
+                        break :new_bind .strong;
+                    },
+                },
+                .weak => {
+                    break :new_bind gsi.bind(elf);
+                },
+            }
+        };
+        elf.mergeGlobalSymbolVisibility(gsi, opts.visibility, new_bind);
+        return gsi;
     }
 
-    // We break from this `switch` only if this symbol name did not previously exist at all and so
-    // we have added a new entry to one of the maps in `elf.globals`. In that case we actually need
-    // a new symtab entry.
-    const new_global_ptr: *Symbol.Global = if (opts.shndx != .UNDEF) switch (opts.bind) {
-        .strong => new_global: {
-            const gop = elf.globals.strong_def.getOrPutAssumeCapacity(opts.name.strtab);
-            if (gop.found_existing) return error.MultipleDefinitions;
-            const old_kv = elf.globals.weak_def.fetchSwapRemove(opts.name.strtab) orelse
-                elf.globals.strong_undef.fetchSwapRemove(opts.name.strtab) orelse
-                elf.globals.weak_undef.fetchSwapRemove(opts.name.strtab) orelse {
-                // The symbol did not already exist, so we'll use the "new global" path.
-                break :new_global gop.value_ptr;
-            };
-            gop.value_ptr.* = old_kv.value;
-            elf.setGlobalSymbolValue(opts.name.strtab, gop.value_ptr, .{
-                .node = opts.node,
-                .value = opts.value,
-                .size = opts.size,
-                .type = opts.type,
-                .shndx = opts.shndx,
-            });
-            elf.mergeGlobalSymbolVisibility(gop.value_ptr, opts.visibility, .strong);
-            return .global(opts.name.strtab);
-        },
-        .weak => new_global: {
-            if (elf.globals.strong_def.getPtr(opts.name.strtab)) |global| {
-                // The existing definition holds, we just merge our visibility in.
-                elf.mergeGlobalSymbolVisibility(global, opts.visibility, .strong);
-                return .global(opts.name.strtab);
-            }
-            const gop = elf.globals.weak_def.getOrPutAssumeCapacity(opts.name.strtab);
-            if (gop.found_existing) {
-                // The existing definition holds, we just merge our visibility in.
-                elf.mergeGlobalSymbolVisibility(gop.value_ptr, opts.visibility, .weak);
-                return .global(opts.name.strtab);
-            }
-            const old_kv = elf.globals.strong_undef.fetchSwapRemove(opts.name.strtab) orelse
-                elf.globals.weak_undef.fetchSwapRemove(opts.name.strtab) orelse {
-                // The symbol did not already exist, so we'll use the "new global" path.
-                break :new_global gop.value_ptr;
-            };
-            gop.value_ptr.* = old_kv.value;
-            elf.setGlobalSymbolValue(opts.name.strtab, gop.value_ptr, .{
-                .node = opts.node,
-                .value = opts.value,
-                .size = opts.size,
-                .type = opts.type,
-                .shndx = opts.shndx,
-            });
-            elf.mergeGlobalSymbolVisibility(gop.value_ptr, opts.visibility, .weak);
-            return .global(opts.name.strtab);
-        },
-    } else switch (opts.bind) {
-        .strong => new_global: {
-            if (elf.globals.strong_def.getPtr(opts.name.strtab)) |global| {
-                // The existing definition holds, we just merge our visibility in.
-                elf.mergeGlobalSymbolVisibility(global, opts.visibility, .strong);
-                return .global(opts.name.strtab);
-            }
-            if (elf.globals.weak_def.getPtr(opts.name.strtab)) |global| {
-                // The existing definition holds, we just merge our visibility in.
-                elf.mergeGlobalSymbolVisibility(global, opts.visibility, .weak);
-                return .global(opts.name.strtab);
-            }
-            const gop = elf.globals.strong_undef.getOrPutAssumeCapacity(opts.name.strtab);
-            if (gop.found_existing) {
-                // The existing symbol is okay, we just merge our visibility in.
-                elf.mergeGlobalSymbolVisibility(gop.value_ptr, opts.visibility, .strong);
-                return .global(opts.name.strtab);
-            }
-            const old_kv = elf.globals.weak_undef.fetchSwapRemove(opts.name.strtab) orelse {
-                // The symbol did not already exist, so we'll use the "new global" path.
-                break :new_global gop.value_ptr;
-            };
-            gop.value_ptr.* = old_kv.value;
-            elf.mergeGlobalSymbolVisibility(gop.value_ptr, opts.visibility, .strong);
-            return .global(opts.name.strtab);
-        },
-        .weak => new_global: {
-            if (elf.globals.strong_def.getPtr(opts.name.strtab) orelse
-                elf.globals.strong_undef.getPtr(opts.name.strtab)) |global|
-            {
-                // The existing symbol is okay, we just merge our visibility in.
-                elf.mergeGlobalSymbolVisibility(global, opts.visibility, .strong);
-                return .global(opts.name.strtab);
-            }
-            if (elf.globals.weak_def.getPtr(opts.name.strtab)) |global| {
-                // The existing symbol is okay, we just merge our visibility in.
-                elf.mergeGlobalSymbolVisibility(global, opts.visibility, .weak);
-                return .global(opts.name.strtab);
-            }
-            const gop = elf.globals.weak_undef.getOrPutAssumeCapacity(opts.name.strtab);
-            if (gop.found_existing) {
-                // The existing symbol is okay, we just merge our visibility in.
-                elf.mergeGlobalSymbolVisibility(gop.value_ptr, opts.visibility, .weak);
-                return .global(opts.name.strtab);
-            }
-            break :new_global gop.value_ptr;
-        },
-    };
+    assert(elf.globals.items.len == @backingInt(gsi));
+    assert(elf.globals.addOneAssumeCapacity() == gsi.ptr(elf)); // populated later
+
+    const strtab_name = try elf.string(.strtab, opts.name);
 
     const force_local_bind: bool = switch (opts.visibility) {
         .HIDDEN, .INTERNAL => elf.ehdrType() != .REL,
@@ -2657,7 +2600,7 @@ fn addGlobalSymbolAssumeCapacity(elf: *Elf, opts: AddGlobalSymbolOptions) error{
     };
 
     const @"type": std.elf.STT = switch (opts.type) {
-        .NOTYPE => if (elf.dso_globals.get(opts.name.strtab)) |dso_global| t: {
+        .NOTYPE => if (elf.dso_globals.get(strtab_name)) |dso_global| t: {
             break :t dso_global.type;
         } else .NOTYPE,
         else => |t| t,
@@ -2678,7 +2621,7 @@ fn addGlobalSymbolAssumeCapacity(elf: *Elf, opts: AddGlobalSymbolOptions) error{
             // ...then populate the newly-valid symbol pointer
             const sym = @field(elf.symPtr(sym_index), @tagName(class));
             sym.* = .{
-                .name = @backingInt(opts.name.strtab),
+                .name = @backingInt(strtab_name),
                 .value = @intCast(opts.value),
                 .size = @intCast(opts.size),
                 .info = .{ .type = @"type", .bind = bind },
@@ -2691,19 +2634,30 @@ fn addGlobalSymbolAssumeCapacity(elf: *Elf, opts: AddGlobalSymbolOptions) error{
         },
     }
 
-    const old_head: String(.strtab) = old_head: {
-        const node = opts.node.unwrap() orelse break :old_head .empty;
-        const gop = elf.node_global_symbols.getOrPutAssumeCapacity(node);
-        const old_head: String(.strtab) = if (gop.found_existing) gop.value_ptr.* else .empty;
-        gop.value_ptr.* = opts.name.strtab;
+    const old_head: Symbol.Global.Index.Optional = old_head: {
+        const node = opts.node.unwrap() orelse break :old_head .none;
+        const node_globals_gop = elf.node_global_symbols.getOrPutAssumeCapacity(node);
+        const old_head: Symbol.Global.Index.Optional = if (node_globals_gop.found_existing)
+            .wrap(node_globals_gop.value_ptr.*)
+        else
+            .none;
+        node_globals_gop.value_ptr.* = gsi;
         break :old_head old_head;
     };
 
-    new_global_ptr.* = .{
+    gsi.ptr(elf).* = .{
         .symtab_index = sym_index,
         .dynsym_index = dynsym_index: {
-            if (elf.shndx.dynsym == .UNDEF) break :dynsym_index 0;
-            if (force_local_bind) break :dynsym_index 0;
+            if (force_local_bind) {
+                break :dynsym_index switch (opts.bind) {
+                    .strong => .demoted_strong,
+                    .weak => .demoted_weak,
+                };
+            }
+            if (elf.shndx.dynsym == .UNDEF) {
+                break :dynsym_index .no_section;
+            }
+            const dynstr_name = try elf.string(.dynstr, opts.name);
             switch (elf.shdrPtr(elf.shndx.dynsym)) {
                 inline else => |shdr, class| {
                     const Sym = class.ElfN().Sym;
@@ -2714,7 +2668,7 @@ fn addGlobalSymbolAssumeCapacity(elf: *Elf, opts: AddGlobalSymbolOptions) error{
                     // ...then populate the newly-valid symbol pointer
                     const sym = @field(elf.dynsymPtr(dynsym_index), @tagName(class));
                     sym.* = .{
-                        .name = @backingInt(opts.name.dynstr),
+                        .name = @backingInt(dynstr_name),
                         .value = @intCast(opts.value),
                         .size = @intCast(opts.size),
                         .info = .{ .type = @"type", .bind = bind },
@@ -2725,76 +2679,76 @@ fn addGlobalSymbolAssumeCapacity(elf: *Elf, opts: AddGlobalSymbolOptions) error{
                         std.mem.byteSwapAllFields(Sym, sym);
                     }
                     elf.appendDynsymHashEntry(dynsym_index);
-                    break :dynsym_index dynsym_index;
+                    break :dynsym_index .wrap(dynsym_index);
                 },
             }
         },
-        .prev_in_node = .empty,
+        .prev_in_node = .none,
         .next_in_node = old_head,
     };
 
-    if (old_head != .empty) {
-        const old_head_ptr = elf.globalByName(old_head).?;
+    if (old_head.unwrap()) |old_head_gsi| {
+        const old_head_ptr = old_head_gsi.ptr(elf);
         assert(old_head_ptr.symtab_index.ptr(elf).node == opts.node);
-        assert(old_head_ptr.prev_in_node == .empty);
-        old_head_ptr.prev_in_node = opts.name.strtab;
+        assert(old_head_ptr.prev_in_node == .none);
+        old_head_ptr.prev_in_node = .wrap(gsi);
+    }
+
+    if (opts.shndx == .UNDEF and
+        opts.bind == .strong and
+        !elf.dso_globals.contains(strtab_name))
+    {
+        elf.unknown_globals.putAssumeCapacityNoClobber(gsi, {});
     }
 
     if (force_local_bind) {
-        elf.moveDemotedGlobal(new_global_ptr);
+        elf.moveDemotedGlobal(gsi);
     }
 
     switch (@"type") {
         .FUNC, .GNU_IFUNC => if (elf.ehdrType() != .REL and
-            elf.classifySymbolValue(.global(opts.name.strtab)) == .dynamic)
+            elf.classifySymbolValue(.global(gsi)) == .dynamic)
         {
             // This STT_FUNC symbol might be defined externally, so it needs a PLT entry.
-            elf.addPltEntry(opts.name.strtab, new_global_ptr.dynsym_index);
+            elf.addPltEntry(gsi);
         },
         else => {},
     }
 
-    return .global(opts.name.strtab);
+    return gsi;
 }
-fn setGlobalSymbolValue(
-    elf: *Elf,
-    global_name: String(.strtab),
-    global_ptr: *Symbol.Global,
-    new: struct {
-        node: MappedFile.Node.Index.Optional,
-        value: u64,
-        size: u64,
-        type: std.elf.STT,
-        shndx: Section.Index,
-    },
-) void {
+fn setGlobalSymbolValue(elf: *Elf, gsi: Symbol.Global.Index, new: struct {
+    node: MappedFile.Node.Index.Optional,
+    value: u64,
+    size: u64,
+    type: std.elf.STT,
+    shndx: Section.Index,
+}) void {
+    const global_ptr = gsi.ptr(elf);
+
     assert(new.shndx != .UNDEF);
     if (global_ptr.symtab_index.ptr(elf).node.unwrap()) |old_node| {
-        if (global_ptr.next_in_node != .empty) {
-            const next = elf.globalByName(global_ptr.next_in_node).?;
-            assert(next.prev_in_node == global_name);
-            assert(next.symtab_index.ptr(elf).node.unwrap().? == old_node);
-            next.prev_in_node = global_ptr.prev_in_node;
+        if (global_ptr.next_in_node.unwrap()) |next_gsi| {
+            assert(next_gsi.ptr(elf).prev_in_node == Symbol.Global.Index.Optional.wrap(gsi));
+            next_gsi.ptr(elf).prev_in_node = global_ptr.prev_in_node;
         }
-        if (global_ptr.prev_in_node != .empty) {
-            const prev = elf.globalByName(global_ptr.prev_in_node).?;
-            assert(prev.next_in_node == global_name);
-            assert(prev.symtab_index.ptr(elf).node.unwrap().? == old_node);
-            prev.next_in_node = global_ptr.next_in_node;
+        if (global_ptr.prev_in_node.unwrap()) |prev_gsi| {
+            assert(prev_gsi.ptr(elf).next_in_node == Symbol.Global.Index.Optional.wrap(gsi));
+            prev_gsi.ptr(elf).next_in_node = global_ptr.next_in_node;
         } else {
             // We're the start of the linked list, so we need to change the head.
-            if (global_ptr.next_in_node == .empty) {
-                assert(elf.node_global_symbols.fetchSwapRemove(old_node).?.value == global_name);
+            if (global_ptr.next_in_node.unwrap()) |next_gsi| {
+                elf.node_global_symbols.getPtr(old_node).?.* = next_gsi;
             } else {
-                elf.node_global_symbols.getPtr(old_node).?.* = global_ptr.next_in_node;
+                assert(elf.node_global_symbols.fetchSwapRemove(old_node).?.value == gsi);
             }
         }
     } else {
-        assert(global_ptr.next_in_node == .empty);
-        assert(global_ptr.prev_in_node == .empty);
+        assert(global_ptr.next_in_node == .none);
+        assert(global_ptr.prev_in_node == .none);
     }
 
-    if (elf.copied_globals.fetchSwapRemove(global_name)) |copied_global_kv| {
+    if (elf.copied_globals.fetchSwapRemove(gsi)) |copied_global_kv| {
         // This is a quite rare case: there was a definition for this symbol in a shared library
         // input, and we ended up emitting a copy relocation for it, but we've now got our *own*
         // definition which replaces it. We know that our definition cannot be preempted because we
@@ -2808,27 +2762,25 @@ fn setGlobalSymbolValue(
         // TODO: once `MappedFile` has a way to delete a node (so it can re-use the space), we
         // should delete `copied_global_kv.value.node`, which is an "orphaned" `copied_global` node.
     } else {
-        _ = elf.want_copied_globals.swapRemove(global_name);
+        _ = elf.want_copied_globals.swapRemove(gsi);
     }
 
     global_ptr.symtab_index.ptr(elf).node = new.node;
 
-    const old_head: String(.strtab) = old_head: {
-        const new_node = new.node.unwrap() orelse break :old_head .empty;
+    const old_head: Symbol.Global.Index.Optional = old_head: {
+        const new_node = new.node.unwrap() orelse break :old_head .none;
         const gop = elf.node_global_symbols.getOrPutAssumeCapacity(new_node);
-        const old_head: String(.strtab) = if (gop.found_existing) gop.value_ptr.* else .empty;
-        gop.value_ptr.* = global_name;
+        const old_head: Symbol.Global.Index.Optional = if (gop.found_existing) .wrap(gop.value_ptr.*) else .none;
+        gop.value_ptr.* = gsi;
         break :old_head old_head;
     };
 
-    global_ptr.prev_in_node = .empty;
+    global_ptr.prev_in_node = .none;
     global_ptr.next_in_node = old_head;
 
-    if (old_head != .empty) {
-        const old_head_ptr = elf.globalByName(old_head).?;
-        assert(old_head_ptr.symtab_index.ptr(elf).node == new.node);
-        assert(old_head_ptr.prev_in_node == .empty);
-        old_head_ptr.prev_in_node = global_name;
+    if (old_head.unwrap()) |old_head_gsi| {
+        assert(old_head_gsi.ptr(elf).prev_in_node == .none);
+        old_head_gsi.ptr(elf).prev_in_node = .wrap(gsi);
     }
 
     // Now for the easy bit where we actually update the symtab entry.
@@ -2846,7 +2798,7 @@ fn setGlobalSymbolValue(
     }
 
     // ...and also the dynsym entry if there is one.
-    if (global_ptr.dynsym_index != 0) switch (elf.dynsymPtr(global_ptr.dynsym_index)) {
+    if (global_ptr.dynsym_index.unwrap()) |dynsym_index| switch (elf.dynsymPtr(dynsym_index)) {
         inline else => |sym| {
             // Don't bother with `sym.value` here: it'll be updated by `flushMoved`.
             elf.targetStore(&sym.size, @intCast(new.size));
@@ -2862,9 +2814,9 @@ fn setGlobalSymbolValue(
     // If this symbol was previously undefined, it may have had a PLT entry. If so, we now need to
     // delete its newly-unnecessary runtime relocation to avoid a runtime dynamic linker error.
     // This also allows the PLT entry to be reused---see `pltEntryIsDead`.
-    if (elf.plt.getIndex(global_name)) |plt_index| {
+    if (elf.plt.getIndex(gsi)) |plt_index| {
         if (!elf.pltEntryIsDead(plt_index) and
-            elf.classifySymbolValue(.global(global_name)) != .dynamic)
+            elf.classifySymbolValue(.global(gsi)) != .dynamic)
         {
             elf.shndx.rela_plt.relaDeleteOne(elf, @fromBackingInt(@intCast(plt_index)));
             assert(elf.pltEntryIsDead(plt_index));
@@ -2874,81 +2826,155 @@ fn setGlobalSymbolValue(
     // If this symbol was previously undefined, relocations targeting it may have been lowered to
     // runtime relocations which we have now discovered we do not need, so delete those. This does
     // not apply if the symbol is preemptible, which we check with `classifySymbolValue`.
-    if (elf.shndx.dynamic != .UNDEF and elf.classifySymbolValue(.global(global_name)) != .dynamic) {
-        Symbol.Id.global(global_name).deleteDynamicTargetRelocs(elf);
+    if (elf.shndx.dynamic != .UNDEF and elf.classifySymbolValue(.global(gsi)) != .dynamic) {
+        Symbol.Id.global(gsi).deleteDynamicTargetRelocs(elf);
     }
 
     // Finally, update the symbol value, re-applying target relocations. Also note that because we
     // possibly removed the PLT entry above, some relocations which were previously targeting the
     // PLT will now instead target the symbol itself.
-    Symbol.Id.global(global_name).flushMoved(elf, new.value);
+    Symbol.Id.global(gsi).flushMoved(elf, new.value);
 }
 /// When the same global symbol appears in two inputs---even if one symbol is defined and the other
 /// undefined---their visibility values are combined to determine the resulting visibility, which
 /// can also affect the bind of the symbol we output.
-fn mergeGlobalSymbolVisibility(elf: *Elf, global_ptr: *Symbol.Global, other_visibility: std.elf.STV, bind: enum { strong, weak }) void {
+fn mergeGlobalSymbolVisibility(
+    elf: *Elf,
+    gsi: Symbol.Global.Index,
+    other_visibility: std.elf.STV,
+    bind: Symbol.Global.Bind,
+) void {
+    const global_ptr = gsi.ptr(elf);
+
     const old_visibility: std.elf.STV = switch (elf.symPtr(global_ptr.symtab_index)) {
         inline else => |sym| elf.targetLoad(&sym.other).visibility,
     };
-    // The combined visibility is essentially the "strictest" of the two, with most strict being
-    // INTERNAL, followed by HIDDEN, PROTECTED, DEFAULT.
-    const new_visibility: std.elf.STV, const newly_hidden: bool = switch (old_visibility) {
-        .INTERNAL => .{ .INTERNAL, false },
+
+    // We will combine the old and new visibilities. The combined visibility is basically whichever
+    // is "stricter", with most strict being INTERNAL, followed by HIDDEN, PROTECTED, DEFAULT.
+
+    // We also need to deal with a concept I call "symbol demotion". If a symbol is `STV_HIDDEN` or
+    // `STV_INTERNAL`, and we're emitting an ELF module (executable or shared object, as opposed to
+    // a relocatable), then the symbol should have binding `STB_LOCAL` in the output. Therefore, if
+    // we are putting the global in this state for the first time---let's call it "demoting" the
+    // global to `STB_LOCAL`---we'll need to update its bind in the symtab.
+    const Demote = enum { no, yes_already, yes_new };
+    const new_visibility: std.elf.STV, const demote_if_module: Demote = switch (old_visibility) {
+        .INTERNAL => .{ .INTERNAL, .yes_already },
         .HIDDEN => switch (other_visibility) {
-            .INTERNAL => .{ .INTERNAL, false },
-            .HIDDEN, .PROTECTED, .DEFAULT => .{ .HIDDEN, false },
+            .INTERNAL => .{ .INTERNAL, .yes_already },
+            .HIDDEN, .PROTECTED, .DEFAULT => .{ .HIDDEN, .yes_already },
         },
         .PROTECTED => switch (other_visibility) {
-            .INTERNAL => .{ .INTERNAL, true },
-            .HIDDEN => .{ .HIDDEN, true },
-            .PROTECTED, .DEFAULT => .{ .PROTECTED, false },
+            .INTERNAL => .{ .INTERNAL, .yes_new },
+            .HIDDEN => .{ .HIDDEN, .yes_new },
+            .PROTECTED, .DEFAULT => .{ .PROTECTED, .no },
         },
         .DEFAULT => switch (other_visibility) {
-            .INTERNAL => .{ .INTERNAL, true },
-            .HIDDEN => .{ .HIDDEN, true },
-            .PROTECTED => .{ .PROTECTED, false },
-            .DEFAULT => .{ .DEFAULT, false },
+            .INTERNAL => .{ .INTERNAL, .yes_new },
+            .HIDDEN => .{ .HIDDEN, .yes_new },
+            .PROTECTED => .{ .PROTECTED, .no },
+            .DEFAULT => .{ .DEFAULT, .no },
         },
     };
-    // If the symbol is HIDDEN/INTERNAL and we're emitting an ELF module (executable or shared
-    // object), then the symbol should have binding STB_LOCAL in the output. Therefore, if we are
-    // putting the global in this state for the first time---let's call it "demoting" the global to
-    // STB_LOCAL---we need to update its bind in the symtab.
-    const demote_to_local = newly_hidden and elf.ehdrType() != .REL;
-    switch (elf.symPtr(global_ptr.symtab_index)) {
-        inline else => |sym, class| {
-            const old_info = elf.targetLoad(&sym.info);
-            const new_info: class.ElfN().Sym.Info = .{
-                .type = old_info.type,
-                .bind = if (demote_to_local) b: {
-                    assert(old_info.bind != .LOCAL);
-                    break :b .LOCAL;
-                } else if (old_info.bind == .LOCAL) .LOCAL else switch (bind) {
-                    .strong => .GLOBAL,
-                    .weak => .WEAK,
-                },
-            };
-            elf.targetStore(&sym.other, .{ .visibility = new_visibility });
-            elf.targetStore(&sym.info, new_info);
-            // also update dynsym
-            if (global_ptr.dynsym_index != 0) {
-                const dynsym = @field(elf.dynsymPtr(global_ptr.dynsym_index), @tagName(class));
-                elf.targetStore(&dynsym.other, .{ .visibility = new_visibility });
-                elf.targetStore(&dynsym.info, new_info);
-            }
+    const demote: Demote = switch (elf.ehdrType()) {
+        .REL => .no, // nothing is demoted in relocatables
+        .EXEC, .DYN => demote_if_module,
+    };
+    switch (demote) {
+        .no => switch (elf.symPtr(global_ptr.symtab_index)) {
+            inline else => |sym, class| {
+                // Just update the symtab entry with the new visibility and binding.
+                const old_info = elf.targetLoad(&sym.info);
+                assert(old_info.bind != .LOCAL); // symbol should not be demoted
+                const new_info: class.ElfN().Sym.Info = .{
+                    .type = old_info.type,
+                    .bind = switch (bind) {
+                        .strong => .GLOBAL,
+                        .weak => .WEAK,
+                    },
+                };
+                elf.targetStore(&sym.other, .{ .visibility = new_visibility });
+                elf.targetStore(&sym.info, new_info);
+
+                // Also update dynsym if necessary.
+                if (global_ptr.dynsym_index.unwrap()) |dynsym_index| {
+                    const dynsym_ptr = @field(elf.dynsymPtr(dynsym_index), @tagName(class));
+                    assert(elf.targetLoad(&dynsym_ptr.info) == old_info);
+                    elf.targetStore(&dynsym_ptr.other, .{ .visibility = new_visibility });
+                    elf.targetStore(&dynsym_ptr.info, new_info);
+                } else {
+                    assert(global_ptr.dynsym_index == .no_section); // symbol should not be demoted
+                }
+            },
         },
-    }
-    if (demote_to_local) {
-        // When demoting a global to STB_LOCAL, we need to move its symtab index so that it is with
-        // the STB_LOCAL symbols instead of the global symbols.
-        elf.moveDemotedGlobal(global_ptr);
+
+        .yes_already => {
+            // Update the visibility in the symtab entry...
+            switch (elf.symPtr(global_ptr.symtab_index)) {
+                inline else => |sym| {
+                    assert(elf.targetLoad(&sym.info).bind == .LOCAL); // symbol should be demoted
+                    elf.targetStore(&sym.other, .{ .visibility = new_visibility });
+                },
+            }
+            // ...and update the binding tracked in `global_ptr.dynsym_index`.
+            switch (global_ptr.dynsym_index) {
+                .demoted_strong, .demoted_weak => {},
+                .no_section => unreachable, // `.demoted_strong` or `.demoted_weak` should take priority
+                _ => unreachable, // demoted symbol should not have a dynsym index
+            }
+            global_ptr.dynsym_index = switch (bind) {
+                .strong => .demoted_strong,
+                .weak => .demoted_weak,
+            };
+        },
+
+        .yes_new => {
+            // Update the binding and visibility in the symtab, but don't bother with dynsym because
+            // we're going to delete the dynsym entry in a moment.
+            switch (elf.symPtr(global_ptr.symtab_index)) {
+                inline else => |sym| {
+                    const old_info = elf.targetLoad(&sym.info);
+                    assert(old_info.bind != .LOCAL); // symbol should not be already demoted
+                    elf.targetStore(&sym.info, .{ .type = old_info.type, .bind = .LOCAL });
+                    elf.targetStore(&sym.other, .{ .visibility = new_visibility });
+                },
+            }
+
+            // If there was a dynsym entry, it is no longer necessary.
+            if (global_ptr.dynsym_index.unwrap()) |dynsym_index| {
+                elf.deleteDynsym(dynsym_index);
+            } else {
+                assert(global_ptr.dynsym_index == .no_section); // symbol should not be already demoted
+            }
+
+            // Instead, that field is repurposed to track the symbol's binding.
+            global_ptr.dynsym_index = switch (bind) {
+                .strong => .demoted_strong,
+                .weak => .demoted_weak,
+            };
+
+            // If there was a copy relocation for this symbol, it is now unnecessary. See equivalent
+            // logic in `setGlobalSymbolValue` for an explanation of this case.
+            if (elf.copied_globals.fetchSwapRemove(gsi)) |copied_global_kv| {
+                elf.shndx.rela_dyn.relaDeleteOne(elf, copied_global_kv.value.rela_index);
+                // TODO: once we can delete `MappedFile` nodes, delete `copied_global_kv.value.node`
+            } else {
+                _ = elf.want_copied_globals.swapRemove(gsi);
+            }
+
+            // Finally, we need to update the global's symtab index so that it is adjacent to the
+            // other `STB_LOCAL` symbols instead of the global symbols.
+            elf.moveDemotedGlobal(gsi);
+        },
     }
 }
 /// If a symbol which was STB_GLOBAL/STB_WEAK becomes STB_LOCAL (see `mergeGlobalSymbolVisibility`),
 /// the symbol must be moved from the "globals" part of the symtab to the "locals" part, because ELF
 /// requires that all STB_LOCAL symbols in a symbol table appear before any global symbols.
-fn moveDemotedGlobal(elf: *Elf, global_ptr: *Symbol.Global) void {
+fn moveDemotedGlobal(elf: *Elf, gsi: Symbol.Global.Index) void {
     assert(elf.ehdrType() != .REL); // demotion only happens when emitting an ELF module
+    const global_ptr = gsi.ptr(elf);
     switch (elf.shdrPtr(.symtab)) {
         inline else => |shdr, class| {
             // `shdr.info` stores the index of the first global symbol. We are going to swap the
@@ -2969,12 +2995,9 @@ fn moveDemotedGlobal(elf: *Elf, global_ptr: *Symbol.Global) void {
                 const src_sym_ptr = @field(elf.symPtr(src_index), @tagName(class));
                 const dest_sym_ptr = @field(elf.symPtr(dest_index), @tagName(class));
 
-                const this_name: String(.strtab) = @fromBackingInt(elf.targetLoad(&src_sym_ptr.name));
-                assert(elf.globalByName(this_name).? == global_ptr);
-
                 const other_name: String(.strtab) = @fromBackingInt(elf.targetLoad(&dest_sym_ptr.name));
-                const other_global_ptr = elf.globalByName(other_name).?;
-                assert(other_global_ptr.symtab_index == dest_index);
+                const other_gsi = elf.globalByName(other_name.slice(elf)).?;
+                assert(other_gsi.ptr(elf).symtab_index == dest_index);
 
                 // First swap the symtab entries...
                 std.mem.swap(class.ElfN().Sym, src_sym_ptr, dest_sym_ptr);
@@ -2982,55 +3005,59 @@ fn moveDemotedGlobal(elf: *Elf, global_ptr: *Symbol.Global) void {
                 std.mem.swap(Symbol, src_index.ptr(elf), dest_index.ptr(elf));
                 // ...then update the `elf.globals` tracking.
                 global_ptr.symtab_index = dest_index;
-                other_global_ptr.symtab_index = src_index;
+                other_gsi.ptr(elf).symtab_index = src_index;
+            }
+        },
+    }
+}
+/// Asserts that the `.dynsym` section exists, and removes the entry at index `dynsym_index`,
+/// swapping another entry into its place to keep the section compact. Also updates the `.hash`
+/// section, and updates `Symbol.Global.dynsym_index` for whichever global gets swapped into
+/// `dynsym_index`. However, this does *not* in any way modify the `Symbol.Global` corresponding to
+/// the old symbol at `dynsym_index`.
+///
+/// Asserts that there is at least 1 unused capacity in `elf.changed_symtab_index`.
+fn deleteDynsym(elf: *Elf, dynsym_index: u32) void {
+    // To keep dynsym compact, we'll swap another symbol into `dynsym_index`.
+    switch (elf.shdrPtr(elf.shndx.dynsym)) {
+        inline else => |dynsym_shdr, class| {
+            const ent_size = @sizeOf(class.ElfN().Sym);
+            assert(elf.targetLoad(&dynsym_shdr.entsize) == ent_size);
+
+            // We're going to decrease the size of `.dynsym`, thereby removing its last index.
+            const old_size = elf.targetLoad(&dynsym_shdr.size);
+            const new_size = old_size - ent_size;
+            const remove_dynsym_index: u32 = @intCast(@divExact(new_size, ent_size));
+
+            elf.popDynsymHashEntry(remove_dynsym_index);
+
+            if (dynsym_index != remove_dynsym_index) {
+                // The demoted global wasn't the last entry, so move whatever entry we just
+                // truncated out of dynsym into its place.
+
+                elf.clearDynsymHashEntry(dynsym_index);
+
+                const src_dynsym_ptr = @field(elf.dynsymPtr(remove_dynsym_index), @tagName(class));
+                const dest_dynsym_ptr = @field(elf.dynsymPtr(dynsym_index), @tagName(class));
+
+                // MLUGG TODO: this depends on symbol names matching between dynsym and symtab
+                const moved_name: String(.dynstr) = @fromBackingInt(elf.targetLoad(&src_dynsym_ptr.name));
+                const moved_gsi = elf.globalByName(moved_name.slice(elf)).?;
+
+                dest_dynsym_ptr.* = src_dynsym_ptr.*;
+
+                assert(moved_gsi.ptr(elf).dynsym_index.unwrap().? == remove_dynsym_index);
+                moved_gsi.ptr(elf).dynsym_index = .wrap(dynsym_index);
+
+                elf.populateDynsymHashEntry(dynsym_index);
+
+                // Since that symbol's dynsym index has changed, we'll have to update any
+                // relocation entries targeting it.
+                elf.changed_symtab_index.putAssumeCapacity(moved_gsi, {});
             }
 
-            // We also need to get rid of the dynsym entry if there is one. To keep dynsym compact,
-            // we'll move another symbol into its place just like we did above.
-            if (global_ptr.dynsym_index != 0) {
-                const dynsym_shdr = @field(elf.shdrPtr(elf.shndx.dynsym), @tagName(class));
-
-                const ent_size = @sizeOf(class.ElfN().Sym);
-                assert(elf.targetLoad(&dynsym_shdr.entsize) == ent_size);
-
-                // We're going to decrease the size of `.dynsym`, thereby removing its last index.
-                const old_size = elf.targetLoad(&dynsym_shdr.size);
-                const new_size = old_size - ent_size;
-                const remove_dynsym_index: u32 = @intCast(@divExact(new_size, ent_size));
-
-                elf.popDynsymHashEntry(remove_dynsym_index);
-
-                const free_dynsym_index = global_ptr.dynsym_index;
-                global_ptr.dynsym_index = 0;
-
-                if (free_dynsym_index != remove_dynsym_index) {
-                    // The demoted global wasn't the last entry, so move whatever entry we just
-                    // truncated out of dynsym into its place.
-
-                    elf.clearDynsymHashEntry(free_dynsym_index);
-
-                    const src_dynsym_ptr = @field(elf.dynsymPtr(remove_dynsym_index), @tagName(class));
-                    const dest_dynsym_ptr = @field(elf.dynsymPtr(free_dynsym_index), @tagName(class));
-
-                    const moved_name_dynstr: String(.dynstr) = @fromBackingInt(elf.targetLoad(&src_dynsym_ptr.name));
-                    const moved_name = elf.stringExisting(.strtab, moved_name_dynstr.slice(elf));
-                    const moved_global_ptr = elf.globalByName(moved_name).?;
-
-                    dest_dynsym_ptr.* = src_dynsym_ptr.*;
-
-                    assert(moved_global_ptr.dynsym_index == remove_dynsym_index);
-                    moved_global_ptr.dynsym_index = free_dynsym_index;
-
-                    elf.populateDynsymHashEntry(free_dynsym_index);
-
-                    // Since that symbol's dynsym index has changed, we'll have to update any
-                    // relocation entries targeting it.
-                    elf.changed_symtab_index.putAssumeCapacity(moved_name, {});
-                }
-
-                // Now that we've given that symbol a new home, actually decrease the section size.
-                elf.targetStore(&dynsym_shdr.size, new_size);
-            }
+            // Now that we've given that symbol a new home, actually decrease the section size.
+            elf.targetStore(&dynsym_shdr.size, new_size);
         },
     }
 }
@@ -3049,18 +3076,102 @@ const Symbol = struct {
     const Global = struct {
         /// The current index of the symtab entry for this global symbol.
         symtab_index: Symbol.Index,
-        /// The current index of the dynsym entry for this global symbol. If the global has been
-        /// demoted to STB_LOCAL, it does not have a dynsym entry and this field is set to 0.
-        dynsym_index: u32,
+        /// As well as the index of this global symbol's `.dynsym` entry, in the event that the
+        /// symbol is *not* in `.dynsym`, we store a special value here indicating why that is.
+        dynsym_index: enum(u32) {
+            /// In theory, this global should have a dynamic symbol index (it is not `STV_HIDDEN`),
+            /// but there is no `.dynsym` section, so it does not. This can happens when we are
+            /// emitting either a relocatable or a static executable.
+            no_section = 0,
+            /// This global has no dynamic symbol index because it has visibility `STV_HIDDEN`.
+            ///
+            /// Due to this `STV_HIDDEN` visibility, we have necessarily "demoted" the symtab entry
+            /// to `STB_LOCAL` (see logic in `mergeGlobalSymbolVisibility`), but its actual binding
+            /// is `STB_GLOBAL`.
+            demoted_strong = std.math.maxInt(u32),
+            /// Like `.demoted_global`, except indicates that the actual symbol binding is
+            /// `STB_WEAK`, not `STB_GLOBAL`.
+            demoted_weak = std.math.maxInt(u32) - 1,
+            /// An actual index into the `.dynsym` section.
+            _,
+
+            /// If this symbol is actually in `.dynsym`, returns the index as a raw `u32`. This
+            /// index is always non-zero because index 0 holds the special "null" symbol.
+            ///
+            /// Otherwise, returns `null`.
+            fn unwrap(dsi: @This()) ?u32 {
+                return switch (dsi) {
+                    .no_section, .demoted_strong, .demoted_weak => null,
+                    _ => @backingInt(dsi),
+                };
+            }
+
+            /// Takes an index into `.dynsym` as a raw `u32`, and converts it to this type.
+            ///
+            /// Asserts that `index` is non-zero because index 0 in `.dynsym` is the "null" symbol.
+            fn wrap(index: u32) @This() {
+                assert(index != 0);
+                return @fromBackingInt(index);
+            }
+        },
 
         /// The next entry in a linked list of global symbols with the same `Symbol.node` value.
-        ///
-        /// If `node` is `.none`, this is `.empty`.
-        next_in_node: String(.strtab),
+        next_in_node: Symbol.Global.Index.Optional,
         /// The previous entry in a linked list of global symbols with the same `Symbol.node` value.
-        ///
-        /// If `node` is `.none`, this is `.empty`.
-        prev_in_node: String(.strtab),
+        prev_in_node: Symbol.Global.Index.Optional,
+
+        const NameAdapter = struct {
+            elf: *Elf,
+            pub fn eql(ctx: NameAdapter, lhs_slice: []const u8, _: void, rhs_index: usize) bool {
+                const elf = ctx.elf;
+                const rhs_gsi: Symbol.Global.Index = @fromBackingInt(@intCast(rhs_index));
+                const rhs_slice = Symbol.Id.global(rhs_gsi).name(elf).slice(elf);
+                return std.mem.eql(u8, lhs_slice, rhs_slice);
+            }
+            pub fn hash(ctx: NameAdapter, slice: []const u8) u32 {
+                _ = ctx;
+                return std.array_hash_map.hashString(slice);
+            }
+        };
+
+        const Index = enum(u32) {
+            _,
+
+            fn ptr(gsi: Symbol.Global.Index, elf: *Elf) *Global {
+                return &elf.globals.items[@backingInt(gsi)];
+            }
+
+            fn bind(gsi: Symbol.Global.Index, elf: *Elf) Symbol.Global.Bind {
+                return switch (gsi.ptr(elf).dynsym_index) {
+                    .demoted_strong => .strong,
+                    .demoted_weak => .weak,
+                    .no_section, _ => switch (elf.symPtr(gsi.ptr(elf).symtab_index)) {
+                        inline else => |sym| switch (elf.targetLoad(&sym.info).bind) {
+                            .GLOBAL => .strong,
+                            .WEAK => .weak,
+                            else => unreachable,
+                        },
+                    },
+                };
+            }
+
+            const Optional = enum(u32) {
+                none = std.math.maxInt(u32),
+                _,
+
+                fn wrap(gsi: Symbol.Global.Index) Symbol.Global.Index.Optional {
+                    return @bitCast(gsi);
+                }
+                fn unwrap(ogsi: Symbol.Global.Index.Optional) ?Symbol.Global.Index {
+                    return switch (ogsi) {
+                        .none => null,
+                        _ => @fromBackingInt(@backingInt(ogsi)),
+                    };
+                }
+            };
+        };
+
+        const Bind = enum { strong, weak };
     };
 
     /// An index directly into the symtab. These values are not stable (global symbols are sometimes
@@ -3107,12 +3218,12 @@ const Symbol = struct {
         fn local(lsi: Symbol.LocalIndex) Symbol.Id {
             return .{ .kind = .local, .raw = @intCast(@backingInt(lsi)) };
         }
-        fn global(name: String(.strtab)) Symbol.Id {
-            return .{ .kind = .global, .raw = @intCast(@backingInt(name)) };
+        fn global(gsi: Symbol.Global.Index) Symbol.Id {
+            return .{ .kind = .global, .raw = @intCast(@backingInt(gsi)) };
         }
         fn unwrap(s: Symbol.Id) union(enum) {
             local: Symbol.LocalIndex,
-            global: String(.strtab),
+            global: Symbol.Global.Index,
         } {
             return switch (s.kind) {
                 .local => .{ .local = @fromBackingInt(s.raw) },
@@ -3127,10 +3238,10 @@ const Symbol = struct {
             return @bitCast(s);
         }
 
-        fn index(s: Symbol.Id, elf: *const Elf) Symbol.Index {
+        fn index(s: Symbol.Id, elf: *Elf) Symbol.Index {
             return switch (s.unwrap()) {
                 .local => |lsi| lsi.index(),
-                .global => |name| elf.globalByName(name).?.symtab_index,
+                .global => |gsi| gsi.ptr(elf).symtab_index,
             };
         }
 
@@ -3140,6 +3251,18 @@ const Symbol = struct {
         fn value(s: Symbol.Id, elf: *Elf) u64 {
             return switch (elf.symPtr(s.index(elf))) {
                 inline else => |sym| elf.targetLoad(&sym.value),
+            };
+        }
+
+        fn name(s: Symbol.Id, elf: *Elf) String(.strtab) {
+            return switch (elf.symPtr(s.index(elf))) {
+                inline else => |sym| @fromBackingInt(elf.targetLoad(&sym.name)),
+            };
+        }
+
+        fn defined(s: Symbol.Id, elf: *Elf) bool {
+            return switch (elf.symPtr(s.index(elf))) {
+                inline else => |sym| elf.targetLoad(&sym.shndx) != std.elf.SHN_UNDEF,
             };
         }
 
@@ -3153,10 +3276,9 @@ const Symbol = struct {
             // Update the symbol value in `.dynsym` if applicable
             switch (sym_id.unwrap()) {
                 .local => {},
-                .global => |name| {
-                    const g = elf.globalByName(name).?;
-                    if (g.dynsym_index != 0) {
-                        switch (elf.dynsymPtr(g.dynsym_index)) {
+                .global => |gsi| {
+                    if (gsi.ptr(elf).dynsym_index.unwrap()) |dynsym_index| {
+                        switch (elf.dynsymPtr(dynsym_index)) {
                             inline else => |sym| elf.targetStore(&sym.value, @intCast(new_value)),
                         }
                     }
@@ -3255,7 +3377,7 @@ const Symbol = struct {
             }
             switch (s.unwrap()) {
                 .local => {},
-                .global => |name| if (elf.copied_globals.getPtr(name)) |copied_global| {
+                .global => |gsi| if (elf.copied_globals.getPtr(gsi)) |copied_global| {
                     return copied_global.node.hasMoved(&elf.mf);
                 },
             }
@@ -3264,12 +3386,10 @@ const Symbol = struct {
     };
 };
 
-fn globalByName(elf: *const Elf, name: String(.strtab)) ?*Symbol.Global {
-    if (elf.globals.strong_def.getPtr(name)) |ptr| return ptr;
-    if (elf.globals.weak_def.getPtr(name)) |ptr| return ptr;
-    if (elf.globals.strong_undef.getPtr(name)) |ptr| return ptr;
-    if (elf.globals.weak_undef.getPtr(name)) |ptr| return ptr;
-    return null;
+fn globalByName(elf: *Elf, name: []const u8) ?Symbol.Global.Index {
+    const adapter: Symbol.Global.NameAdapter = .{ .elf = elf };
+    const index_raw = elf.globals_by_name.getIndexAdapted(name, adapter) orelse return null;
+    return @fromBackingInt(@intCast(index_raw));
 }
 
 fn classifySymbolValue(elf: *Elf, sym: Symbol.Id) enum {
@@ -3307,11 +3427,11 @@ fn classifySymbolValue(elf: *Elf, sym: Symbol.Id) enum {
             assert(shndx != .UNDEF);
             assert(visibility == .DEFAULT);
         },
-        .global => |name| if (visibility == .DEFAULT and comp.config.output_mode != .Exe) {
+        .global => |gsi| if (visibility == .DEFAULT and comp.config.output_mode != .Exe) {
             // An unprotected symbol in a DSO which is not an executable is subject to runtime
             // preemption, so a dynamic relocation is required for it even if we have a definition.
             return .dynamic;
-        } else if (elf.copied_globals.contains(name)) {
+        } else if (elf.copied_globals.contains(gsi)) {
             // This becomes a locally-defined symbol in `.data`.
             return if (runtime_load_addr) .static_relative else .static;
         },
@@ -3449,9 +3569,9 @@ pub fn externSymbol(elf: *Elf, opts: ExternSymbolOpts) link.Error!link.File.Symb
 }
 fn externSymbolInner(elf: *Elf, opts: ExternSymbolOpts) Error!Symbol.Id {
     try elf.ensureUnusedSymbolCapacity(1, .maybe_global);
-    const symbol = elf.addGlobalSymbolAssumeCapacity(.{
+    const gsi = elf.addGlobalSymbolAssumeCapacity(.{
         .node = .none,
-        .name = try .string(elf, opts.name),
+        .name = opts.name,
         .lib_name = opts.lib_name,
         .value = 0,
         .size = 0,
@@ -3470,8 +3590,9 @@ fn externSymbolInner(elf: *Elf, opts: ExternSymbolOpts) Error!Symbol.Id {
         .shndx = .UNDEF,
     }) catch |err| switch (err) {
         error.MultipleDefinitions => unreachable, // shndx is undef
+        else => |e| return e,
     };
-    return symbol;
+    return .global(gsi);
 }
 pub fn addReloc(
     elf: *Elf,
@@ -3836,12 +3957,9 @@ fn create(
             .soname = .empty,
         },
         .symtab = .empty,
-        .globals = .{
-            .strong_def = .empty,
-            .weak_def = .empty,
-            .strong_undef = .empty,
-            .weak_undef = .empty,
-        },
+        .globals = .empty,
+        .globals_by_name = .empty,
+        .unknown_globals = .empty,
         .copied_globals = .empty,
         .want_copied_globals = .empty,
         .node_global_symbols = .empty,
@@ -3915,10 +4033,9 @@ pub fn deinit(elf: *Elf) void {
     elf.shdrs.deinit(gpa);
     elf.phdrs.deinit(gpa);
     elf.symtab.deinit(gpa);
-    elf.globals.strong_def.deinit(gpa);
-    elf.globals.weak_def.deinit(gpa);
-    elf.globals.strong_undef.deinit(gpa);
-    elf.globals.weak_undef.deinit(gpa);
+    elf.globals.deinit(gpa);
+    elf.globals_by_name.deinit(gpa);
+    elf.unknown_globals.deinit(gpa);
     elf.copied_globals.deinit(gpa);
     elf.want_copied_globals.deinit(gpa);
     elf.node_global_symbols.deinit(gpa);
@@ -4978,7 +5095,7 @@ fn initHeaders(
         // Despite the name, `__dso_handle` is necessary even in static binaries.
         _ = elf.addGlobalSymbolAssumeCapacity(.{
             .node = .wrap(Section.Index.text.get(elf).ni),
-            .name = try .string(elf, "__dso_handle"),
+            .name = "__dso_handle",
             .value = Section.Index.text.vaddr(elf),
             .size = 0,
             .type = .NOTYPE,
@@ -4987,10 +5104,11 @@ fn initHeaders(
             .shndx = .text,
         }) catch |err| switch (err) {
             error.MultipleDefinitions => unreachable, // no inputs are processed yet
+            else => |e| return e,
         };
         _ = elf.addGlobalSymbolAssumeCapacity(.{
             .node = .wrap(elf.shndx.plt.get(elf).ni),
-            .name = try .string(elf, "_PROCEDURE_LINKAGE_TABLE_"),
+            .name = "_PROCEDURE_LINKAGE_TABLE_",
             .value = elf.shndx.plt.vaddr(elf),
             .size = 0,
             .type = .NOTYPE,
@@ -4999,10 +5117,11 @@ fn initHeaders(
             .shndx = elf.shndx.plt,
         }) catch |err| switch (err) {
             error.MultipleDefinitions => unreachable, // no inputs are processed yet
+            else => |e| return e,
         };
         _ = elf.addGlobalSymbolAssumeCapacity(.{
             .node = .wrap(elf.shndx.got.get(elf).ni),
-            .name = try .string(elf, "_GLOBAL_OFFSET_TABLE_"),
+            .name = "_GLOBAL_OFFSET_TABLE_",
             .value = switch (machine) {
                 .AARCH64,
                 .LOONGARCH,
@@ -5023,10 +5142,11 @@ fn initHeaders(
             .shndx = elf.shndx.got,
         }) catch |err| switch (err) {
             error.MultipleDefinitions => unreachable, // no inputs are processed yet
+            else => |e| return e,
         };
         _ = elf.addGlobalSymbolAssumeCapacity(.{
             .node = .none,
-            .name = try .string(elf, "__init_array_start"),
+            .name = "__init_array_start",
             .value = 0,
             .size = 0,
             .type = .NOTYPE,
@@ -5035,10 +5155,11 @@ fn initHeaders(
             .shndx = .ABS,
         }) catch |err| switch (err) {
             error.MultipleDefinitions => unreachable, // no inputs are processed yet
+            else => |e| return e,
         };
         _ = elf.addGlobalSymbolAssumeCapacity(.{
             .node = .none,
-            .name = try .string(elf, "__init_array_end"),
+            .name = "__init_array_end",
             .value = 0,
             .size = 0,
             .type = .NOTYPE,
@@ -5047,10 +5168,11 @@ fn initHeaders(
             .shndx = .ABS,
         }) catch |err| switch (err) {
             error.MultipleDefinitions => unreachable, // no inputs are processed yet
+            else => |e| return e,
         };
         _ = elf.addGlobalSymbolAssumeCapacity(.{
             .node = .none,
-            .name = try .string(elf, "__fini_array_start"),
+            .name = "__fini_array_start",
             .value = 0,
             .size = 0,
             .type = .NOTYPE,
@@ -5059,10 +5181,11 @@ fn initHeaders(
             .shndx = .ABS,
         }) catch |err| switch (err) {
             error.MultipleDefinitions => unreachable, // no inputs are processed yet
+            else => |e| return e,
         };
         _ = elf.addGlobalSymbolAssumeCapacity(.{
             .node = .none,
-            .name = try .string(elf, "__fini_array_end"),
+            .name = "__fini_array_end",
             .value = 0,
             .size = 0,
             .type = .NOTYPE,
@@ -5071,10 +5194,11 @@ fn initHeaders(
             .shndx = .ABS,
         }) catch |err| switch (err) {
             error.MultipleDefinitions => unreachable, // no inputs are processed yet
+            else => |e| return e,
         };
         _ = elf.addGlobalSymbolAssumeCapacity(.{
             .node = .none,
-            .name = try .string(elf, "__preinit_array_start"),
+            .name = "__preinit_array_start",
             .value = 0,
             .size = 0,
             .type = .NOTYPE,
@@ -5083,10 +5207,11 @@ fn initHeaders(
             .shndx = .ABS,
         }) catch |err| switch (err) {
             error.MultipleDefinitions => unreachable, // no inputs are processed yet
+            else => |e| return e,
         };
         _ = elf.addGlobalSymbolAssumeCapacity(.{
             .node = .none,
-            .name = try .string(elf, "__preinit_array_end"),
+            .name = "__preinit_array_end",
             .value = 0,
             .size = 0,
             .type = .NOTYPE,
@@ -5095,11 +5220,12 @@ fn initHeaders(
             .shndx = .ABS,
         }) catch |err| switch (err) {
             error.MultipleDefinitions => unreachable, // no inputs are processed yet
+            else => |e| return e,
         };
         if (have_dynamic) {
             _ = elf.addGlobalSymbolAssumeCapacity(.{
                 .node = .wrap(elf.shndx.dynamic.get(elf).ni),
-                .name = try .string(elf, "_DYNAMIC"),
+                .name = "_DYNAMIC",
                 .value = elf.shndx.dynamic.vaddr(elf),
                 .size = 0,
                 .type = .NOTYPE,
@@ -5108,6 +5234,7 @@ fn initHeaders(
                 .shndx = elf.shndx.dynamic,
             }) catch |err| switch (err) {
                 error.MultipleDefinitions => unreachable, // no inputs are processed yet
+                else => |e| return e,
             };
         }
     } else {
@@ -6665,9 +6792,9 @@ fn loadObject(
                             ),
                             .LOCAL => continue,
                             .GLOBAL, .WEAK, .GNU_UNIQUE => |bind| {
-                                si.* = elf.addGlobalSymbolAssumeCapacity(.{
+                                si.* = .global(elf.addGlobalSymbolAssumeCapacity(.{
                                     .node = .none,
-                                    .name = try .string(elf, name),
+                                    .name = name,
                                     .value = input_sym.value,
                                     .size = input_sym.size,
                                     .type = sym_type,
@@ -6680,7 +6807,8 @@ fn loadObject(
                                     .shndx = .UNDEF,
                                 }) catch |err| switch (err) {
                                     error.MultipleDefinitions => unreachable, // shndx is .UNDEF
-                                };
+                                    else => |e| return e,
+                                });
                                 continue;
                             },
                         };
@@ -6705,9 +6833,9 @@ fn loadObject(
                                 si.* = .local(lsi);
                             },
                             .GLOBAL, .WEAK, .GNU_UNIQUE => |bind| {
-                                si.* = elf.addGlobalSymbolAssumeCapacity(.{
+                                si.* = .global(elf.addGlobalSymbolAssumeCapacity(.{
                                     .node = .wrap(input_section_node),
-                                    .name = try .string(elf, name),
+                                    .name = name,
                                     .value = input_sym.value,
                                     .size = input_sym.size,
                                     .type = sym_type,
@@ -6724,7 +6852,8 @@ fn loadObject(
                                         "multiple definitions of '{s}'",
                                         .{name},
                                     ),
-                                };
+                                    else => |e| return e,
+                                });
                             },
                         }
                     }
@@ -7002,9 +7131,13 @@ fn loadDso(
                     {
                         gop.value_ptr.size = @max(gop.value_ptr.size, sym.size);
                         gop.value_ptr.alignment = gop.value_ptr.alignment.max(sym_align);
-                        if (elf.copied_globals.get(name)) |copied_global| {
-                            // We have a copy relocation for this global, but the amount of space we
-                            // reserved for it could be too small or underaligned!
+
+                        // If there is already a copy relocation for this symbol, the amount of
+                        // space reserved for it might be too small or underaligned, so update it:
+                        update: {
+                            const gsi = elf.globalByName(name.slice(elf)) orelse break :update;
+                            const copied_global = elf.copied_globals.get(gsi) orelse break :update;
+
                             try Section.Index.data.ensureAligned(elf, gop.value_ptr.alignment);
                             try copied_global.node.resizeLeaf(
                                 gpa,
@@ -7012,11 +7145,10 @@ fn loadDso(
                                 gop.value_ptr.alignment.forward(gop.value_ptr.size),
                             );
                             try copied_global.node.realign(gpa, &elf.mf, gop.value_ptr.alignment);
-                            const global_ptr = elf.globalByName(name).?;
-                            switch (elf.symPtr(global_ptr.symtab_index)) {
+                            switch (elf.symPtr(gsi.ptr(elf).symtab_index)) {
                                 inline else => |sym_ptr| elf.targetStore(&sym_ptr.size, @intCast(gop.value_ptr.size)),
                             }
-                            switch (elf.dynsymPtr(global_ptr.dynsym_index)) {
+                            switch (elf.dynsymPtr(gsi.ptr(elf).dynsym_index.unwrap().?)) {
                                 inline else => |dynsym_ptr| elf.targetStore(&dynsym_ptr.size, @intCast(gop.value_ptr.size)),
                             }
                         }
@@ -7032,19 +7164,20 @@ fn loadDso(
 
                 // If there's already an undefined symbol by this name of type STT_NOTYPE, populate
                 // its type now.
-                const global_ptr = elf.globals.strong_undef.getPtr(name) orelse
-                    elf.globals.weak_undef.getPtr(name) orelse
-                    continue;
+                const gsi = elf.globalByName(name.slice(elf)) orelse continue;
+                if (Symbol.Id.global(gsi).defined(elf)) continue;
 
-                if (global_ptr.dynsym_index == 0) continue;
+                _ = elf.unknown_globals.swapRemove(gsi);
 
-                if (elf.want_copied_globals.swapRemove(name)) {
+                const dynsym_index = gsi.ptr(elf).dynsym_index.unwrap() orelse continue;
+
+                if (elf.want_copied_globals.swapRemove(gsi)) {
                     // We just found a DSO definition of a symbol for which we wanted a copy
                     // relocation, so add one if we can!
-                    _ = try elf.maybeAddCopyRelocation(name);
+                    _ = try elf.maybeAddCopyRelocation(gsi);
                 }
 
-                const sym_ptr = @field(elf.symPtr(global_ptr.symtab_index), @tagName(class));
+                const sym_ptr = @field(elf.symPtr(gsi.ptr(elf).symtab_index), @tagName(class));
                 errdefer comptime unreachable; // messing with the output file could invalidate `sym_ptr`
 
                 switch (elf.targetLoad(&sym_ptr.other).visibility) {
@@ -7064,7 +7197,7 @@ fn loadDso(
                         .type = new_type,
                     });
 
-                    const dynsym_ptr = @field(elf.dynsymPtr(global_ptr.dynsym_index), @tagName(class));
+                    const dynsym_ptr = @field(elf.dynsymPtr(dynsym_index), @tagName(class));
                     elf.targetStore(&dynsym_ptr.info, .{
                         .bind = elf.targetLoad(&dynsym_ptr.info).bind,
                         .type = new_type,
@@ -7072,10 +7205,10 @@ fn loadDso(
 
                     if (new_type == .FUNC) {
                         // We turned STT_NOTYPE into STT_FUNC, so we now need a PLT entry...
-                        elf.addPltEntry(name, global_ptr.dynsym_index);
+                        elf.addPltEntry(gsi);
                         // ...and therefore, we need to re-apply that symbol's relocations, as
                         // some might be targeting its PLT entry.
-                        Symbol.Id.global(name).applyTargetRelocs(elf);
+                        Symbol.Id.global(gsi).applyTargetRelocs(elf);
                     }
                 }
             }
@@ -7177,18 +7310,16 @@ fn createInitFiniArraySection(
     });
     elf.section_by_name.putAssumeCapacityNoClobber(shndx.name(elf), {});
     try elf.ensureUnusedSymbolCapacity(2, .maybe_global);
-    // These symbols definitely already have strong definitions, because we added them alongside the
-    // other linker-defined symbols, all the way back in `initHeaders`.
-    const start_sym_name = try elf.string(.strtab, "__" ++ name ++ "_start");
-    const end_sym_name = try elf.string(.strtab, "__" ++ name ++ "_end");
-    elf.setGlobalSymbolValue(start_sym_name, elf.globals.strong_def.getPtr(start_sym_name).?, .{
+    // These symbols definitely already exist with strong definitions, because we added them
+    // alongside the other linker-defined symbols, all the way back in `initHeaders`.
+    elf.setGlobalSymbolValue(elf.globalByName("__" ++ name ++ "_start").?, .{
         .node = .wrap(shndx.get(elf).ni),
         .value = shndx.vaddr(elf),
         .size = 0,
         .type = .NOTYPE,
         .shndx = shndx.*,
     });
-    elf.setGlobalSymbolValue(end_sym_name, elf.globals.strong_def.getPtr(end_sym_name).?, .{
+    elf.setGlobalSymbolValue(elf.globalByName("__" ++ name ++ "_end").?, .{
         .node = .wrap(shndx.get(elf).ni),
         .value = shndx.vaddr(elf),
         .size = 0,
@@ -7204,8 +7335,8 @@ fn updateInitFiniArraySectionSize(
     const end_vaddr: u64 = switch (elf.shdrPtr(shndx)) {
         inline else => |shdr| shndx.vaddr(elf) + elf.targetLoad(&shdr.size),
     };
-    const end_sym_name = elf.stringExisting(.strtab, "__" ++ name ++ "_end");
-    Symbol.Id.global(end_sym_name).flushMoved(elf, end_vaddr);
+    const end_sym_gsi = elf.globalByName("__" ++ name ++ "_end").?;
+    Symbol.Id.global(end_sym_gsi).flushMoved(elf, end_vaddr);
 }
 
 pub fn prelink(elf: *Elf, prog_node: std.Progress.Node) link.Error!void {
@@ -8265,7 +8396,7 @@ fn addSymbolRelocAssumeCapacity(
                 break :r elf.shndx.rela_dyn.relaAddOneAssumeCapacity(elf, .{
                     .type = dynamic_reloc_type,
                     .offset = node_vaddr + offset,
-                    .raw_sym_index = elf.globalByName(target.unwrap().global).?.dynsym_index,
+                    .raw_sym_index = target.unwrap().global.ptr(elf).dynsym_index.unwrap().?,
                     .addend = addend,
                 }).toOptional();
             },
@@ -8508,21 +8639,25 @@ fn updateGotEntry(elf: *Elf, got_index: usize) void {
                 const sym_value = sym_id.value(elf);
                 break :val .{ .signed = @bitCast(sym_value -% tls_size) };
             }
-            break :val switch (sym_id.unwrap()) {
-                // For global symbols, just target the right dynsym with no addend.
-                .global => |name| .{ .reloc = .{
-                    .type = .tpOff(elf),
-                    .dynsym_index = elf.globalByName(name).?.dynsym_index,
-                    .addend = 0,
-                } },
-                // For local symbols, target the null symbol (index 0) so we get the offset to the
-                // base of our TLS block, and then use `addend` to offset to the right symbol.
-                .local => .{ .reloc = .{
-                    .type = .tpOff(elf),
-                    .dynsym_index = 0,
-                    .addend = @intCast(sym_id.value(elf)),
-                } },
-            };
+            switch (sym_id.unwrap()) {
+                .global => |gsi| if (gsi.ptr(elf).dynsym_index.unwrap()) |dynsym_index| {
+                    // When there is a dynsym entry, just target that with no addend.
+                    break :val .{ .reloc = .{
+                        .type = .tpOff(elf),
+                        .dynsym_index = dynsym_index,
+                        .addend = 0,
+                    } };
+                },
+                .local => {},
+            }
+            // Otherwise, we know the offset of the symbol into our own TLS block, so target the
+            // null symbol (index 0) so we get the offset to the base of that block, and use the
+            // addend to offset to the correct symbol.
+            break :val .{ .reloc = .{
+                .type = .tpOff(elf),
+                .dynsym_index = 0,
+                .addend = @intCast(sym_id.value(elf)),
+            } };
         },
         .symbol => |sym| switch (elf.classifySymbolValue(sym)) {
             .static => .{ .unsigned = sym.value(elf) },
@@ -8533,7 +8668,7 @@ fn updateGotEntry(elf: *Elf, got_index: usize) void {
             } },
             .dynamic => .{ .reloc = .{
                 .type = .globDat(elf),
-                .dynsym_index = elf.globalByName(sym.unwrap().global).?.dynsym_index,
+                .dynsym_index = sym.unwrap().global.ptr(elf).dynsym_index.unwrap().?,
                 .addend = 0,
             } },
         },
@@ -8542,7 +8677,7 @@ fn updateGotEntry(elf: *Elf, got_index: usize) void {
             .static_relative => unreachable, // TLS variables should be in TLS sections, which do not return `.static_relative`
             .dynamic => .{ .reloc = .{
                 .type = .dtpOff(elf),
-                .dynsym_index = elf.globalByName(sym.unwrap().global).?.dynsym_index,
+                .dynsym_index = sym.unwrap().global.ptr(elf).dynsym_index.unwrap().?,
                 .addend = 0,
             } },
         },
@@ -8555,7 +8690,7 @@ fn updateGotEntry(elf: *Elf, got_index: usize) void {
                 .type = .dtpMod(elf),
                 .dynsym_index = switch (elf.classifySymbolValue(sym)) {
                     .static, .static_relative => 0,
-                    .dynamic => elf.globalByName(sym.unwrap().global).?.dynsym_index,
+                    .dynamic => sym.unwrap().global.ptr(elf).dynsym_index.unwrap().?,
                 },
                 .addend = 0,
             } },
@@ -8641,8 +8776,8 @@ fn nodeWantsDsoRelocation(elf: *Elf, node: MappedFile.Node.Index) enum { yes, ye
 /// If this function creates a new copy relocation, it will also update relocations targeting the
 /// global where needed---the caller does not need to do this.
 ///
-/// Asserts that `elf.shndx.dynamic != .UNDEF` and that `global_name` refers to an *undefined* global.
-fn maybeAddCopyRelocation(elf: *Elf, global_name: String(.strtab)) Error!bool {
+/// Asserts that `elf.shndx.dynamic != .UNDEF` and that `gsi` refers to an *undefined* global.
+fn maybeAddCopyRelocation(elf: *Elf, gsi: Symbol.Global.Index) Error!bool {
     assert(elf.shndx.dynamic != .UNDEF);
 
     // Only dynamic executables may contain `R_*_COPY` relocations.
@@ -8650,23 +8785,22 @@ fn maybeAddCopyRelocation(elf: *Elf, global_name: String(.strtab)) Error!bool {
 
     const gpa = elf.base.comp.gpa;
 
-    const global_ptr = elf.globals.strong_undef.getPtr(global_name) orelse
-        elf.globals.weak_undef.getPtr(global_name).?;
+    assert(!Symbol.Id.global(gsi).defined(elf));
 
-    assert(global_ptr.dynsym_index != 0);
+    const dynsym_index = gsi.ptr(elf).dynsym_index.unwrap().?;
 
-    const dso_global = elf.dso_globals.get(global_name) orelse {
+    const dso_global = elf.dso_globals.get(Symbol.Id.global(gsi).name(elf)) orelse {
         // We do not have a definition to provide the correct size for the symbol. If a definition
         // is discovered in a later DSO, we may at that point be able to add a copy relocation.
-        try elf.want_copied_globals.put(gpa, global_name, {});
+        try elf.want_copied_globals.put(gpa, gsi, {});
         return false;
     };
 
     if (dso_global.type != .OBJECT) return false;
 
-    const gop = try elf.copied_globals.getOrPut(gpa, global_name);
+    const gop = try elf.copied_globals.getOrPut(gpa, gsi);
     if (gop.found_existing) return true;
-    errdefer assert(elf.copied_globals.pop().?.key == global_name);
+    errdefer assert(elf.copied_globals.pop().?.key == gsi);
 
     try Section.Index.data.ensureAligned(elf, dso_global.alignment);
 
@@ -8676,7 +8810,7 @@ fn maybeAddCopyRelocation(elf: *Elf, global_name: String(.strtab)) Error!bool {
             .size = dso_global.alignment.forward(dso_global.size),
             .alignment = dso_global.alignment,
         }),
-        .{ .copied_global = global_name },
+        .{ .copied_global = gsi },
     );
     errdefer comptime unreachable;
 
@@ -8684,7 +8818,7 @@ fn maybeAddCopyRelocation(elf: *Elf, global_name: String(.strtab)) Error!bool {
     const rela_index = elf.shndx.rela_dyn.relaAddOneAssumeCapacity(elf, .{
         .type = .copy(elf),
         .offset = vaddr,
-        .raw_sym_index = global_ptr.dynsym_index,
+        .raw_sym_index = dynsym_index,
         .addend = 0,
     });
     gop.value_ptr.* = .{
@@ -8692,18 +8826,18 @@ fn maybeAddCopyRelocation(elf: *Elf, global_name: String(.strtab)) Error!bool {
         .rela_index = rela_index,
     };
 
-    switch (elf.symPtr(global_ptr.symtab_index)) {
+    switch (elf.symPtr(gsi.ptr(elf).symtab_index)) {
         inline else => |sym| elf.targetStore(&sym.size, @intCast(dso_global.size)),
     }
-    switch (elf.dynsymPtr(global_ptr.dynsym_index)) {
+    switch (elf.dynsymPtr(dynsym_index)) {
         inline else => |dynsym| elf.targetStore(&dynsym.size, @intCast(dso_global.size)),
     }
 
     // Because we now have a copy relocation, any dynamic relocations which target this symbol are
     // now incorrect, since we now own the canonical address of the symbol. So delete those relocs
     // and then update the symbol's address (and re-apply relocations targeting it of course).
-    Symbol.Id.global(global_name).deleteDynamicTargetRelocs(elf);
-    Symbol.Id.global(global_name).flushMoved(elf, vaddr);
+    Symbol.Id.global(gsi).deleteDynamicTargetRelocs(elf);
+    Symbol.Id.global(gsi).flushMoved(elf, vaddr);
 
     return true;
 }
@@ -9242,14 +9376,11 @@ fn flushInner(
 
     try elf.flushFiles();
 
-    if (comp.config.output_mode == .Exe) {
-        var any_undef = false;
-        for (elf.globals.strong_undef.keys()) |name| {
-            if (elf.dso_globals.contains(name)) continue;
-            any_undef = true;
-            diags.addError("undefined global symbol '{s}'", .{name.slice(elf)});
+    if (comp.config.output_mode == .Exe and elf.unknown_globals.count() > 0) {
+        for (elf.unknown_globals.keys()) |gsi| {
+            diags.addError("undefined global symbol '{s}'", .{Symbol.Id.global(gsi).name(elf).slice(elf)});
         }
-        if (any_undef) return error.AlreadyReported;
+        return error.AlreadyReported;
     }
 
     try elf.prepareDynamic();
@@ -9289,7 +9420,7 @@ fn flushInner(
     elf.flushDynamic();
 
     const entry_addr: u64 = entry: {
-        const sym_name_slice: []const u8 = name: switch (elf.options.entry) {
+        const sym_name: []const u8 = name: switch (elf.options.entry) {
             .default => switch (comp.config.output_mode) {
                 .Exe => continue :name .enabled,
                 .Lib, .Obj => continue :name .disabled,
@@ -9298,9 +9429,8 @@ fn flushInner(
             .enabled => "_start",
             .named => |named| named,
         };
-        const sym_name_strtab = try elf.string(.strtab, sym_name_slice);
-        if (elf.globalByName(sym_name_strtab) == null) break :entry 0;
-        break :entry Symbol.Id.global(sym_name_strtab).value(elf);
+        const gsi = elf.globalByName(sym_name) orelse break :entry 0;
+        break :entry Symbol.Id.global(gsi).value(elf);
     };
     switch (elf.ehdrPtr()) {
         inline else => |ehdr| elf.targetStore(&ehdr.entry, @intCast(entry_addr)),
@@ -9369,26 +9499,25 @@ pub fn idle(elf: *Elf, tid: Zcu.PerThread.Id) link.Error!bool {
             break :task;
         }
         if (elf.changed_symtab_index.pop()) |kv| {
-            const idle_prog_node = elf.mf.update_prog_node.start(kv.key.slice(elf), 0);
+            const gsi = kv.key;
+
+            const idle_prog_node = elf.mf.update_prog_node.start(Symbol.Id.global(gsi).name(elf).slice(elf), 0);
             defer idle_prog_node.end();
 
-            const global_name = kv.key;
-            const global = elf.globalByName(global_name).?;
-            const sym_id: Symbol.Id = .global(global_name);
-            const sym = global.symtab_index.ptr(elf);
+            const sym_id: Symbol.Id = .global(gsi);
+            const symtab_index = gsi.ptr(elf).symtab_index;
 
             switch (elf.ehdrType()) {
                 .REL => {
                     // Index in `.symtab` has changed. Relocatables are easy, we just need to update
                     // all of the output relocations.
-                    const symtab_index = @backingInt(global.symtab_index);
-                    var ri = sym.first_target_reloc;
+                    var ri = symtab_index.ptr(elf).first_target_reloc;
                     while (ri != .none) {
                         const reloc = ri.get(elf);
                         assert(reloc.target == sym_id);
                         // In relocatables, every symbol relocation has an output relocation.
                         const rela_index = reloc.rela_index.unwrap().?;
-                        reloc.relaSection(elf).relaUpdateSym(elf, rela_index, symtab_index);
+                        reloc.relaSection(elf).relaUpdateSym(elf, rela_index, @backingInt(symtab_index));
                         ri = reloc.next;
                     }
                 },
@@ -9401,29 +9530,32 @@ pub fn idle(elf: *Elf, tid: Zcu.PerThread.Id) link.Error!bool {
                         // any relocation targeting it (we might have `R_*_RELATIVE` relocs but they
                         // don't care about the dynsym index). The only exception is a copy reloc
                         // could exist (and be the *reason* the symbol value is statically known).
-                        if (elf.copied_globals.get(global_name)) |copied| {
-                            elf.shndx.rela_dyn.relaUpdateSym(elf, copied.rela_index, global.dynsym_index);
+                        if (elf.copied_globals.get(gsi)) |copied| {
+                            const dynsym_index = gsi.ptr(elf).dynsym_index.unwrap().?;
+                            elf.shndx.rela_dyn.relaUpdateSym(elf, copied.rela_index, dynsym_index);
                         }
                     },
                     .dynamic => {
-                        assert(!elf.copied_globals.contains(global_name)); // value would be statically known
+                        assert(!elf.copied_globals.contains(gsi)); // value would be statically known
+
+                        const dynsym_index = gsi.ptr(elf).dynsym_index.unwrap().?;
 
                         // Update symbol relocs:
-                        var ri = sym.first_target_reloc;
+                        var ri = symtab_index.ptr(elf).first_target_reloc;
                         while (ri != .none) {
                             const reloc = ri.get(elf);
                             assert(reloc.target == sym_id);
                             // There may or may not be a runtime relocation for this symbol reloc.
                             if (reloc.rela_index.unwrap()) |rela_index| {
-                                elf.shndx.rela_dyn.relaUpdateSym(elf, rela_index, global.dynsym_index);
+                                elf.shndx.rela_dyn.relaUpdateSym(elf, rela_index, dynsym_index);
                             }
                             ri = reloc.next;
                         }
 
                         // Update the PLT entry's reloc if there is one:
-                        if (elf.plt.getIndex(global_name)) |plt_index| {
+                        if (elf.plt.getIndex(gsi)) |plt_index| {
                             // PLT indices exactly match `.rela.plt` relocation indices.
-                            elf.shndx.rela_plt.relaUpdateSym(elf, @fromBackingInt(@intCast(plt_index)), global.dynsym_index);
+                            elf.shndx.rela_plt.relaUpdateSym(elf, @fromBackingInt(@intCast(plt_index)), dynsym_index);
                         }
 
                         // Update relocs for any relevant GOT entries:
@@ -9882,13 +10014,11 @@ fn flushMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void
                 }
 
                 // Update global symbols targeting this section
-                if (elf.node_global_symbols.get(ni)) |first_name| {
-                    assert(first_name != .empty);
-                    var name = first_name;
-                    while (name != .empty) {
-                        const old_sym_addr = Symbol.Id.global(name).value(elf);
-                        Symbol.Id.global(name).flushMoved(elf, old_sym_addr - old_addr + addr);
-                        name = elf.globalByName(name).?.next_in_node;
+                if (elf.node_global_symbols.get(ni)) |first_gsi| {
+                    var opt_gsi: Symbol.Global.Index.Optional = .wrap(first_gsi);
+                    while (opt_gsi.unwrap()) |gsi| : (opt_gsi = gsi.ptr(elf).next_in_node) {
+                        const old_sym_addr = Symbol.Id.global(gsi).value(elf);
+                        Symbol.Id.global(gsi).flushMoved(elf, old_sym_addr - old_addr + addr);
                     }
                 }
 
@@ -9950,16 +10080,14 @@ fn flushMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void
             }
 
             // Update global symbols
-            if (elf.node_global_symbols.get(ni)) |first_name| {
-                assert(first_name != .empty);
-                var name = first_name;
-                while (name != .empty) {
-                    const old_sym_addr = Symbol.Id.global(name).value(elf);
-                    Symbol.Id.global(name).flushMoved(
+            if (elf.node_global_symbols.get(ni)) |first_gsi| {
+                var opt_gsi: Symbol.Global.Index.Optional = .wrap(first_gsi);
+                while (opt_gsi.unwrap()) |gsi| : (opt_gsi = gsi.ptr(elf).next_in_node) {
+                    const old_sym_addr = Symbol.Id.global(gsi).value(elf);
+                    Symbol.Id.global(gsi).flushMoved(
                         elf,
                         old_sym_addr - old_section_addr + new_section_addr,
                     );
-                    name = elf.globalByName(name).?.next_in_node;
                 }
             }
 
@@ -9984,12 +10112,10 @@ fn flushMoved(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!void
         inline .nav, .uav, .lazy_code, .lazy_const_data => |mi, tag| {
             const new_addr = elf.computeNodeVAddr(ni);
             Symbol.Id.local(mi.symbol(elf)).flushMoved(elf, new_addr);
-            if (elf.node_global_symbols.get(ni)) |first_name| {
-                assert(first_name != .empty);
-                var name = first_name;
-                while (name != .empty) {
-                    Symbol.Id.global(name).flushMoved(elf, new_addr);
-                    name = elf.globalByName(name).?.next_in_node;
+            if (elf.node_global_symbols.get(ni)) |first_gsi| {
+                var opt_gsi: Symbol.Global.Index.Optional = .wrap(first_gsi);
+                while (opt_gsi.unwrap()) |gsi| : (opt_gsi = gsi.ptr(elf).next_in_node) {
+                    Symbol.Id.global(gsi).flushMoved(elf, new_addr);
                 }
             }
             elf.flushMovedNodeRelocs(ni, new_addr, .{
@@ -10722,7 +10848,8 @@ fn flushPadding(elf: *Elf, ni: MappedFile.Node.Index) std.mem.Allocator.Error!vo
     }
 }
 
-fn addPltEntry(elf: *Elf, global_name: String(.strtab), dynsym_index: u32) void {
+/// Asserts that `gsi` has a `.dynsym` entry.
+fn addPltEntry(elf: *Elf, gsi: Symbol.Global.Index) void {
     const target_endian = elf.targetEndian();
 
     // We use the existing free-list tracking of the `.rela.plt` section to also behave as a
@@ -10730,7 +10857,7 @@ fn addPltEntry(elf: *Elf, global_name: String(.strtab), dynsym_index: u32) void 
     const plt_index: u32 = @backingInt(elf.shndx.rela_plt.relaAddOneAssumeCapacity(elf, .{
         .type = .jumpSlot(elf),
         .offset = 0, // populated later
-        .raw_sym_index = dynsym_index,
+        .raw_sym_index = gsi.ptr(elf).dynsym_index.unwrap().?,
         .addend = 0,
     }));
 
@@ -10751,13 +10878,13 @@ fn addPltEntry(elf: *Elf, global_name: String(.strtab), dynsym_index: u32) void 
 
     if (plt_index < elf.plt.count()) {
         // We reused a free entry, so we're already done!
-        elf.plt.setKey(plt_index, global_name);
+        elf.plt.setKey(plt_index, gsi);
         return;
     }
 
     // We added a new entry, so we now need to extend the PLT sections.
     assert(plt_index == elf.plt.count());
-    elf.plt.putAssumeCapacityNoClobber(global_name, {});
+    elf.plt.putAssumeCapacityNoClobber(gsi, {});
 
     switch (elf.ehdrMachine()) {
         .AARCH64, .PPC64, .RISCV => |machine| @panic(@tagName(machine)),
@@ -10929,8 +11056,8 @@ fn flushMovedPltSection(elf: *Elf, which: enum { plt, plt_sec, got_plt }, old_ad
                     // its relocations are probably going through the PLT, so we don't bother with
                     // specific tracking for PLT relocations---instead just re-apply all relocations
                     // targeting symbols with PLT entries.
-                    for (elf.plt.keys()) |name| {
-                        Symbol.Id.global(name).applyTargetRelocs(elf);
+                    for (elf.plt.keys()) |gsi| {
+                        Symbol.Id.global(gsi).applyTargetRelocs(elf);
                     }
                     // We also need to update all of the references from `.plt.sec` to `.got.plt`.
                     // However, if there's also a flush pending for `.got.plt`, don't bother doing
@@ -10986,8 +11113,8 @@ fn flushMovedPltSection(elf: *Elf, which: enum { plt, plt_sec, got_plt }, old_ad
                     // its relocations are probably going through the PLT, so we don't bother with
                     // specific tracking for PLT relocations---instead just re-apply all relocations
                     // targeting symbols with PLT entries.
-                    for (elf.plt.keys()) |name| {
-                        Symbol.Id.global(name).applyTargetRelocs(elf);
+                    for (elf.plt.keys()) |gsi| {
+                        Symbol.Id.global(gsi).applyTargetRelocs(elf);
                     }
                     // We also need to update all of the references from `.plt` to `.got.plt`.
                     // However, if there's also a flush pending for `.got.plt`, don't bother doing
@@ -11053,8 +11180,8 @@ fn flushMovedPltSection(elf: *Elf, which: enum { plt, plt_sec, got_plt }, old_ad
                 // its relocations are probably going through the PLT, so we don't bother with
                 // specific tracking for PLT relocations---instead just re-apply all relocations
                 // targeting symbols with PLT entries.
-                for (elf.plt.keys()) |name| {
-                    Symbol.Id.global(name).applyTargetRelocs(elf);
+                for (elf.plt.keys()) |gsi| {
+                    Symbol.Id.global(gsi).applyTargetRelocs(elf);
                 }
                 // Update the offsets of the relocation entries in `.rela.plt`.
                 const rela_plt_shndx = elf.shndx.rela_plt;
@@ -11118,7 +11245,7 @@ fn updateExportInner(
     const name = @"export".opts.name.toSlice(ip);
     _ = elf.addGlobalSymbolAssumeCapacity(.{
         .node = exported_lsi.index().ptr(elf).node,
-        .name = try .string(elf, name),
+        .name = name,
         .value = cur_value,
         .size = cur_size,
         .type = @"type",
@@ -11140,8 +11267,8 @@ fn updateExportInner(
             // get these errors on every non-initial incremental update. Hack around that by
             // only emitting this error if the symbol we're conflicting with comes from an input
             // section (as opposed to the ZCU).
-            const conflicting_global = elf.globalByName(try elf.string(.strtab, name)).?;
-            if (conflicting_global.symtab_index.ptr(elf).node.unwrap()) |conflicting_node| {
+            const conflicting_global = elf.globalByName(name).?;
+            if (conflicting_global.ptr(elf).symtab_index.ptr(elf).node.unwrap()) |conflicting_node| {
                 if (elf.getNode(conflicting_node) == .input_section) {
                     return elf.base.comp.link_diags.fail(
                         "multiple definitions of '{s}'",
@@ -11150,6 +11277,7 @@ fn updateExportInner(
                 }
             }
         },
+        else => |e| return e,
     };
 }
 
@@ -11214,7 +11342,7 @@ pub fn printNode(
                 elf.getNodeShndx(isi.node(elf)).name(elf).slice(elf),
             });
         },
-        .copied_global => |name| try w.print("(copy:{s})", .{name.slice(elf)}),
+        .copied_global => |gsi| try w.print("(copy:{s})", .{Symbol.Id.global(gsi).name(elf).slice(elf)}),
         .nav => |nmi| {
             const zcu = elf.base.comp.zcu.?;
             const ip = &zcu.intern_pool;
@@ -11402,7 +11530,7 @@ fn deleteNode(elf: *Elf, node: *MappedFile.Node.Index.Optional) std.mem.Allocato
 fn pltEntryTargetAddr(elf: *Elf, sym: Symbol.Id) ?u64 {
     const index = switch (sym.unwrap()) {
         .local => return null,
-        .global => |name| elf.plt.getIndex(name) orelse return null,
+        .global => |gsi| elf.plt.getIndex(gsi) orelse return null,
     };
     if (elf.pltEntryIsDead(index)) return null;
     const plt = elf.targetPltInfo();
