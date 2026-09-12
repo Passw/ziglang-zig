@@ -2263,6 +2263,11 @@ pub fn initBuiltins(coff: *Coff) !void {
     }
 
     defer coff.flushSectionMerges() catch unreachable;
+    if (coff.isImage()) {
+        // In images, the .tls section is a read-only template
+        try coff.section_merges.put(gpa, .@".tls", .@".rdata");
+    }
+
     if (coff.isImage() and target.isMinGW() and comp.config.link_libc) {
         try coff.symbols.ensureUnusedCapacity(gpa, 8);
         try coff.globals.ensureUnusedCapacity(gpa, 2);
@@ -3543,20 +3548,13 @@ fn objectSectionMapIndex(
 ) !Node.ObjectSectionMapIndex {
     const gpa = coff.base.comp.gpa;
     const name_slice = name.toSlice(coff);
-    // TODO: Should this be a section merge instead?
-    const effective_attributes = if (coff.isImage() and std.mem.startsWith(u8, name_slice, ".tls")) attr: {
-        // In images, the .tls section is a read-only template
-        var attr = attributes;
-        attr.write = false;
-        break :attr attr;
-    } else attributes;
 
     const object_section_gop = try coff.object_section_table.getOrPut(gpa, name);
     const osmi: Node.ObjectSectionMapIndex = @fromBackingInt(@intCast(object_section_gop.index));
     const sym = if (!object_section_gop.found_existing) sym: {
         try coff.ensureUnusedStringCapacity(name_slice.len);
         const parent_name = coff.getOrPutStringAssumeCapacity(coff.objectSectionParentName(name_slice));
-        const parent = (try coff.pseudoSectionMapIndex(parent_name, alignment, effective_attributes)).symbol(coff);
+        const parent = (try coff.pseudoSectionMapIndex(parent_name, alignment, attributes)).symbol(coff);
         try coff.nodes.ensureUnusedCapacity(gpa, 1);
         try coff.symbols.ensureUnusedCapacity(gpa, 1);
         const parent_ni = parent.node(coff);
@@ -3608,7 +3606,7 @@ fn objectSectionMapIndex(
         name,
         .object,
         .fromFlags(sym.section_number.header(coff).flags),
-        effective_attributes,
+        attributes,
     );
 
     return osmi;
