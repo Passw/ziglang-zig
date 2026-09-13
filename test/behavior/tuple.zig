@@ -203,8 +203,6 @@ test "offsetOf anon struct" {
 }
 
 test "initializing tuple with mixed comptime-runtime fields" {
-    if (builtin.zig_backend == .stage2_spirv) return error.SkipZigTest;
-
     var x: u32 = 15;
     _ = &x;
     const T = @TypeOf(.{ @as(i32, -1234), @as(u32, 5678), x });

@@ -6732,7 +6732,7 @@ fn airAggFieldVal(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
                 if (field_ty.isInt(zcu)) return result_id;
                 return try cg.bitCast(field_ty, field_int_ty, result_id);
             },
-            else => return try cg.extractField(field_ty, object_id, field_index),
+            else => return try cg.extractField(field_ty, object_id, cg.memberIndex(object_ty, field_index)),
         },
         .@"union" => switch (object_ty.containerLayout(zcu)) {
             .@"packed" => {
@@ -6882,7 +6882,8 @@ fn structFieldPtr(
                 return result_id;
             },
             .auto, .@"extern" => {
-                return try cg.accessChain(result_ty_id, object_ptr, &.{field_index});
+                const member_index = cg.memberIndex(object_ty, field_index);
+                return try cg.accessChain(result_ty_id, object_ptr, &.{member_index});
             },
         },
         .@"union" => switch (object_ty.containerLayout(zcu)) {
@@ -6935,6 +6936,33 @@ fn structFieldPtr(
         },
         else => unreachable,
     }
+}
+
+fn memberIndex(cg: *CodeGen, struct_ty: Type, field_index: u32) u32 {
+    const zcu = cg.zcu;
+    const ip = &zcu.intern_pool;
+    var index: u32 = 0;
+    switch (ip.indexToKey(struct_ty.toIntern())) {
+        .tuple_type => |tuple| {
+            const types = tuple.types.get(ip)[0..field_index];
+            for (types, tuple.values.get(ip)[0..field_index]) |field_ty_index, field_val| {
+                const field_ty: Type = .fromInterned(field_ty_index);
+                if (field_val != .none or !field_ty.hasRuntimeBits(zcu)) continue;
+                index += 1;
+            }
+        },
+        .struct_type => {
+            const struct_type = ip.loadStructType(struct_ty.toIntern());
+            var it = struct_type.iterateRuntimeOrder(ip);
+            while (it.next()) |i| {
+                if (i == field_index) break;
+                const field_ty: Type = .fromInterned(struct_type.field_types.get(ip)[i]);
+                if (field_ty.hasRuntimeBits(zcu)) index += 1;
+            }
+        },
+        else => unreachable,
+    }
+    return index;
 }
 
 fn airStructFieldPtr(cg: *CodeGen, inst: Air.Inst.Index) !?Id {
