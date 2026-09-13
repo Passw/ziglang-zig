@@ -1061,6 +1061,7 @@ pub const Manifest = struct {
         const input_file = file_off.get(contents);
         const parent_dir = cache.prefixes()[input_file.flags.prefix].handle;
         const file_path = file_off.path(contents);
+        const gpa = cache.gpa;
 
         if (input_path.have_digest) return;
 
@@ -1150,7 +1151,6 @@ pub const Manifest = struct {
             }
 
             const dir_contents_start = m.all_input_content.items.len;
-            const gpa = cache.gpa;
             hashDir(gpa, io, opened_dir, &input_file.digest, &m.all_input_content) catch |err| switch (err) {
                 error.Canceled, error.OutOfMemory => |e| return e,
                 else => |e| return fail(&m.diagnostic, .{ .file_read = .{
@@ -1194,17 +1194,28 @@ pub const Manifest = struct {
                 try input_file.setStat(m, .init(actual_stat));
             }
 
-            hashFile(io, opened_file, &input_file.digest) catch |err| switch (err) {
-                error.Canceled => |e| return e,
-                else => |e| return fail(&m.diagnostic, .{ .file_read = .{
-                    .file_offset = file_off,
-                    .err = e,
-                } }),
-            };
-
             switch (input_path.contents.unwrap()) {
-                .requested => @panic("TODO"),
-                .unrequested => {},
+                .requested => {
+                    const start = m.all_input_content.items.len;
+                    hashFileAppend(io, opened_file, &input_file.digest, &m.all_input_content, gpa) catch |err| switch (err) {
+                        error.Canceled, error.OutOfMemory => |e| return e,
+                        else => |e| return fail(&m.diagnostic, .{ .file_read = .{
+                            .file_offset = file_off,
+                            .err = e,
+                        } }),
+                    };
+                    input_path.contents = .populated(.{
+                        .off = @intCast(start),
+                        .len = @intCast(m.all_input_content.items.len - start),
+                    });
+                },
+                .unrequested => hashFile(io, opened_file, &input_file.digest) catch |err| switch (err) {
+                    error.Canceled => |e| return e,
+                    else => |e| return fail(&m.diagnostic, .{ .file_read = .{
+                        .file_offset = file_off,
+                        .err = e,
+                    } }),
+                },
                 .populated => unreachable,
             }
         }
@@ -1220,6 +1231,7 @@ pub const Manifest = struct {
     ) CheckError!CheckResult {
         const cache = m.cache;
         const io = cache.io;
+        const gpa = cache.gpa;
         const disk_file = file_off.get(disk_contents);
         const input_file = file_off.get(input_contents);
         const parent_dir = cache.prefixes()[disk_file.flags.prefix].handle;
@@ -1321,7 +1333,6 @@ pub const Manifest = struct {
             }
 
             const dir_contents_start = m.all_input_content.items.len;
-            const gpa = cache.gpa;
             hashDir(gpa, io, opened_dir, &disk_file.digest, &m.all_input_content) catch |err| switch (err) {
                 error.Canceled, error.OutOfMemory => |e| return e,
                 else => |e| return fail(&m.diagnostic, .{ .file_read = .{
@@ -1367,16 +1378,28 @@ pub const Manifest = struct {
                 if (!try disk_file.setStatChanged(m, .init(actual_stat))) return .hit;
             }
 
-            hashFile(io, opened_file, &disk_file.digest) catch |err| switch (err) {
-                error.Canceled => |e| return e,
-                else => |e| return fail(&m.diagnostic, .{ .file_read = .{
-                    .file_offset = file_off,
-                    .err = e,
-                } }),
-            };
             switch (input_path.contents.unwrap()) {
-                .requested => @panic("TODO"),
-                .unrequested => {},
+                .requested => {
+                    const start = m.all_input_content.items.len;
+                    hashFileAppend(io, opened_file, &input_file.digest, &m.all_input_content, gpa) catch |err| switch (err) {
+                        error.Canceled, error.OutOfMemory => |e| return e,
+                        else => |e| return fail(&m.diagnostic, .{ .file_read = .{
+                            .file_offset = file_off,
+                            .err = e,
+                        } }),
+                    };
+                    input_path.contents = .populated(.{
+                        .off = @intCast(start),
+                        .len = @intCast(m.all_input_content.items.len - start),
+                    });
+                },
+                .unrequested => hashFile(io, opened_file, &disk_file.digest) catch |err| switch (err) {
+                    error.Canceled => |e| return e,
+                    else => |e| return fail(&m.diagnostic, .{ .file_read = .{
+                        .file_offset = file_off,
+                        .err = e,
+                    } }),
+                },
                 .populated => unreachable,
             }
 
@@ -2032,6 +2055,27 @@ pub const Manifest = struct {
         hasher.final(bin_digest);
     }
 
+    fn hashFileAppend(
+        io: Io,
+        file: Io.File,
+        bin_digest: *[Hasher.mac_length]u8,
+        al: *std.ArrayList(u8),
+        gpa: Allocator,
+    ) (Io.File.ReadPositionalError || Allocator.Error)!void {
+        var hasher = hasher_init;
+        var offset: u64 = 0;
+        while (true) {
+            try al.ensureUnusedCapacity(gpa, 2048);
+            const buffer = al.unusedCapacitySlice();
+            const n = try file.readPositional(io, &.{buffer}, offset);
+            if (n == 0) break;
+            hasher.update(buffer[0..n]);
+            offset += n;
+            al.items.len += n;
+        }
+        hasher.final(bin_digest);
+    }
+
     const HashDirError = Io.Dir.Reader.Error || Allocator.Error;
 
     /// Appends the sorted, encoded directory entries to `contents`.
@@ -2198,7 +2242,7 @@ test "cache file and then recall it" {
     }
 }
 
-test "check that changing a file makes cache fail" {
+test "check that changing a file causes cache miss" {
     const io = testing.io;
 
     var tmp = testing.tmpDir(.{});
