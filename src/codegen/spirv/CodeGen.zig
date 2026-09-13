@@ -308,6 +308,21 @@ pub fn generateNav(pt: Zcu.PerThread, nav_index: InternPool.Nav.Index) codegen.E
                     else => {},
                 }
 
+                const image_ty = blk: {
+                    if (ty.zigTypeTag(zcu) == .array or ty.isSpirvRuntimeArray(zcu)) {
+                        break :blk ty.childType(zcu);
+                    }
+                    break :blk ty;
+                };
+                if (image_ty.zigTypeTag(zcu) == .spirv) {
+                    const spirv_type = ip.loadSpirvType(image_ty.toIntern());
+                    if (spirv_type.flags.tag == .image) switch (spirv_type.flags.access) {
+                        .read_only => try cg.decorate(result_id, .non_writable),
+                        .write_only => try cg.decorate(result_id, .non_readable),
+                        .read_write, .unknown => {},
+                    };
+                }
+
                 if (ext.decoration) |decoration| switch (decoration) {
                     .location => |location| {
                         try cg.decorate(result_id, .{
@@ -2237,11 +2252,16 @@ fn resolveType(cg: *CodeGen, ty: Type, repr: Repr) Error!Id {
                             .r32i => .r32i,
                             .r32u => .r32ui,
                         },
-                        .access_qualifier = switch (spirv_type.flags.access) {
-                            .unknown => null,
-                            .read_only => .read_only,
-                            .write_only => .write_only,
-                            .read_write => .read_write,
+                        .access_qualifier = blk: {
+                            if (target.os.tag == .opencl) {
+                                break :blk switch (spirv_type.flags.access) {
+                                    .unknown => null,
+                                    .read_only => .read_only,
+                                    .write_only => .write_only,
+                                    .read_write => .read_write,
+                                };
+                            }
+                            break :blk null;
                         },
                     });
                 },
