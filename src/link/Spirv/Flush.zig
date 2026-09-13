@@ -482,6 +482,7 @@ fn emitCapabilities(flush: *Flush, out: *Section) link.Error!void {
     }
 
     inline for (@typeInfo(spec.Extension).@"enum".field_names) |name| {
+        if (comptime std.mem.startsWith(u8, name, "v1_")) continue;
         if (@hasField(std.Target.spirv.Feature, name)) {
             const feature = @field(std.Target.spirv.Feature, name);
             if (target.cpu.has(.spirv, feature)) try out.emit(gpa, .OpExtension, .{ .name = name });
