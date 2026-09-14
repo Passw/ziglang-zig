@@ -2828,11 +2828,6 @@ pub fn update(comp: *Compilation, main_progress_node: std.Progress.Node) UpdateE
                         });
                     },
                 },
-                error.InvalidFormat => return comp.setMiscFailure(
-                    .check_whole_cache,
-                    "failed to check cache: invalid manifest file format",
-                    .{},
-                ),
             };
             if (status == .hit and !ignore_hit) {
                 // In this case the cache hit contains the full set of file system inputs. Nice!
@@ -2845,7 +2840,7 @@ pub fn update(comp: *Compilation, main_progress_node: std.Progress.Node) UpdateE
 
                 comp.last_update_was_cache_hit = true;
                 log.debug("CacheMode.whole cache hit for {s}", .{comp.root_name});
-                const bin_digest = man.finalBin();
+                const bin_digest = man.hitDigest();
 
                 comp.digest = bin_digest;
 
@@ -3054,7 +3049,7 @@ pub fn update(comp: *Compilation, main_progress_node: std.Progress.Node) UpdateE
                 try man.populateOtherManifest(pwc.manifest, pwc.prefix_map);
             }
 
-            const bin_digest = man.finalBin();
+            const bin_digest = man.missDigest();
             const hex_digest = Cache.binToHex(bin_digest);
 
             // Work around windows `AccessDenied` if any files within this
@@ -5125,9 +5120,9 @@ pub fn translateC(
         var reader: std.Io.Reader = .fixed(stdout);
         const MessageHeader = std.zig.Server.Message.Header;
         const header = reader.takeStruct(MessageHeader, .little) catch |err|
-            fatal("unable to read translate-c MessageHeader: {s}", .{@errorName(err)});
+            fatal("unable to read translate-c MessageHeader: {t}", .{err});
         const body = reader.take(header.bytes_len) catch |err|
-            fatal("unable to read {}-byte translate-c message body: {s}", .{ header.bytes_len, @errorName(err) });
+            fatal("unable to read {d}-byte translate-c message body: {t}", .{ header.bytes_len, err });
         switch (header.tag) {
             .error_bundle => {
                 const error_bundle = try std.zig.Server.allocErrorBundle(gpa, body);
@@ -5137,11 +5132,11 @@ pub fn translateC(
                     .errors = error_bundle,
                 };
             },
-            else => fatal("unexpected message type received from translate-c: {s}", .{@tagName(header.tag)}),
+            else => fatal("unexpected message type received from translate-c: {t}", .{header.tag}),
         }
     }
 
-    const bin_digest = man.finalBin();
+    const bin_digest = man.missDigest();
     const hex_digest = Cache.binToHex(bin_digest);
     const o_sub_path = "o" ++ fs.path.sep_str ++ hex_digest;
 
@@ -5878,10 +5873,10 @@ fn updateWin32Resource(comp: *Compilation, win32_resource: *Win32Resource, win32
         const rc_basename = try std.fmt.allocPrint(arena, "{s}.rc", .{src_basename});
         const res_basename = try std.fmt.allocPrint(arena, "{s}.res", .{src_basename});
 
-        const digest = if (.hit == try man.check(child_progress_node)) man.final() else blk: {
+        const digest = if (.hit == try man.check(child_progress_node)) man.hitDigestHex() else blk: {
             // The digest only depends on the .manifest file, so we can
             // get the digest now and write the .res directly to the cache
-            const digest = man.final();
+            const digest = man.missDigestHex();
 
             const o_sub_path = try fs.path.join(arena, &.{ "o", &digest });
             var o_dir = try comp.dirs.local_cache.handle.createDirPathOpen(io, o_sub_path, .{});
@@ -5970,7 +5965,7 @@ fn updateWin32Resource(comp: *Compilation, win32_resource: *Win32Resource, win32
 
     const rc_basename_noext = src_basename[0 .. src_basename.len - fs.path.extension(src_basename).len];
 
-    const digest = if (.hit == try man.check(child_progress_node)) man.final() else blk: {
+    const digest = if (.hit == try man.check(child_progress_node)) man.hitDigestHex() else blk: {
         var zig_cache_tmp_dir = try comp.dirs.local_cache.handle.createDirPathOpen(io, "tmp", .{});
         defer zig_cache_tmp_dir.close(io);
 
@@ -6042,7 +6037,7 @@ fn updateWin32Resource(comp: *Compilation, win32_resource: *Win32Resource, win32
         }
 
         // Rename into place.
-        const digest = man.final();
+        const digest = man.missDigestHex();
         const o_sub_path = try fs.path.join(arena, &[_][]const u8{ "o", &digest });
         var o_dir = try comp.dirs.local_cache.handle.createDirPathOpen(io, o_sub_path, .{});
         defer o_dir.close(io);

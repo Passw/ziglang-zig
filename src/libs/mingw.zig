@@ -266,13 +266,9 @@ pub fn buildImportLib(comp: *Compilation, lib_name: []const u8, prog_node: std.P
             },
         },
         error.OutOfMemory, error.Canceled => |e| return e,
-        error.InvalidFormat => {
-            comp.setMiscFailure(.windows_import_lib, "checking cache failed: invalid manifest file format", .{});
-            return error.AlreadyReported;
-        },
     };
     if (status == .hit) {
-        const digest = man.final();
+        const digest = man.hitDigestHex();
         const sub_path = try std.fs.path.join(gpa, &.{ "o", &digest, final_lib_basename });
         errdefer gpa.free(sub_path);
 
@@ -291,7 +287,7 @@ pub fn buildImportLib(comp: *Compilation, lib_name: []const u8, prog_node: std.P
         return crt_file_path;
     }
 
-    const digest = man.final();
+    const digest = man.missDigestHex();
     const o_sub_path = try std.fs.path.join(arena, &[_][]const u8{ "o", &digest });
     var o_dir = try comp.dirs.global_cache.handle.createDirPathOpen(io, o_sub_path, .{});
     defer o_dir.close(io);

@@ -4879,7 +4879,7 @@ fn cmdTranslateC(
         fatal("unable to process {q}: {t}", .{ c_source_file.src_path, err });
 
     const result: Compilation.TranslateCResult = if (.hit == try man.check(prog_node)) .{
-        .digest = man.finalBin(),
+        .digest = man.hitDigest(),
         .cache_hit = true,
         .errors = std.zig.ErrorBundle.empty,
     } else result: {
