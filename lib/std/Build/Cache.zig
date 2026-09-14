@@ -914,9 +914,8 @@ pub const Manifest = struct {
         m.hash.hasher = hasher_init;
         m.hash.hasher.update(input_digest);
 
-        for (m.files.keys(), 0..) |off, i| {
+        for (m.files.keys()) |off| {
             const file = off.get(contents);
-            log.warn("hashing {d} {s} = {x}", .{ i, off.path(contents), &file.digest });
             m.hash.hasher.update(&file.digest);
         }
     }
@@ -1395,7 +1394,7 @@ pub const Manifest = struct {
             switch (input_path.contents.unwrap()) {
                 .requested => {
                     const start = m.all_input_content.items.len;
-                    hashFileAppend(io, opened_file, &input_file.digest, &m.all_input_content, gpa) catch |err| switch (err) {
+                    hashFileAppend(io, opened_file, &disk_file.digest, &m.all_input_content, gpa) catch |err| switch (err) {
                         error.Canceled, error.OutOfMemory => |e| return e,
                         else => |e| return fail(&m.diagnostic, .{ .file_read = .{
                             .file_offset = file_off,
