@@ -1734,7 +1734,6 @@ pub const Manifest = struct {
                 hasher.update(contents);
                 hasher.final(&header.digest);
             }
-            m.hash.hasher.update(&header.digest);
             return;
         }
 
