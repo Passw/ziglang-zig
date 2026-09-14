@@ -2115,6 +2115,7 @@ pub const Manifest = struct {
         assert(@typeInfo(std.zig.Server.Message.PathPrefix).@"enum".field_names.len == discovered.cache.prefixes_len);
         assert(discovered.cache.prefixes_len == 5);
 
+        const discovered_files = discovered.files.keys();
         const orig_files_len = m.files.count();
         const orig_contents_len = m.contents.items.len;
         errdefer {
@@ -2122,13 +2123,14 @@ pub const Manifest = struct {
             m.contents.shrinkRetainingCapacity(orig_contents_len);
         }
 
-        for (discovered.files.keys(), 0..) |off, file_index| {
+        for (discovered_files, 0..) |off, file_index| {
             try m.files.ensureUnusedCapacityContext(gpa, 1, .{ .contents = m.contents.items });
 
-            const next_off = if (file_index < discovered.files.count())
-                @backingInt(discovered.files.keys()[file_index + 1])
+            const next_index = file_index + 1;
+            const next_off = if (discovered_files.len - next_index == 0)
+                discovered.contents.items.len
             else
-                discovered.contents.items.len;
+                @backingInt(discovered_files[next_index]);
 
             const copy_bytes = discovered.contents.items[@backingInt(off)..next_off];
             const prev_contents_len: File.Offset = @fromBackingInt(@intCast(m.contents.items.len));
