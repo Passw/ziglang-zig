@@ -48,7 +48,7 @@ pub fn obtain(cache: *Cache) Manifest {
         .cache = cache,
         .hash = cache.hash,
         .manifest_file = null,
-        .dirty = false,
+        .state = .input,
     };
 }
 
@@ -274,8 +274,7 @@ pub const Manifest = struct {
     hash: HashHelper,
     /// When this is null, `Manifest` is in "pre-check" phase. Otherwise it is in "post-check" phase.
     manifest_file: ?Io.File,
-    /// `finalize` has not been called yet.
-    dirty: bool,
+    state: State,
     /// Set this flag to true before calling `check` in order to indicate that upon a cache hit, the code
     /// using the cache will not modify the files within the cache directory. This allows multiple processes
     /// to utilize the same cache directory at the same time.
@@ -308,6 +307,27 @@ pub const Manifest = struct {
     max_input_content_len: usize = std.math.maxInt(u32),
 
     pub const Files = std.array_hash_map.Custom(File.Offset, void, File.HashContext, false);
+
+    pub const State = enum {
+        /// Call `addInputPath`, `addInputPathOptional`, and methods of `Manifest.hash`. Once all input files and state
+        /// have been added, call `check`.
+        input,
+        /// `check` has already been called and a hit occurred. Call `hitDigest` to find cache artifact directory.
+        hit,
+        /// `hitDigest` has already been called. No further operations are allowed.
+        hit_digested,
+        /// `check` has already been called and a miss occurred. `missDigest` has not been called yet. Miss diagnostic
+        /// data may still be accessed. Call `addDiscoveredPath` to add discovered files and directories.
+        miss,
+        /// A miss occurred, `missDigest` has not been called yet. Call `addDiscoveredPath` to add more discovered files
+        /// and directories. Miss diagnostic data may no longer be accessed.
+        miss_discovered,
+        /// `missDigest` has been called, but `finalize` has not been called yet.
+        miss_digested,
+        /// The cache manifest has been written to disk such that the next check for the same inputs will yield a hit.
+        /// No further operations are allowed.
+        miss_finalized,
+    };
 
     /// Source files and directories whose prefix and relative path are
     /// included when computing the cache manifest digest. It's the information
@@ -656,6 +676,7 @@ pub const Manifest = struct {
     /// See also:
     /// * `addDiscoveredPath`
     pub fn addInputPath(m: *Manifest, path: Path, options: AddInputPathOptions) Allocator.Error!InputPath.Index {
+        assert(m.state == .input);
         const cache = m.cache;
         const gpa = cache.gpa;
         const is_directory = options.handle.isDirectory();
@@ -733,6 +754,7 @@ pub const Manifest = struct {
     }
 
     pub fn addInputPathOptional(m: *Manifest, opt_path: ?Path, options: AddInputPathOptions) Allocator.Error!void {
+        assert(m.state == .input);
         m.hash.add(opt_path != null);
         _ = try addInputPath(m, opt_path orelse return, options);
     }
@@ -772,6 +794,7 @@ pub const Manifest = struct {
     }
 
     pub fn checkProgressless(man: *Manifest) CheckError!CheckResult {
+        assert(man.state == .input);
         assert(man.manifest_file == null);
 
         // This is *not* hashing the contents of the input files. It is the
@@ -872,6 +895,8 @@ pub const Manifest = struct {
         // of all non-discovered files -- that is, the ones we've already been told about. The rest will be discovered
         // through calls to `addDiscoveredPath` etc, which will update the hasher. After all files are added, the user
         // can use `final`, and will at some point `finalize` the file list to disk.
+        man.hash.hasher = hasher_init;
+        man.hash.hasher.update(&input_digest);
 
         hit: {
             const miss_result = miss: {
@@ -891,9 +916,7 @@ pub const Manifest = struct {
 
             // Cache miss, but `checkLocked` guarantees that all input files have their digests computed, even on a
             // cache miss, which is needed because they will be used in the manifest digest.
-            man.dirty = true;
-            man.shrinkFilesToInput();
-            hashFiles(man, &input_digest);
+            man.state = .miss;
             return miss_result;
         }
 
@@ -904,19 +927,22 @@ pub const Manifest = struct {
             };
         }
 
-        hashFiles(man, &input_digest);
+        man.state = .hit;
         return .hit;
     }
 
-    fn hashFiles(m: *Manifest, input_digest: *BinDigest) void {
-        const contents = m.contents.items;
-
-        m.hash.hasher = hasher_init;
-        m.hash.hasher.update(input_digest);
-
-        for (m.files.keys()) |off| {
-            const file = off.get(contents);
-            m.hash.hasher.update(&file.digest);
+    fn transitionToMissDiscovered(m: *Manifest) void {
+        switch (m.state) {
+            .input => unreachable,
+            .hit => unreachable,
+            .hit_digested => unreachable,
+            .miss => {
+                m.shrinkFilesToInput();
+                m.state = .miss_discovered;
+            },
+            .miss_discovered => {},
+            .miss_digested => unreachable,
+            .miss_finalized => unreachable,
         }
     }
 
@@ -1611,6 +1637,7 @@ pub const Manifest = struct {
     /// * `addInputPath`
     pub fn addDiscoveredPath(m: *Manifest, options: AddDiscoveredPathOptions) AddDiscoveredPathError!void {
         assert(m.manifest_file != null);
+        transitionToMissDiscovered(m);
         const cache = m.cache;
         const gpa = cache.gpa;
         const io = cache.io;
@@ -1705,8 +1732,6 @@ pub const Manifest = struct {
                 try populateFile(m, header, need_stat, handle, options.contents, metadata_only, options.diagnostic);
             },
         }
-
-        m.hash.hasher.update(&header.digest);
     }
 
     fn populateFile(
@@ -1840,39 +1865,63 @@ pub const Manifest = struct {
         };
     }
 
-    /// Returns a binary hash of the inputs, input file contents, and discovered file contents.
-    pub fn finalBin(self: *Manifest) BinDigest {
-        assert(self.manifest_file != null);
+    /// See also `hitDigestHex`.
+    pub fn hitDigest(m: *Manifest) BinDigest {
+        assert(m.manifest_file != null);
+        assert(m.state == .hit);
+        m.state = .hit_digested;
+        return finalDigest(m);
+    }
 
+    pub fn hitDigestHex(m: *Manifest) HexDigest {
+        return binToHex(m.hitDigest());
+    }
+
+    /// See also `missDigestHex`.
+    pub fn missDigest(m: *Manifest) BinDigest {
+        assert(m.manifest_file != null);
+        transitionToMissDiscovered(m);
+        m.state = .miss_digested;
+        return finalDigest(m);
+    }
+
+    pub fn missDigestHex(m: *Manifest) HexDigest {
+        return binToHex(m.missDigest());
+    }
+
+    fn finalDigest(m: *Manifest) BinDigest {
+        const contents = m.contents.items;
+        const hasher = &m.hash.hasher;
+
+        for (m.files.keys()) |off| {
+            const file = off.get(contents);
+            hasher.update(&file.digest);
+        }
         // We don't close the manifest file yet, because we want to keep it locked until the API user is done using it.
         // We also don't write out the manifest yet, because until `finalize` is called we still might be working on
         // creating the artifacts to cache.
-
         var bin_digest: BinDigest = undefined;
-        self.hash.hasher.final(&bin_digest);
+        hasher.final(&bin_digest);
         return bin_digest;
-    }
-
-    /// Returns a hex encoded hash of the inputs, input file contents, and discovered file contents.
-    pub fn final(self: *Manifest) HexDigest {
-        const bin_digest = self.finalBin();
-        return binToHex(bin_digest);
     }
 
     /// If `want_shared_lock` is true, this function automatically downgrades the
     /// lock from exclusive to shared.
     pub fn finalize(m: *Manifest) !void {
-        assert(m.have_exclusive_lock);
         const io = m.cache.io;
         const manifest_file = m.manifest_file.?;
-        if (m.dirty) {
+
+        assert(m.state == .miss_digested);
+        assert(m.have_exclusive_lock);
+
+        {
             m.contents.appendAssumeCapacity(0);
             defer _ = m.contents.pop().?;
 
             try manifest_file.setLength(io, m.contents.items.len);
             try manifest_file.writePositionalAll(io, m.contents.items, 0);
 
-            m.dirty = false;
+            m.state = .miss_finalized;
         }
 
         if (m.want_shared_lock) {
@@ -2197,39 +2246,39 @@ test "cache file and then recall it" {
         defer cache.manifest_dir.close(io);
 
         {
-            var ch = cache.obtain();
-            defer ch.deinit();
+            var man = cache.obtain();
+            defer man.deinit();
 
-            ch.hash.add(true);
-            ch.hash.add(@as(u16, 1234));
-            ch.hash.addBytes("1234");
-            _ = try ch.addInputPath(.{
+            man.hash.add(true);
+            man.hash.add(@as(u16, 1234));
+            man.hash.addBytes("1234");
+            _ = try man.addInputPath(.{
                 .root_dir = tmp_directory,
                 .sub_path = temp_file,
             }, .{});
 
-            try testing.expectEqual(.incomplete_manifest, try ch.check(.none));
+            try testing.expectEqual(.incomplete_manifest, try man.check(.none));
 
-            digest1 = ch.final();
-            try ch.finalize();
+            digest1 = man.missDigestHex();
+            try man.finalize();
         }
         {
-            var ch = cache.obtain();
-            defer ch.deinit();
+            var man = cache.obtain();
+            defer man.deinit();
 
-            ch.hash.add(true);
-            ch.hash.add(@as(u16, 1234));
-            ch.hash.addBytes("1234");
-            _ = try ch.addInputPath(.{
+            man.hash.add(true);
+            man.hash.add(@as(u16, 1234));
+            man.hash.addBytes("1234");
+            _ = try man.addInputPath(.{
                 .root_dir = tmp_directory,
                 .sub_path = temp_file,
             }, .{});
 
             // Cache hit! We just "built" the same file
-            try testing.expectEqual(.hit, try ch.check(.none));
-            digest2 = ch.final();
+            try testing.expectEqual(.hit, try man.check(.none));
+            digest2 = man.hitDigestHex();
 
-            try testing.expectEqual(false, ch.have_exclusive_lock);
+            try testing.expectEqual(false, man.have_exclusive_lock);
         }
 
         try testing.expectEqual(digest1, digest2);
@@ -2291,7 +2340,7 @@ test "check that changing a file causes cache miss" {
 
             try testing.expectEqualStrings(original_temp_file_contents, temp_file_idx.contents(&man));
 
-            digest1 = man.final();
+            digest1 = man.missDigestHex();
 
             try man.finalize();
         }
@@ -2316,7 +2365,7 @@ test "check that changing a file causes cache miss" {
 
             try testing.expectEqualStrings(updated_temp_file_contents, temp_file_idx.contents(&man));
 
-            digest2 = man.final();
+            digest2 = man.missDigestHex();
 
             try man.finalize();
         }
@@ -2356,7 +2405,7 @@ test "no file inputs" {
 
         try testing.expectEqual(.incomplete_manifest, try man.check(.none));
 
-        digest1 = man.final();
+        digest1 = man.missDigestHex();
 
         try man.finalize();
     }
@@ -2367,14 +2416,14 @@ test "no file inputs" {
         man.hash.addBytes("1234");
 
         try testing.expectEqual(.hit, try man.check(.none));
-        digest2 = man.final();
+        digest2 = man.hitDigestHex();
         try testing.expectEqual(false, man.have_exclusive_lock);
     }
 
     try testing.expectEqual(digest1, digest2);
 }
 
-test "Manifest with files added after initial hash work" {
+test "Manifest with files added after initial hash" {
     const io = testing.io;
 
     var tmp = testing.tmpDir(.{});
@@ -2433,7 +2482,7 @@ test "Manifest with files added after initial hash work" {
                 .sub_path = temp_file2,
             } } });
 
-            digest1 = man.final();
+            digest1 = man.missDigestHex();
             try man.finalize();
         }
         {
@@ -2447,7 +2496,7 @@ test "Manifest with files added after initial hash work" {
             }, .{});
 
             try testing.expect(.hit == try man.check(.none));
-            digest2 = man.final();
+            digest2 = man.hitDigestHex();
 
             try testing.expectEqual(false, man.have_exclusive_lock);
         }
@@ -2484,7 +2533,7 @@ test "Manifest with files added after initial hash work" {
                 .sub_path = temp_file2,
             } } });
 
-            digest3 = man.final();
+            digest3 = man.missDigestHex();
 
             try man.finalize();
         }
