@@ -1675,11 +1675,12 @@ pub const Manifest = struct {
         FileSystemFailure,
     } || Allocator.Error || Io.Cancelable;
 
-    /// Add a file as a dependency of process being cached, after cache miss
-    /// occurs.
+    /// Add a file or directory as a dependency of process being cached, after cache miss occurs.
     ///
     /// See also:
     /// * `addInputPath`
+    /// * `addDiscoveredDepFile`
+    /// * `addDiscoveredManifest`
     pub fn addDiscoveredPath(m: *Manifest, options: AddDiscoveredPathOptions) AddDiscoveredPathError!void {
         assert(m.manifest_file != null);
         transitionToMissDiscovered(m);
@@ -1788,6 +1789,11 @@ pub const Manifest = struct {
         dep_tokenizer: DepTokenizer.Token,
     };
 
+    /// Add a GNU make style dep file as a dependency of process being cached, after cache miss occurs.
+    ///
+    /// See also:
+    /// * `addDiscoveredPath
+    /// * `addDiscoveredManifest`
     pub fn addDiscoveredDepFile(
         m: *Manifest,
         path: Path,
@@ -2077,7 +2083,7 @@ pub const Manifest = struct {
         m.* = undefined;
     }
 
-    pub fn populateFileSystemInputs(man: *Manifest, buf: *std.ArrayList(u8)) Allocator.Error!void {
+    pub fn populateFileSystemInputs(man: *const Manifest, buf: *std.ArrayList(u8)) Allocator.Error!void {
         assert(@typeInfo(std.zig.Server.Message.PathPrefix).@"enum".field_names.len == man.cache.prefixes_len);
         buf.clearRetainingCapacity();
         const gpa = man.cache.gpa;
@@ -2096,42 +2102,49 @@ pub const Manifest = struct {
         }
     }
 
-    pub fn populateOtherManifest(man: *Manifest, other: *Manifest, prefix_map: [5]u8) Allocator.Error!void {
-        const gpa = other.cache.gpa;
-        assert(other.manifest_file != null);
-        assert(@typeInfo(std.zig.Server.Message.PathPrefix).@"enum".field_names.len == man.cache.prefixes_len);
-        assert(man.cache.prefixes_len == 5);
+    /// Add the full set of paths from another `Manifest` as a dependency of process being cached, after cache miss
+    /// occurs.
+    ///
+    /// See also:
+    /// * `addDiscoveredPath
+    /// * `addDiscoveredDepFile`
+    pub fn addDiscoveredManifest(m: *Manifest, discovered: *const Manifest, prefix_map: [5]u8) Allocator.Error!void {
+        const gpa = m.cache.gpa;
+        assert(m.manifest_file != null);
+        transitionToMissDiscovered(m);
+        assert(@typeInfo(std.zig.Server.Message.PathPrefix).@"enum".field_names.len == discovered.cache.prefixes_len);
+        assert(discovered.cache.prefixes_len == 5);
 
-        const orig_files_len = other.files.count();
-        const orig_contents_len = other.contents.items.len;
+        const orig_files_len = m.files.count();
+        const orig_contents_len = m.contents.items.len;
         errdefer {
-            other.files.shrinkRetainingCapacityContext(orig_files_len, .{ .contents = other.contents.items });
-            other.contents.shrinkRetainingCapacity(orig_contents_len);
+            m.files.shrinkRetainingCapacityContext(orig_files_len, .{ .contents = m.contents.items });
+            m.contents.shrinkRetainingCapacity(orig_contents_len);
         }
 
-        for (man.files.keys(), 0..) |off, file_index| {
-            try other.files.ensureUnusedCapacityContext(gpa, 1, .{ .contents = other.contents.items });
+        for (discovered.files.keys(), 0..) |off, file_index| {
+            try m.files.ensureUnusedCapacityContext(gpa, 1, .{ .contents = m.contents.items });
 
-            const next_off = if (file_index < man.files.count())
-                @backingInt(man.files.keys()[file_index + 1])
+            const next_off = if (file_index < discovered.files.count())
+                @backingInt(discovered.files.keys()[file_index + 1])
             else
-                man.contents.items.len;
+                discovered.contents.items.len;
 
-            const copy_bytes = man.contents.items[@backingInt(off)..next_off];
-            const prev_contents_len: File.Offset = @fromBackingInt(@intCast(other.contents.items.len));
-            try other.contents.appendSlice(gpa, copy_bytes);
+            const copy_bytes = discovered.contents.items[@backingInt(off)..next_off];
+            const prev_contents_len: File.Offset = @fromBackingInt(@intCast(m.contents.items.len));
+            try m.contents.appendSlice(gpa, copy_bytes);
 
-            const gop = other.files.getOrPutAssumeCapacityContext(prev_contents_len, .{
-                .contents = other.contents.items,
+            const gop = m.files.getOrPutAssumeCapacityContext(prev_contents_len, .{
+                .contents = m.contents.items,
             });
 
             if (gop.found_existing) {
-                other.contents.shrinkRetainingCapacity(@backingInt(prev_contents_len));
+                m.contents.shrinkRetainingCapacity(@backingInt(prev_contents_len));
                 continue;
             }
 
             // Flags are already copied but the prefix is supposed to be filtered by `prefix_map`.
-            const other_file = prev_contents_len.get(other.contents.items);
+            const other_file = prev_contents_len.get(m.contents.items);
             other_file.flags.prefix = @intCast(prefix_map[other_file.flags.prefix]);
         }
     }

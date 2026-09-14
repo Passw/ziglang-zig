@@ -2835,7 +2835,7 @@ pub fn update(comp: *Compilation, main_progress_node: std.Progress.Node) UpdateE
                 if (comp.parent_whole_cache) |pwc| {
                     try pwc.mutex.lock(io);
                     defer pwc.mutex.unlock(io);
-                    try man.populateOtherManifest(pwc.manifest, pwc.prefix_map);
+                    try pwc.manifest.addDiscoveredManifest(&man, pwc.prefix_map);
                 }
 
                 comp.last_update_was_cache_hit = true;
@@ -3046,7 +3046,7 @@ pub fn update(comp: *Compilation, main_progress_node: std.Progress.Node) UpdateE
             if (comp.parent_whole_cache) |pwc| {
                 try pwc.mutex.lock(io);
                 defer pwc.mutex.unlock(io);
-                try man.populateOtherManifest(pwc.manifest, pwc.prefix_map);
+                try pwc.manifest.addDiscoveredManifest(&man, pwc.prefix_map);
             }
 
             const bin_digest = man.missDigest();
