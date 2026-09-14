@@ -105,7 +105,7 @@ pub fn make(
             }
 
             if (try step.cacheHit(maker, &man, progress_node)) {
-                const digest = man.final();
+                const digest = man.hitDigestHex();
                 maker.generatedPath(conf_wf.generated_directory).* = .{
                     .root_dir = cache_root,
                     .sub_path = try Io.Dir.path.join(arena, &.{ "o", &digest }),
@@ -114,7 +114,7 @@ pub fn make(
                 return;
             }
 
-            const digest = man.final();
+            const digest = man.missDigestHex();
             const out_path: Path = .{
                 .root_dir = cache_root,
                 .sub_path = try Io.Dir.path.join(arena, &.{ "o", &digest }),

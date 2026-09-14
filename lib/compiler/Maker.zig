@@ -1400,7 +1400,7 @@ fn configure(graph: *Graph, options: ConfigureOptions) !ScannedConfig {
 
             if (config_man) |man| {
                 if (.hit == try man.check(compile_prog_node)) {
-                    const digest = man.final();
+                    const digest = man.hitDigestHex();
                     const path: Path = .{
                         .root_dir = graph.local_cache_root,
                         .sub_path = try arena.print("c/{s}", .{&digest}),
@@ -1512,7 +1512,7 @@ fn configure(graph: *Graph, options: ConfigureOptions) !ScannedConfig {
             break :cp .{ config_tmp_path, null };
         } else {
             const man = config_man.?;
-            const digest = man.final();
+            const digest = man.missDigestHex();
             const final_path: Path = .{
                 .root_dir = graph.local_cache_root,
                 .sub_path = try arena.print("c/{s}", .{&digest}),

@@ -261,7 +261,7 @@ pub fn make(
 
     if (!has_side_effects and try step.cacheHitWatched(maker, &man, progress_node)) {
         // Cache hit; skip running command.
-        const digest = man.final();
+        const digest = man.hitDigestHex();
         try populateGeneratedStdIo(maker, &conf_run, cache_root, &digest);
         try populateGeneratedPaths(maker, output_placeholders.items, cache_root, &digest);
         step.result_cached = true;
@@ -270,7 +270,7 @@ pub fn make(
 
     if (!any_dep_files) {
         // We already know the final output paths; use them directly.
-        const digest = if (has_side_effects) man.hash.final() else man.final();
+        const digest = if (has_side_effects) man.hash.final() else man.missDigestHex();
         const output_dir_path = "o" ++ Dir.path.sep_str ++ &digest;
         try populateGeneratedStdIo(maker, &conf_run, cache_root, &digest);
         try populateGeneratedPathsCreateDirs(arena, run_index, maker, output_dir_path, output_placeholders.items, argv_list.items);
@@ -308,7 +308,7 @@ pub fn make(
         }
     }
 
-    const digest = if (has_side_effects) man.hash.final() else man.final();
+    const digest = if (has_side_effects) man.hash.final() else man.missDigestHex();
 
     const any_output = output_placeholders.items.len > 0 or
         conf_run.captured_stdout.value != null or conf_run.captured_stderr.value != null;

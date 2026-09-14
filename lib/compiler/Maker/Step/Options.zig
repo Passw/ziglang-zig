@@ -54,7 +54,7 @@ pub fn make(
     const basename = "options.zig";
 
     if (try step.cacheHitWatched(maker, &man, progress_node)) {
-        const digest = man.final();
+        const digest = man.hitDigestHex();
         maker.generatedPath(conf_options.generated_file).* = .{
             .root_dir = cache_root,
             .sub_path = try Io.Dir.path.join(arena, &.{ "o", &digest, basename }),
@@ -63,7 +63,7 @@ pub fn make(
         return;
     }
 
-    const digest = man.final();
+    const digest = man.missDigestHex();
     const out_path: Cache.Path = .{
         .root_dir = cache_root,
         .sub_path = try Io.Dir.path.join(arena, &.{ "o", &digest, basename }),

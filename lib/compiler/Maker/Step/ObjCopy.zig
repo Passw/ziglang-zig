@@ -48,7 +48,7 @@ pub fn make(
 
     if (try step.cacheHit(maker, &man, progress_node)) {
         // Cache hit, skip subprocess execution.
-        const digest = man.final();
+        const digest = man.hitDigestHex();
         maker.generatedPath(conf_oc.output_file).* = .{
             .root_dir = cache_root,
             .sub_path = try Io.Dir.path.join(arena, &.{ "o", &digest, basename }),
@@ -67,7 +67,7 @@ pub fn make(
 
     // We don't find out more input files while executing objcopy so we can
     // already obtain the digest and use it directly as the output path.
-    const digest = man.final();
+    const digest = man.missDigestHex();
     const dest_path: Path = .{
         .root_dir = cache_root,
         .sub_path = try Io.Dir.path.join(arena, &.{ "o", &digest, basename }),
