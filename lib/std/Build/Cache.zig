@@ -873,9 +873,6 @@ pub const Manifest = struct {
         // through calls to `addDiscoveredPath` etc, which will update the hasher. After all files are added, the user
         // can use `final`, and will at some point `finalize` the file list to disk.
 
-        man.hash.hasher = hasher_init;
-        man.hash.hasher.update(&input_digest);
-
         hit: {
             const miss_result = miss: {
                 const result = try man.checkLocked();
@@ -884,12 +881,8 @@ pub const Manifest = struct {
                 } else if (!try man.upgradeToExclusiveLock()) {
                     break :miss result;
                 }
-                // We've just had a miss with the shared lock, and upgraded to an exclusive lock. Someone
-                // else might have modified the digest, so we need to check again before deciding to miss.
-                // Before trying again, we must reset `man.hash.hasher` and `man.files`.
-                // This is basically just the first half of `undoCheck`.
-                man.hash.hasher = hasher_init;
-                man.hash.hasher.update(&input_digest);
+                // Missed with the shared lock, and upgraded to an exclusive lock. However, another process may have
+                // modified the cache directory, so we need to check again before deciding to miss.
                 man.shrinkFilesToInput();
                 const refreshed_result = try man.checkLocked();
                 if (refreshed_result == .hit) break :hit;
@@ -899,7 +892,8 @@ pub const Manifest = struct {
             // Cache miss, but `checkLocked` guarantees that all input files have their digests computed, even on a
             // cache miss, which is needed because they will be used in the manifest digest.
             man.dirty = true;
-            undoCheck(man, &input_digest);
+            man.shrinkFilesToInput();
+            hashFiles(man, &input_digest);
             return miss_result;
         }
 
@@ -910,7 +904,21 @@ pub const Manifest = struct {
             };
         }
 
+        hashFiles(man, &input_digest);
         return .hit;
+    }
+
+    fn hashFiles(m: *Manifest, input_digest: *BinDigest) void {
+        const contents = m.contents.items;
+
+        m.hash.hasher = hasher_init;
+        m.hash.hasher.update(input_digest);
+
+        for (m.files.keys(), 0..) |off, i| {
+            const file = off.get(contents);
+            log.warn("hashing {d} {s} = {x}", .{ i, off.path(contents), &file.digest });
+            m.hash.hasher.update(&file.digest);
+        }
     }
 
     fn shrinkFilesToInput(m: *Manifest) void {
@@ -923,9 +931,9 @@ pub const Manifest = struct {
         assert(mem.isAligned(m.contents.items.len, @alignOf(File)));
     }
 
-    /// Assumes that `self.hash.hasher` has been updated only with the original digest and that
-    /// `self.files` contains only the original input files.
+    /// Does not observe or modify `self.hash.hasher`. Asserts `self.files` contains only the original input files.
     fn checkLocked(m: *Manifest) CheckError!CheckResult {
+        assert(m.files.count() == m.input_paths.items.len);
         const gpa = m.cache.gpa;
         const io = m.cache.io;
         const manifest_file = m.manifest_file.?;
@@ -938,7 +946,7 @@ pub const Manifest = struct {
         if (manifest_size == 0 or manifest_size < m.contents.items.len) {
             // Manifest file was never finalized.
             try m.contents.ensureUnusedCapacity(gpa, 1);
-            return missInput(m, 0, m.contents.items.len, manifest_size, .incomplete_manifest);
+            return populateMissingInputFileHashes(m, 0, .incomplete_manifest);
         }
 
         // We must not clobber existing `Manifest.contents` because it possibly contains prepopulated stat and digest
@@ -957,7 +965,7 @@ pub const Manifest = struct {
                 error.Canceled => |e| return e,
                 else => |e| return fail(&m.diagnostic, .{ .manifest_read = e }),
             };
-            if (n != manifest_size) return checkLockedMiss(m, input_contents_len, .incomplete_manifest);
+            if (n != manifest_size) return missInput(m, 0, input_contents_len, manifest_size, .incomplete_manifest);
         }
         const disk_contents = m.contents.items[0..manifest_size];
         const input_contents = m.contents.items[manifest_size..][0..input_contents_len];
@@ -1004,8 +1012,6 @@ pub const Manifest = struct {
         const file_valid = off + 1 == disk_contents.len and disk_contents[off] == 0;
         if (!file_valid) return checkLockedMiss(m, input_contents_len, .incomplete_manifest);
 
-        for (m.files.keys()) |file_off| m.hash.hasher.update(&file_off.get(disk_contents).digest);
-
         // Since it's a cache hit, we accept the input file contents from disk and discard the other copy.
         // Furthermore, don't track the trailing zero byte in contents.
         m.contents.shrinkRetainingCapacity(manifest_size - 1);
@@ -1035,7 +1041,15 @@ pub const Manifest = struct {
             m.contents.items[manifest_size + off ..][0..copy_len],
         );
         m.contents.shrinkRetainingCapacity(input_contents_len);
-        // And now iterate over remaining input files and populate the missing input file hashes.
+        return populateMissingInputFileHashes(m, next_file_index, result);
+    }
+
+    fn populateMissingInputFileHashes(
+        m: *Manifest,
+        next_file_index: usize,
+        result: CheckResult,
+    ) CheckError!CheckResult {
+        const file_offs = m.files.keys();
         const contents = m.contents.items;
         for (file_offs[next_file_index..], m.input_paths.items[next_file_index..]) |input_file_off, *input_path| {
             try populateInputPath(m, input_file_off, input_path, contents);
@@ -1515,23 +1529,6 @@ pub const Manifest = struct {
         return error.CacheCheckFailed;
     }
 
-    /// Reset `man.hash.hasher` to the state it should be in after `check` returns `CheckResult.miss`.
-    /// The hasher contains the original input digest, and all original input file digests (i.e.
-    /// not including discovered files).
-    ///
-    /// Assumes that `digest` is populated for all input files.
-    pub fn undoCheck(man: *Manifest, input_digest: *const BinDigest) void {
-        // Reset the hash.
-        man.hash.hasher = hasher_init;
-        man.hash.hasher.update(input_digest);
-        man.shrinkFilesToInput();
-        const contents = man.contents.items;
-        for (man.files.keys()) |off| {
-            const file = off.get(contents);
-            man.hash.hasher.update(&file.digest);
-        }
-    }
-
     fn isProblematicTimestamp(man: *Manifest, timestamp: Io.Timestamp) error{Canceled}!bool {
         const io = man.cache.io;
 
@@ -1844,22 +1841,20 @@ pub const Manifest = struct {
         };
     }
 
-    /// Returns a binary hash of the inputs.
+    /// Returns a binary hash of the inputs, input file contents, and discovered file contents.
     pub fn finalBin(self: *Manifest) BinDigest {
         assert(self.manifest_file != null);
 
-        // We don't close the manifest file yet, because we want to
-        // keep it locked until the API user is done using it.
-        // We also don't write out the manifest yet, because until
-        // cache_release is called we still might be working on creating
-        // the artifacts to cache.
+        // We don't close the manifest file yet, because we want to keep it locked until the API user is done using it.
+        // We also don't write out the manifest yet, because until `finalize` is called we still might be working on
+        // creating the artifacts to cache.
 
         var bin_digest: BinDigest = undefined;
         self.hash.hasher.final(&bin_digest);
         return bin_digest;
     }
 
-    /// Returns a hex encoded hash of the inputs.
+    /// Returns a hex encoded hash of the inputs, input file contents, and discovered file contents.
     pub fn final(self: *Manifest) HexDigest {
         const bin_digest = self.finalBin();
         return binToHex(bin_digest);
@@ -2327,7 +2322,7 @@ test "check that changing a file causes cache miss" {
             try man.finalize();
         }
 
-        try testing.expect(!mem.eql(u8, digest1[0..], digest2[0..]));
+        try testing.expect(!mem.eql(u8, &digest1, &digest2));
     }
 }
 
