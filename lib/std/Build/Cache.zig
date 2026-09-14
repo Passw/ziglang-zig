@@ -759,6 +759,52 @@ pub const Manifest = struct {
         _ = try addInputPath(m, opt_path orelse return, options);
     }
 
+    pub const AddInputDepFileError = error{
+        InvalidDepFile,
+    } || Allocator.Error || Io.File.OpenError || Io.File.Reader.Error;
+
+    pub fn addInputDepFile(m: *Manifest, path: Path, diagnostic: ?*DepTokenizer.Token) AddInputDepFileError!void {
+        assert(m.manifest_file == null);
+        assert(m.state == .input);
+
+        const cache = m.cache;
+        const gpa = cache.gpa;
+        const io = cache.io;
+
+        // TODO: change DepTokenizer to be streaming rather than operating on slice of bytes.
+        const prev_len = m.all_input_content.items.len;
+        defer m.all_input_content.items.len = prev_len;
+
+        const file = try path.root_dir.handle.openFile(io, path.sub_path, .{});
+        defer file.close(io);
+
+        var file_reader: Io.File.Reader = .init(file, io, &.{});
+        file_reader.interface.appendRemainingUnlimited(gpa, &m.all_input_content) catch |err| switch (err) {
+            error.OutOfMemory => |e| return e,
+            error.ReadFailed => return file_reader.err.?,
+        };
+
+        var aux: std.ArrayList(u8) = .empty;
+        defer aux.deinit(gpa);
+
+        var it: DepTokenizer = .{ .bytes = m.all_input_content.items[prev_len..] };
+        while (it.next()) |token| switch (token) {
+            .target, .target_must_resolve => {},
+            .prereq => |file_path| {
+                _ = try m.addInputPath(.initCwd(file_path), .{});
+            },
+            .prereq_must_resolve => {
+                aux.clearRetainingCapacity();
+                try token.resolve(gpa, &aux);
+                _ = try m.addInputPath(.initCwd(aux.items), .{});
+            },
+            else => |err| {
+                if (diagnostic) |d| d.* = err;
+                return error.InvalidDepFile;
+            },
+        };
+    }
+
     pub const CheckResult = union(enum) {
         hit,
         incomplete_manifest,
@@ -1614,6 +1660,13 @@ pub const Manifest = struct {
         stat_dir: Io.Dir.StatError,
         read_file: Io.File.ReadPositionalError,
         read_dir: Io.Dir.Reader.Error,
+
+        pub fn format(this: @This(), w: *Io.Writer) Io.Writer.Error!void {
+            switch (this) {
+                .none => return w.writeAll("none"),
+                else => |err, tag| return w.print("{t}: {t}", .{ tag, err }),
+            }
+        }
     };
 
     pub const AddDiscoveredPathError = error{
@@ -1726,6 +1779,59 @@ pub const Manifest = struct {
         }
     }
 
+    pub const AddDiscoveredDepFileError = error{
+        InvalidDepFile,
+    } || AddDiscoveredPathError || Io.File.OpenError || Io.File.Reader.Error;
+
+    pub const AddDiscoveredDepFileDiagnostic = union(enum) {
+        add_discovered_path: AddDiscoveredPathDiagnostic,
+        dep_tokenizer: DepTokenizer.Token,
+    };
+
+    pub fn addDiscoveredDepFile(
+        m: *Manifest,
+        path: Path,
+        diagnostic: ?*AddDiscoveredDepFileDiagnostic,
+    ) AddDiscoveredDepFileError!void {
+        assert(m.manifest_file != null);
+        transitionToMissDiscovered(m);
+
+        const cache = m.cache;
+        const gpa = cache.gpa;
+        const io = cache.io;
+
+        // TODO: change DepTokenizer to be streaming rather than operating on slice of bytes.
+        const prev_len = m.all_input_content.items.len;
+        defer m.all_input_content.items.len = prev_len;
+
+        const file = try path.root_dir.handle.openFile(io, path.sub_path, .{});
+        defer file.close(io);
+
+        var file_reader: Io.File.Reader = .init(file, io, &.{});
+        file_reader.interface.appendRemainingUnlimited(gpa, &m.all_input_content) catch |err| switch (err) {
+            error.OutOfMemory => |e| return e,
+            error.ReadFailed => return file_reader.err.?,
+        };
+
+        var aux: std.ArrayList(u8) = .empty;
+        defer aux.deinit(gpa);
+
+        var it: DepTokenizer = .{ .bytes = m.all_input_content.items[prev_len..] };
+        while (it.next()) |token| switch (token) {
+            .target, .target_must_resolve => {},
+            .prereq => |p| try m.addDiscoveredPath(.{ .discovered_path = .{ .unresolved = .initCwd(p) } }),
+            .prereq_must_resolve => {
+                aux.clearRetainingCapacity();
+                try token.resolve(gpa, &aux);
+                try m.addDiscoveredPath(.{ .discovered_path = .{ .unresolved = .initCwd(aux.items) } });
+            },
+            else => |err| {
+                if (diagnostic) |d| d.* = .{ .dep_tokenizer = err };
+                return error.InvalidDepFile;
+            },
+        };
+    }
+
     fn populateFile(
         m: *Manifest,
         file: *File,
@@ -1808,53 +1914,6 @@ pub const Manifest = struct {
                 },
             };
         }
-    }
-
-    pub fn addDepFile(self: *Manifest, dir: Io.Dir, dep_file_sub_path: []const u8) !void {
-        assert(self.manifest_file == null);
-        return self.addDepFileMaybePost(dir, dep_file_sub_path);
-    }
-
-    pub fn addDepFilePost(self: *Manifest, dir: Io.Dir, dep_file_sub_path: []const u8) !void {
-        assert(self.manifest_file != null);
-        return self.addDepFileMaybePost(dir, dep_file_sub_path);
-    }
-
-    fn addDepFileMaybePost(self: *Manifest, dir: Io.Dir, dep_file_sub_path: []const u8) !void {
-        const gpa = self.cache.gpa;
-        const io = self.cache.io;
-        const dep_file_contents = try dir.readFileAlloc(io, dep_file_sub_path, gpa, .unlimited);
-        defer gpa.free(dep_file_contents);
-
-        var error_buf: std.ArrayList(u8) = .empty;
-        defer error_buf.deinit(gpa);
-
-        var resolve_buf: std.ArrayList(u8) = .empty;
-        defer resolve_buf.deinit(gpa);
-
-        var it: DepTokenizer = .{ .bytes = dep_file_contents };
-        while (it.next()) |token| switch (token) {
-            // We don't care about targets, we only want the prereqs
-            // Clang is invoked in single-source mode but other programs may not
-            .target, .target_must_resolve => {},
-            .prereq => |file_path| if (self.manifest_file == null) {
-                _ = try self.addInputPath(.initCwd(file_path), .{});
-            } else try self.addDiscoveredPath(.{ .discovered_path = .{ .unresolved = .initCwd(file_path) } }),
-            .prereq_must_resolve => {
-                resolve_buf.clearRetainingCapacity();
-                try token.resolve(gpa, &resolve_buf);
-                if (self.manifest_file == null) {
-                    _ = try self.addInputPath(.initCwd(resolve_buf.items), .{});
-                } else try self.addDiscoveredPath(.{
-                    .discovered_path = .{ .unresolved = .initCwd(resolve_buf.items) },
-                });
-            },
-            else => |err| {
-                try err.printError(gpa, &error_buf);
-                log.err("failed parsing {s}: {s}", .{ dep_file_sub_path, error_buf.items });
-                return error.InvalidDepFile;
-            },
-        };
     }
 
     /// See also `hitDigestHex`.
@@ -2532,4 +2591,10 @@ test "Manifest with files added after initial hash" {
 
         try testing.expect(!mem.eql(u8, &digest1, &digest3));
     }
+}
+
+test {
+    _ = Path;
+    _ = Directory;
+    _ = DepTokenizer;
 }

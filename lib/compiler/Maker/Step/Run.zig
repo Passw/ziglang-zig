@@ -292,16 +292,32 @@ pub fn make(
         switch (arg.flags.tag) {
             .output_file => if (arg.flags.dep_file) {
                 const generated_path = maker.generatedPath(arg.generated.value.?).*;
-                const result = if (has_side_effects)
-                    man.addDepFile(generated_path.root_dir.handle, generated_path.sub_path)
-                else
-                    man.addDepFilePost(generated_path.root_dir.handle, generated_path.sub_path);
-                result catch |err| switch (err) {
-                    error.OutOfMemory, error.Canceled => |e| return e,
-                    else => |e| return step.fail(maker, "failed adding to cache the file {f}: {t}", .{
-                        generated_path, e,
-                    }),
-                };
+                if (has_side_effects) {
+                    var diagnostic: Cache.DepTokenizer.Token = undefined;
+                    man.addInputDepFile(generated_path, &diagnostic) catch |err| switch (err) {
+                        error.OutOfMemory, error.Canceled => |e| return e,
+                        error.InvalidDepFile => return step.fail(maker, "failed adding dep file {f} to cache: {f}", .{
+                            generated_path, diagnostic,
+                        }),
+                        else => |e| return step.fail(maker, "failed adding dep file {f} to cache: {t}", .{
+                            generated_path, e,
+                        }),
+                    };
+                } else {
+                    var diagnostic: Cache.Manifest.AddDiscoveredDepFileDiagnostic = undefined;
+                    man.addDiscoveredDepFile(generated_path, &diagnostic) catch |err| switch (err) {
+                        error.OutOfMemory, error.Canceled => |e| return e,
+                        error.InvalidDepFile => return step.fail(maker, "failed adding dep file {f} to cache: {f}", .{
+                            generated_path, diagnostic.dep_tokenizer,
+                        }),
+                        error.FileSystemFailure => return step.fail(maker, "failed adding a path from dep file {f} to cache: {f}", .{
+                            generated_path, diagnostic.add_discovered_path,
+                        }),
+                        else => |e| return step.fail(maker, "failed adding dep file {f} to cache: {t}", .{
+                            generated_path, e,
+                        }),
+                    };
+                }
             },
             .output_directory => continue,
             else => unreachable,

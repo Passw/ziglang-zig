@@ -465,9 +465,8 @@ pub fn buildSharedObjects(comp: *Compilation, prog_node: std.Progress.Node) anye
         .request_contents = true,
     });
 
-    if (try man.check(prog_node)) {
-        const digest = man.final();
-
+    if (.hit == try man.check(prog_node)) {
+        const digest = man.hitDigestHex();
         return queueSharedObjects(comp, .{
             .lock = man.toOwnedLock(),
             .dir_path = .{
@@ -477,7 +476,7 @@ pub fn buildSharedObjects(comp: *Compilation, prog_node: std.Progress.Node) anye
         });
     }
 
-    const digest = man.final();
+    const digest = man.missDigestHex();
     const o_sub_path = try path.join(arena, &[_][]const u8{ "o", &digest });
 
     var o_directory: Cache.Directory = .{
@@ -486,7 +485,7 @@ pub fn buildSharedObjects(comp: *Compilation, prog_node: std.Progress.Node) anye
     };
     defer o_directory.handle.close(io);
 
-    const abilists_contents = man.files.keys()[abilists_index].contents.?;
+    const abilists_contents = abilists_index.contents(&man);
     const metadata = try loadMetaData(gpa, abilists_contents);
     defer metadata.destroy(gpa);
 

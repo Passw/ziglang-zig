@@ -5094,9 +5094,13 @@ pub fn translateC(
     try @import("main.zig").translateC(gpa, arena, io, argv.items, environ_map, prog_node, comp.thread_limit, &stdout);
 
     if (out_dep_path) |dep_file_path| add_deps: {
+        var diagnostic: Cache.Manifest.AddDiscoveredDepFileDiagnostic = undefined;
         const dep_basename = fs.path.basename(dep_file_path);
         // Add the files depended on to the cache system, if a dep file was emitted
-        man.addDepFilePost(cache_tmp_dir, dep_basename) catch |err| switch (err) {
+        man.addDiscoveredDepFile(.{
+            .root_dir = .{ .handle = cache_tmp_dir, .path = tmp_sub_path },
+            .sub_path = dep_basename,
+        }, &diagnostic) catch |err| switch (err) {
             error.FileNotFound => break :add_deps,
             else => |e| return e,
         };
@@ -5105,14 +5109,17 @@ pub fn translateC(
             .whole => |whole| if (whole.cache_manifest) |whole_cache_manifest| {
                 try whole.cache_manifest_mutex.lock(io);
                 defer whole.cache_manifest_mutex.unlock(io);
-                try whole_cache_manifest.addDepFilePost(cache_tmp_dir, dep_basename);
+                try whole_cache_manifest.addDiscoveredDepFile(.{
+                    .root_dir = .{ .handle = cache_tmp_dir, .path = tmp_sub_path },
+                    .sub_path = dep_basename,
+                }, &diagnostic);
             },
             .incremental, .none => {},
         }
 
         // Just to save disk space, we delete the file because it is never needed again.
         cache_tmp_dir.deleteFile(io, dep_basename) catch |err| {
-            log.warn("failed to delete '{s}': {t}", .{ dep_file_path, err });
+            log.warn("failed to delete dep file {q}: {t}", .{ dep_file_path, err });
         };
     }
 
@@ -5527,7 +5534,7 @@ fn updateCObject(comp: *Compilation, c_object: *CObject, c_obj_prog_node: std.Pr
     const target = comp.getTarget();
     assert(target.ofmt != .c);
     const o_ext = target.ofmt.fileExt(target.cpu.arch);
-    const digest = if (!comp.disable_c_depfile and try man.check(child_progress_node)) man.final() else blk: {
+    const digest = if (!comp.disable_c_depfile and .hit == try man.check(child_progress_node)) man.hitDigestHex() else miss: {
         var argv: std.array_list.Managed([]const u8) = .init(gpa);
         defer argv.deinit();
 
@@ -5654,11 +5661,11 @@ fn updateCObject(comp: *Compilation, c_object: *CObject, c_obj_prog_node: std.Pr
         // Just to save disk space, we delete the files that are never needed again.
         defer if (out_diag_path) |diag_file_path| zig_cache_tmp_dir.deleteFile(io, fs.path.basename(diag_file_path)) catch |err| switch (err) {
             error.FileNotFound => {}, // the file wasn't created due to an error we reported
-            else => log.warn("failed to delete '{s}': {s}", .{ diag_file_path, @errorName(err) }),
+            else => log.warn("failed to delete {q}: {t}", .{ diag_file_path, err }),
         };
         defer if (out_dep_path) |dep_file_path| zig_cache_tmp_dir.deleteFile(io, fs.path.basename(dep_file_path)) catch |err| switch (err) {
             error.FileNotFound => {}, // the file wasn't created due to an error we reported
-            else => log.warn("failed to delete '{s}': {s}", .{ dep_file_path, @errorName(err) }),
+            else => log.warn("failed to delete {q}: {t}", .{ dep_file_path, err }),
         };
         if (std.process.can_spawn) {
             if (comp.clang_passthrough_mode) {
@@ -5747,8 +5754,10 @@ fn updateCObject(comp: *Compilation, c_object: *CObject, c_obj_prog_node: std.Pr
             const dep_basename = fs.path.basename(dep_file_path);
 
             if (comp.file_system_inputs != null) {
+                // TODO instead of this rely on passing the manifest contents directly
+
                 // Use the same file size limit as the cache code does for dependency files.
-                const dep_file_contents = try zig_cache_tmp_dir.readFileAlloc(io, dep_basename, gpa, .limited(Cache.manifest_file_size_max));
+                const dep_file_contents = try zig_cache_tmp_dir.readFileAlloc(io, dep_basename, gpa, .unlimited);
                 defer gpa.free(dep_file_contents);
 
                 var str_buf: std.ArrayList(u8) = .empty;
@@ -5763,9 +5772,8 @@ fn updateCObject(comp: *Compilation, c_object: *CObject, c_obj_prog_node: std.Pr
                             try token.resolve(gpa, &str_buf);
                             break :p try .fromUnresolved(arena, comp.dirs, &.{str_buf.items});
                         },
-                        else => |err| {
-                            try err.printError(gpa, &str_buf);
-                            log.err("failed parsing {s}: {s}", .{ dep_basename, str_buf.items });
+                        else => |err_token| {
+                            log.err("failed parsing {s}: {f}", .{ dep_basename, err_token });
                             return error.InvalidDepFile;
                         },
                     };
@@ -5774,13 +5782,26 @@ fn updateCObject(comp: *Compilation, c_object: *CObject, c_obj_prog_node: std.Pr
             }
 
             // Add the files depended on to the cache system.
-            try man.addDepFilePost(zig_cache_tmp_dir, dep_basename);
+            var diagnostic: Cache.Manifest.AddDiscoveredDepFileDiagnostic = undefined;
+            try man.addDiscoveredDepFile(.{
+                .root_dir = .{
+                    .handle = zig_cache_tmp_dir,
+                    .path = "tmp",
+                },
+                .sub_path = dep_basename,
+            }, &diagnostic);
             switch (comp.cache_use) {
                 .whole => |whole| {
                     if (whole.cache_manifest) |whole_cache_manifest| {
                         try whole.cache_manifest_mutex.lock(io);
                         defer whole.cache_manifest_mutex.unlock(io);
-                        try whole_cache_manifest.addDepFilePost(zig_cache_tmp_dir, dep_basename);
+                        try whole_cache_manifest.addDiscoveredDepFile(.{
+                            .root_dir = .{
+                                .handle = zig_cache_tmp_dir,
+                                .path = "tmp",
+                            },
+                            .sub_path = dep_basename,
+                        }, &diagnostic);
                     }
                 },
                 .incremental, .none => {},
@@ -5791,13 +5812,13 @@ fn updateCObject(comp: *Compilation, c_object: *CObject, c_obj_prog_node: std.Pr
         if (comp.disable_c_depfile) _ = try man.check(child_progress_node);
 
         // Rename into place.
-        const digest = man.final();
-        const o_sub_path = try fs.path.join(arena, &[_][]const u8{ "o", &digest });
+        const digest = man.missDigestHex();
+        const o_sub_path = try fs.path.join(arena, &.{ "o", &digest });
         var o_dir = try comp.dirs.local_cache.handle.createDirPathOpen(io, o_sub_path, .{});
         defer o_dir.close(io);
         const tmp_basename = fs.path.basename(out_obj_path);
         try Io.Dir.rename(zig_cache_tmp_dir, tmp_basename, o_dir, o_basename, io);
-        break :blk digest;
+        break :miss digest;
     };
 
     if (man.have_exclusive_lock) {
