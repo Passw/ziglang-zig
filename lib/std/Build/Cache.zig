@@ -1017,17 +1017,14 @@ pub const Manifest = struct {
         // Validate and check discovered files.
         while (off + 1 < disk_contents.len) {
             const file_off: File.Offset = @fromBackingInt(@intCast(off));
-            const file = file_off.getFallible(disk_contents) catch
-                return checkLockedMiss(m, input_contents_len, .invalid_manifest);
-            if (file.flags.prefix >= m.cache.prefixes_len)
-                return checkLockedMiss(m, input_contents_len, .invalid_manifest);
-            const path = file_off.pathFallible(disk_contents) catch
-                return checkLockedMiss(m, input_contents_len, .invalid_manifest);
-            if (path.len == 0) return checkLockedMiss(m, input_contents_len, .invalid_manifest);
+            const file = file_off.getFallible(disk_contents) catch return .invalid_manifest;
+            if (file.flags.prefix >= m.cache.prefixes_len) return .invalid_manifest;
+            const path = file_off.pathFallible(disk_contents) catch return .invalid_manifest;
+            if (path.len == 0) return .invalid_manifest;
 
             try m.files.putContext(gpa, file_off, {}, .{ .contents = disk_contents });
             const result = try checkDiscoveredPath(m, file_off, disk_contents);
-            if (result != .hit) return checkLockedMiss(m, input_contents_len, result);
+            if (result != .hit) return result;
 
             off += File.sizeOf(path.len);
         }
@@ -1035,7 +1032,7 @@ pub const Manifest = struct {
         // Final terminating zero byte to distinguish empty manifest file from
         // manifest with zero files.
         const file_valid = off + 1 == disk_contents.len and disk_contents[off] == 0;
-        if (!file_valid) return checkLockedMiss(m, input_contents_len, .incomplete_manifest);
+        if (!file_valid) return .incomplete_manifest;
 
         // Since it's a cache hit, we accept the input file contents from disk and discard the other copy.
         // Furthermore, don't track the trailing zero byte in contents.
@@ -1079,11 +1076,6 @@ pub const Manifest = struct {
         for (file_offs[next_file_index..], m.input_paths.items[next_file_index..]) |input_file_off, *input_path| {
             try populateInputPath(m, input_file_off, input_path, contents);
         }
-        return result;
-    }
-
-    fn checkLockedMiss(m: *Manifest, input_contents_len: usize, result: CheckResult) CheckResult {
-        m.contents.shrinkRetainingCapacity(input_contents_len);
         return result;
     }
 
