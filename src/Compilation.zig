@@ -3007,7 +3007,7 @@ pub fn update(comp: *Compilation, main_progress_node: std.Progress.Node) UpdateE
         }
 
         if (build_options.enable_debug_extensions and comp.verbose_intern_pool) {
-            std.debug.print("intern pool stats for '{s}':\n", .{comp.root_name});
+            std.debug.print("intern pool stats for {q}:\n", .{comp.root_name});
             zcu.intern_pool.dump();
         }
 
@@ -3019,11 +3019,8 @@ pub fn update(comp: *Compilation, main_progress_node: std.Progress.Node) UpdateE
 
     if (comp.link_depfile) |depfile_path| if (comp.bin_file) |lf| {
         assert(comp.file_system_inputs != null);
-        comp.createDepFile(depfile_path, lf.emit) catch |err| comp.setMiscFailure(
-            .link_depfile,
-            "unable to write linker dependency file: {t}",
-            .{err},
-        );
+        comp.createDepFile(depfile_path, lf.emit) catch |err|
+            comp.setMiscFailure(.link_depfile, "writing linker dependency file failed: {t}", .{err});
     };
 
     if (anyErrors(comp)) {
