@@ -130,11 +130,11 @@ pub fn clone() callconv(.naked) u32 {
         \\ brki r14, 0x8
         \\ beqi r3, 1f
         \\
-        \\ // parent
+        \\ # parent
         \\ rtsd r15, 8
         \\  nop
         \\
-        \\ // child
+        \\ # child
         \\1:
         \\ ori r15, r0, 0
         \\ ori r19, r0, 0
