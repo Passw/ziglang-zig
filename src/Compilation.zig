@@ -2817,13 +2817,18 @@ pub fn update(comp: *Compilation, main_progress_node: std.Progress.Node) UpdateE
                 error.Canceled, error.OutOfMemory => |e| return e,
                 error.CacheCheckFailed => switch (man.diagnostic) {
                     .none => unreachable,
-                    .manifest_create, .manifest_stat, .manifest_read, .manifest_lock => |e| return comp.setMiscFailure(
-                        .check_whole_cache,
-                        "failed to check cache: {t} {t}",
-                        .{ man.diagnostic, e },
-                    ),
+                    .manifest_oversize => {
+                        return comp.setMiscFailure(.check_whole_cache, "checking cache failed: {t}", .{
+                            man.diagnostic,
+                        });
+                    },
+                    .manifest_create, .manifest_stat, .manifest_read, .manifest_lock => |e| {
+                        return comp.setMiscFailure(.check_whole_cache, "checking cache failed: {t} {t}", .{
+                            man.diagnostic, e,
+                        });
+                    },
                     .file_open, .file_stat, .file_read, .file_hash => |op| {
-                        return comp.setMiscFailure(.check_whole_cache, "failed to check cache: {f} {t} {t}", .{
+                        return comp.setMiscFailure(.check_whole_cache, "checking cache failed: {f} {t} {t}", .{
                             op.path(&man), man.diagnostic, op.err,
                         });
                     },

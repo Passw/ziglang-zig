@@ -753,12 +753,13 @@ fn failWithCacheError(
     switch (err) {
         error.CacheCheckFailed => switch (man.diagnostic) {
             .none => unreachable,
+            .manifest_oversize => return s.fail(maker, "checking cache failed: {t}", .{man.diagnostic}),
             .manifest_create, .manifest_stat, .manifest_read, .manifest_lock => |e| {
-                return s.fail(maker, "failed checking cache: {t} {t}", .{ man.diagnostic, e });
+                return s.fail(maker, "checking cache failed: {t} {t}", .{ man.diagnostic, e });
             },
             .file_open, .file_stat, .file_read, .file_hash => |op| {
                 const path = op.path(man);
-                return s.fail(maker, "failed checking cache: {f} {t} {t}", .{ path, man.diagnostic, op.err });
+                return s.fail(maker, "checking cache failed: {f} {t} {t}", .{ path, man.diagnostic, op.err });
             },
         },
         error.OutOfMemory, error.Canceled => |e| return e,

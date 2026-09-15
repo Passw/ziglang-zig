@@ -595,6 +595,7 @@ pub const Manifest = struct {
         none,
         manifest_create: Io.File.OpenError,
         manifest_stat: Io.File.StatError,
+        manifest_oversize,
         manifest_read: Io.File.ReadPositionalError,
         manifest_lock: Io.File.LockError,
         file_open: FileOp,
@@ -1011,10 +1012,12 @@ pub const Manifest = struct {
         const io = m.cache.io;
         const manifest_file = m.manifest_file.?;
 
-        const manifest_size = if (manifest_file.stat(io)) |stat| stat.size else |err| switch (err) {
+        const manifest_stat = manifest_file.stat(io) catch |err| switch (err) {
             error.Canceled => |e| return e,
             else => |e| return fail(&m.diagnostic, .{ .manifest_stat = e }),
         };
+        const manifest_size = std.math.cast(u32, manifest_stat.size) orelse
+            return fail(&m.diagnostic, .manifest_oversize);
 
         if (manifest_size == 0 or manifest_size < m.contents.items.len) {
             // Manifest file was never finalized.

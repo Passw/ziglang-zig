@@ -254,6 +254,10 @@ pub fn buildImportLib(comp: *Compilation, lib_name: []const u8, prog_node: std.P
     const status = man.check(prog_node) catch |err| switch (err) {
         error.CacheCheckFailed => switch (man.diagnostic) {
             .none => unreachable,
+            .manifest_oversize => {
+                comp.setMiscFailure(.windows_import_lib, "checking cache failed: {t}", .{man.diagnostic});
+                return error.AlreadyReported;
+            },
             .manifest_create, .manifest_stat, .manifest_read, .manifest_lock => |e| {
                 comp.setMiscFailure(.windows_import_lib, "checking cache failed: {t} {t}", .{ man.diagnostic, e });
                 return error.AlreadyReported;
