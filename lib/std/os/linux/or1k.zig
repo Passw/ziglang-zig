@@ -145,7 +145,7 @@ pub fn clone() callconv(.naked) u32 {
         \\1:
     );
     if (builtin.unwind_tables != .none or !builtin.strip_debug_info) asm volatile (
-        \\ .cfi_undefined r9
+        \\ .cfi_undefined 9
     );
     asm volatile (
         \\ l.ori r2, r0, 0
