@@ -473,11 +473,20 @@ fn finishAirWithBranchDeaths(
 fn finishAirResult(cg: *CodeGen, inst: Air.Inst.Index, result: WValue) InnerError!void {
     // results of `none` can never be referenced.
     if (result != .none) {
-        const trackable_result = if (result != .stack)
-            result
-        else
-            try result.toLocal(cg, cg.typeOfIndex(inst));
-        try cg.values.putNoClobber(cg.gpa, inst.toRef(), trackable_result);
+        if (cg.liveness.isUnused(inst)) {
+            if (result == .stack) {
+                try cg.addTag(.drop);
+            } else {
+                var unused_result = result;
+                unused_result.free(cg);
+            }
+        } else {
+            const trackable_result = if (result != .stack)
+                result
+            else
+                try result.toLocal(cg, cg.typeOfIndex(inst));
+            try cg.values.putNoClobber(cg.gpa, inst.toRef(), trackable_result);
+        }
     }
 
     if (std.debug.runtime_safety) {
@@ -508,6 +517,27 @@ fn processDeath(cg: *CodeGen, ref: Air.Inst.Ref) void {
     const value = cg.values.getPtr(ref) orelse unreachable;
     if (value.* != .local) return;
     cg.releaseLocal(value.local);
+}
+
+fn verifyLocalPool(cg: *CodeGen) void {
+    if (true) return; // TODO: test more
+    if (!std.debug.runtime_safety) return;
+
+    var free_count: usize = 0;
+    for ([_]std.wasm.Valtype{ .i32, .i64, .f32, .f64, .v128 }) |valtype| {
+        var next = cg.local_pool.freeList(valtype).*;
+        while (next.unwrap()) |index| {
+            assert(index >= cg.wasm_param_count);
+            const pool_index = index - cg.wasm_param_count;
+            assert(pool_index < cg.local_pool.locals.items.len);
+            assert(index != cg.initial_stack_value.local);
+            assert(index != cg.bottom_stack_value.local);
+            assert(cg.mir_locals.items[pool_index] == valtype);
+            free_count += 1;
+            next = cg.local_pool.locals.items[pool_index].next_free;
+        }
+    }
+    assert(free_count + 2 == cg.local_pool.locals.items.len);
 }
 
 pub fn addInst(cg: *CodeGen, inst: Mir.Inst) error{OutOfMemory}!void {
@@ -656,10 +686,8 @@ pub fn typeToValtype(ty: Type, zcu: *const Zcu, target: *const std.Target) std.w
 /// Differently from `typeToValtype` this also allows `void` to create a block
 /// with no return type
 fn genBlockType(ty: Type, zcu: *const Zcu, target: *const std.Target) std.wasm.BlockType {
-    return switch (ty.ip_index) {
-        .void_type, .noreturn_type => .empty,
-        else => .fromValtype(typeToValtype(ty, zcu, target)),
-    };
+    if (!ty.hasRuntimeBits(zcu)) return .empty;
+    return .fromValtype(typeToValtype(ty, zcu, target));
 }
 
 /// Returns `ptr` with `offset` applied.
@@ -1339,7 +1367,8 @@ fn genInst(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
 
             try cg.emitWValue(vec_ptr);
             try cg.emitScaledPointerOffset(elem_idx, elem_size, .add);
-            const ptr = try WValue.toLocal(.stack, cg, Type.usize);
+            var ptr = try WValue.toLocal(.stack, cg, Type.usize);
+            defer ptr.free(cg);
 
             try cg.store(ptr, elem_val, elem_ty, .{});
 
@@ -1975,7 +2004,8 @@ fn airRet(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     try cg.restoreStackPointer();
     try cg.addTag(.@"return");
 
-    return cg.finishAir(inst, .none, &.{un_op});
+    try cg.finishAir(inst, .none, &.{un_op});
+    cg.verifyLocalPool();
 }
 
 fn airRetPtr(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
@@ -2026,7 +2056,8 @@ fn airRetLoad(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
 
     try cg.restoreStackPointer();
     try cg.addTag(.@"return");
-    return cg.finishAir(inst, .none, &.{un_op});
+    try cg.finishAir(inst, .none, &.{un_op});
+    cg.verifyLocalPool();
 }
 
 fn airCall(cg: *CodeGen, inst: Air.Inst.Index, modifier: std.lang.CallModifier) InnerError!void {
@@ -2156,7 +2187,8 @@ fn airCall(cg: *CodeGen, inst: Air.Inst.Index, modifier: std.lang.CallModifier) 
                         try cg.addLocal(.local_set, result_local.local);
                         break :result_value result_local;
                     } else {
-                        const result_local = try cg.allocLocal(scalar_type);
+                        var result_local = try cg.allocLocal(scalar_type);
+                        defer result_local.free(cg);
                         try cg.addLocal(.local_set, result_local.local);
                         const result = try cg.allocStack(ret_ty);
                         try cg.store(result, result_local, scalar_type, .{});
@@ -2166,7 +2198,8 @@ fn airCall(cg: *CodeGen, inst: Air.Inst.Index, modifier: std.lang.CallModifier) 
                 .double_i64, .indirect => unreachable,
                 .unrolled => |vector| {
                     assert(vector.len == 1);
-                    const result_local = try cg.allocLocal(vector.elem_type);
+                    var result_local = try cg.allocLocal(vector.elem_type);
+                    defer result_local.free(cg);
                     // save call result from operand stack
                     try cg.addLocal(.local_set, result_local.local);
                     const result = try cg.allocStack(ret_ty);
@@ -2223,7 +2256,8 @@ fn airVaArg(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     const abi_size: u32 = @intCast(load_ty.abiSize(zcu));
     const abi_align: u32 = @intCast(load_ty.abiAlignment(zcu).toByteUnits().?);
 
-    const arg_ptr = try cg.allocLocal(.usize);
+    var arg_ptr = try cg.allocLocal(.usize);
+    defer arg_ptr.free(cg);
     _ = try cg.load(operand, .usize, .{});
 
     if (abi_align > 1) {
@@ -3027,12 +3061,14 @@ fn intAnd(cg: *CodeGen, ty: IntType, lhs: WValue, rhs: WValue) InnerError!WValue
 
             const lhs_lsb = try cg.load(lhs, .u64, .{});
             const rhs_lsb = try cg.load(rhs, .u64, .{});
-            const and_lsb = try (try cg.intAnd(.u64, lhs_lsb, rhs_lsb)).toLocal(cg, Type.u64);
+            var and_lsb = try (try cg.intAnd(.u64, lhs_lsb, rhs_lsb)).toLocal(cg, Type.u64);
+            defer and_lsb.free(cg);
             try cg.store(result, and_lsb, .u64, .{});
 
             const lhs_msb = try cg.load(lhs, .u64, .{ .offset = 8 });
             const rhs_msb = try cg.load(rhs, .u64, .{ .offset = 8 });
-            const and_msb = try (try cg.intAnd(.u64, lhs_msb, rhs_msb)).toLocal(cg, Type.u64);
+            var and_msb = try (try cg.intAnd(.u64, lhs_msb, rhs_msb)).toLocal(cg, Type.u64);
+            defer and_msb.free(cg);
             try cg.store(result, and_msb, .u64, .{ .offset = 8 });
 
             return result;
@@ -3071,12 +3107,14 @@ fn intOr(cg: *CodeGen, ty: IntType, lhs: WValue, rhs: WValue) InnerError!WValue 
 
             const lhs_lsb = try cg.load(lhs, .u64, .{});
             const rhs_lsb = try cg.load(rhs, .u64, .{});
-            const or_lsb = try (try cg.intOr(.u64, lhs_lsb, rhs_lsb)).toLocal(cg, Type.u64);
+            var or_lsb = try (try cg.intOr(.u64, lhs_lsb, rhs_lsb)).toLocal(cg, Type.u64);
+            defer or_lsb.free(cg);
             try cg.store(result, or_lsb, .u64, .{});
 
             const lhs_msb = try cg.load(lhs, .u64, .{ .offset = 8 });
             const rhs_msb = try cg.load(rhs, .u64, .{ .offset = 8 });
-            const or_msb = try (try cg.intOr(.u64, lhs_msb, rhs_msb)).toLocal(cg, Type.u64);
+            var or_msb = try (try cg.intOr(.u64, lhs_msb, rhs_msb)).toLocal(cg, Type.u64);
+            defer or_msb.free(cg);
             try cg.store(result, or_msb, .u64, .{ .offset = 8 });
 
             return result;
@@ -3115,12 +3153,14 @@ fn intXor(cg: *CodeGen, ty: IntType, lhs: WValue, rhs: WValue) InnerError!WValue
 
             const lhs_lsb = try cg.load(lhs, .u64, .{});
             const rhs_lsb = try cg.load(rhs, .u64, .{});
-            const xor_lsb = try (try cg.intXor(.u64, lhs_lsb, rhs_lsb)).toLocal(cg, Type.u64);
+            var xor_lsb = try (try cg.intXor(.u64, lhs_lsb, rhs_lsb)).toLocal(cg, Type.u64);
+            defer xor_lsb.free(cg);
             try cg.store(result, xor_lsb, .u64, .{});
 
             const lhs_msb = try cg.load(lhs, .u64, .{ .offset = 8 });
             const rhs_msb = try cg.load(rhs, .u64, .{ .offset = 8 });
-            const xor_msb = try (try cg.intXor(.u64, lhs_msb, rhs_msb)).toLocal(cg, Type.u64);
+            var xor_msb = try (try cg.intXor(.u64, lhs_msb, rhs_msb)).toLocal(cg, Type.u64);
+            defer xor_msb.free(cg);
             try cg.store(result, xor_msb, .u64, .{ .offset = 8 });
 
             return result;
@@ -4103,6 +4143,19 @@ fn intSubOverflow(cg: *CodeGen, ty: IntType, lhs: WValue, rhs: WValue) InnerErro
 }
 
 fn intMulOverflow(cg: *CodeGen, int_ty: IntType, lhs: WValue, rhs: WValue) InnerError!OverflowResult {
+    if (int_ty.bits > 64 and (int_ty.bits != 128 or !int_ty.is_signed)) {
+        const result = try cg.allocInt(int_ty);
+
+        try cg.emitWValue(result);
+        try cg.emitWValue(lhs);
+        try cg.emitWValue(rhs);
+        try cg.addImm32(@intFromBool(int_ty.is_signed));
+        try cg.addImm32(int_ty.bits);
+        try cg.addCallIntrinsic(.__mulo_limb64);
+
+        return .{ .result = result, .ov = .stack };
+    }
+
     const overflow_bit = try cg.allocLocal(Type.u32);
     try cg.addImm32(0);
     try cg.addLocal(.local_set, overflow_bit.local);
@@ -4112,7 +4165,8 @@ fn intMulOverflow(cg: *CodeGen, int_ty: IntType, lhs: WValue, rhs: WValue) Inner
         const lhs_upcast = try cg.intCast(new_ty, int_ty, lhs);
         const rhs_upcast = try cg.intCast(new_ty, int_ty, rhs);
         const mul_raw = try cg.intMul(new_ty, lhs_upcast, rhs_upcast);
-        const bin_op = try cg.toLocalInt(mul_raw, new_ty);
+        var bin_op = try cg.toLocalInt(mul_raw, new_ty);
+        defer bin_op.free(cg);
 
         const res = try cg.intTrunc(int_ty, new_ty, bin_op);
         const res_tmp = try cg.toLocalInt(res, int_ty);
@@ -4126,7 +4180,8 @@ fn intMulOverflow(cg: *CodeGen, int_ty: IntType, lhs: WValue, rhs: WValue) Inner
         const lhs_upcast = try cg.intCast(new_ty, int_ty, lhs);
         const rhs_upcast = try cg.intCast(new_ty, int_ty, rhs);
         const mul_raw = try cg.intMul(new_ty, lhs_upcast, rhs_upcast);
-        const bin_op = try cg.toLocalInt(mul_raw, new_ty);
+        var bin_op = try cg.toLocalInt(mul_raw, new_ty);
+        defer bin_op.free(cg);
 
         const res = try cg.intTrunc(int_ty, new_ty, bin_op);
         const res_tmp = try cg.toLocalInt(res, int_ty);
@@ -4135,7 +4190,8 @@ fn intMulOverflow(cg: *CodeGen, int_ty: IntType, lhs: WValue, rhs: WValue) Inner
         _ = try cg.intCmp(new_ty, .neq, res_upcast, bin_op);
         try cg.addLocal(.local_set, overflow_bit.local);
         break :blk res_tmp;
-    } else if (int_ty.bits == 128 and int_ty.is_signed) blk: {
+    } else blk: {
+        assert(int_ty.bits == 128 and int_ty.is_signed);
         const overflow_ret = try cg.allocStack(Type.i32);
         const res = try cg.callIntrinsic(
             .__muloti4,
@@ -4146,17 +4202,6 @@ fn intMulOverflow(cg: *CodeGen, int_ty: IntType, lhs: WValue, rhs: WValue) Inner
         _ = try cg.load(overflow_ret, .i32, .{});
         try cg.addLocal(.local_set, overflow_bit.local);
         break :blk res;
-    } else {
-        const result = try cg.allocInt(int_ty);
-
-        try cg.emitWValue(result);
-        try cg.emitWValue(lhs);
-        try cg.emitWValue(rhs);
-        try cg.addImm32(@intFromBool(int_ty.is_signed));
-        try cg.addImm32(int_ty.bits);
-        try cg.addCallIntrinsic(.__mulo_limb64);
-
-        return .{ .result = result, .ov = .stack };
     };
 
     return .{ .result = result_val, .ov = .{ .local = overflow_bit.local } };
@@ -5212,13 +5257,19 @@ fn airBlock(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
 
 fn lowerBlock(cg: *CodeGen, inst: Air.Inst.Index, block_ty: Type, body: []const Air.Inst.Index) InnerError!void {
     const zcu = cg.pt.zcu;
-    // if wasm_block_ty is non-empty, we create a register to store the temporary value
+
+    if (block_ty.isNoReturn(zcu)) {
+        assert(cg.liveness.getBlock(inst).deaths.len == 0);
+        try cg.genBody(body);
+        return cg.finishAir(inst, .none, &.{});
+    }
+
     const block_result: WValue = if (block_ty.hasRuntimeBits(zcu))
-        try cg.allocLocal(block_ty)
+        .stack
     else
         .none;
 
-    try cg.startBlock(.block, .empty);
+    try cg.startBlock(.block, genBlockType(block_ty, zcu, cg.target));
     // Here we set the current block idx, so breaks know the depth to jump
     // to when breaking out.
     try cg.blocks.putNoClobber(cg.gpa, inst, .{
@@ -5266,6 +5317,7 @@ fn airLoop(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
 
     try cg.genBody(block.body);
     try cg.endBlock();
+    try cg.addTag(.@"unreachable");
 
     return cg.finishAir(inst, .none, &.{});
 }
@@ -5557,11 +5609,13 @@ fn airBr(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     const br = cg.air.instructions.items(.data)[@backingInt(inst)].br;
     const block = cg.blocks.get(br.block_inst).?;
 
-    // if operand has codegen bits we should break with a value
-    if (block.value != .none) {
-        const operand = try cg.resolveInst(br.operand);
-        try cg.emitWValue(operand);
-        try cg.addLocal(.local_set, block.value.local);
+    switch (block.value) {
+        .none => {},
+        .stack => {
+            const operand = try cg.resolveInst(br.operand);
+            try cg.emitWValue(operand);
+        },
+        else => unreachable,
     }
 
     // We map every block to its block index.
@@ -5584,7 +5638,8 @@ fn airRepeat(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
 
 fn airTrap(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     try cg.addTag(.@"unreachable");
-    return cg.finishAir(inst, .none, &.{});
+    try cg.finishAir(inst, .none, &.{});
+    cg.verifyLocalPool();
 }
 
 fn airBreakpoint(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
@@ -5596,7 +5651,8 @@ fn airBreakpoint(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
 
 fn airUnreachable(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     try cg.addTag(.@"unreachable");
-    return cg.finishAir(inst, .none, &.{});
+    try cg.finishAir(inst, .none, &.{});
+    cg.verifyLocalPool();
 }
 
 fn airNopCast(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
@@ -5839,6 +5895,7 @@ fn airAggFieldVal(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     return cg.finishAir(inst, result, &.{struct_field.struct_operand});
 }
 
+// Both `.switch_br` and `.loop_switch_br` are noreturn.
 fn airSwitchBr(cg: *CodeGen, inst: Air.Inst.Index, is_dispatch_loop: bool) InnerError!void {
     const pt = cg.pt;
     const zcu = pt.zcu;
@@ -5850,9 +5907,9 @@ fn airSwitchBr(cg: *CodeGen, inst: Air.Inst.Index, is_dispatch_loop: bool) Inner
 
     assert(target_ty.hasRuntimeBits(zcu));
 
-    // swap target value with placeholder local, for dispatching
+    const operand_dies = cg.liveness.operandDies(inst, 0);
     var owned_target: WValue = .none;
-    defer owned_target.free(cg);
+    errdefer owned_target.free(cg);
     const target = if (is_dispatch_loop) target: {
         const initial_target = try cg.resolveInst(switch_br.operand);
         owned_target = try cg.allocLocal(target_ty);
@@ -5879,7 +5936,8 @@ fn airSwitchBr(cg: *CodeGen, inst: Air.Inst.Index, is_dispatch_loop: bool) Inner
         var it = switch_br.iterateCases();
         const else_body = it.elseBody();
 
-        if (cg.liveness.operandDies(inst, 0)) cg.processDeath(switch_br.operand);
+        if (operand_dies) cg.processDeath(switch_br.operand);
+        owned_target.free(cg);
 
         {
             try cg.pushBranch();
@@ -5890,6 +5948,7 @@ fn airSwitchBr(cg: *CodeGen, inst: Air.Inst.Index, is_dispatch_loop: bool) Inner
 
         if (is_dispatch_loop) {
             try cg.endBlock(); // dispatch loop end
+            try cg.addTag(.@"unreachable");
         }
         return cg.finishAir(inst, .none, &.{});
     }
@@ -5933,8 +5992,6 @@ fn airSwitchBr(cg: *CodeGen, inst: Air.Inst.Index, is_dispatch_loop: bool) Inner
         width_bigint.addScalar(width_bigint.toConst(), 1);
         break :width width_bigint.toConst().toInt(u32) catch null;
     };
-
-    try cg.startBlock(.block, .empty); // whole switch block start
 
     for (0..branch_count) |_| {
         try cg.startBlock(.block, .empty);
@@ -6010,7 +6067,8 @@ fn airSwitchBr(cg: *CodeGen, inst: Air.Inst.Index, is_dispatch_loop: bool) Inner
         try cg.addLabel(.br, branch_count - 1);
     }
 
-    if (cg.liveness.operandDies(inst, 0)) cg.processDeath(switch_br.operand);
+    if (operand_dies) cg.processDeath(switch_br.operand);
+    owned_target.free(cg);
 
     var cases_it = switch_br.iterateCases();
     while (cases_it.next()) |case| {
@@ -6022,8 +6080,6 @@ fn airSwitchBr(cg: *CodeGen, inst: Air.Inst.Index, is_dispatch_loop: bool) Inner
             for (branch_liveness.deaths[case.idx]) |death| cg.processDeath(death.toRef());
             try cg.genBody(case.body);
         }
-
-        try cg.addLabel(.br, branch_count - case.idx - 1); // matching case found and executed => exit switch
     }
 
     try cg.endBlock();
@@ -6040,10 +6096,9 @@ fn airSwitchBr(cg: *CodeGen, inst: Air.Inst.Index, is_dispatch_loop: bool) Inner
         try cg.addTag(.@"unreachable");
     }
 
-    try cg.endBlock(); // whole switch block end
-
     if (is_dispatch_loop) {
         try cg.endBlock(); // dispatch loop end
+        try cg.addTag(.@"unreachable");
     }
 
     return cg.finishAir(inst, .none, &.{});
@@ -6547,11 +6602,6 @@ fn airMemset(cg: *CodeGen, inst: Air.Inst.Index, safety: bool) InnerError!void {
     const ptr = try cg.resolveInst(bin_op.lhs);
     const ptr_ty = cg.typeOf(bin_op.lhs);
     const value = try cg.resolveInst(bin_op.rhs);
-    const len = switch (ptr_ty.ptrSize(zcu)) {
-        .slice => try cg.sliceLen(ptr),
-        .one => @as(WValue, .{ .imm32 = @as(u32, @intCast(ptr_ty.childType(zcu).arrayLen(zcu))) }),
-        .c, .many => unreachable,
-    };
 
     const elem_ty = if (ptr_ty.ptrSize(zcu) == .one)
         ptr_ty.childType(zcu).childType(zcu)
@@ -6562,7 +6612,14 @@ fn airMemset(cg: *CodeGen, inst: Air.Inst.Index, safety: bool) InnerError!void {
         return cg.finishAir(inst, .none, &.{ bin_op.lhs, bin_op.rhs });
     }
 
-    const dst_ptr = try cg.sliceOrArrayPtr(ptr, ptr_ty);
+    var dst_ptr = try cg.sliceOrArrayPtr(ptr, ptr_ty);
+    defer if (ptr_ty.isSlice(zcu)) dst_ptr.free(cg);
+    var len = switch (ptr_ty.ptrSize(zcu)) {
+        .slice => try cg.sliceLen(ptr),
+        .one => @as(WValue, .{ .imm32 = @as(u32, @intCast(ptr_ty.childType(zcu).arrayLen(zcu))) }),
+        .c, .many => unreachable,
+    };
+    defer len.free(cg);
     try cg.memset(elem_ty, dst_ptr, len, value);
 
     return cg.finishAir(inst, .none, &.{ bin_op.lhs, bin_op.rhs });
@@ -6614,11 +6671,13 @@ fn memset(cg: *CodeGen, elem_ty: Type, ptr: WValue, len: WValue, value: WValue) 
         return;
     }
 
+    var owned_final_len: WValue = .none;
+    defer owned_final_len.free(cg);
     const final_len: WValue = switch (len) {
         .imm32 => |val| .{ .imm32 = val * abi_size },
         .imm64 => |val| .{ .imm64 = val * abi_size },
         else => if (abi_size != 1) blk: {
-            const new_len = try cg.ensureAllocLocal(Type.usize);
+            owned_final_len = try cg.allocLocal(Type.usize);
             try cg.emitWValue(len);
             switch (cg.ptr_size) {
                 .wasm32 => {
@@ -6630,8 +6689,8 @@ fn memset(cg: *CodeGen, elem_ty: Type, ptr: WValue, len: WValue, value: WValue) 
                     try cg.addTag(.i64_mul);
                 },
             }
-            try cg.addLocal(.local_set, new_len.local);
-            break :blk new_len;
+            try cg.addLocal(.local_set, owned_final_len.local);
+            break :blk owned_final_len;
         } else len,
     };
 
@@ -7179,7 +7238,7 @@ fn airMemcpy(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     const ptr_elem_ty = dst_ty.childType(zcu);
     const src = try cg.resolveInst(bin_op.rhs);
     const src_ty = cg.typeOf(bin_op.rhs);
-    const len = switch (dst_ty.ptrSize(zcu)) {
+    var len = switch (dst_ty.ptrSize(zcu)) {
         .slice => blk: {
             const slice_len = try cg.sliceLen(dst);
             if (ptr_elem_ty.abiSize(zcu) != 1) {
@@ -7195,8 +7254,11 @@ fn airMemcpy(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
         }),
         .c, .many => unreachable,
     };
-    const dst_ptr = try cg.sliceOrArrayPtr(dst, dst_ty);
-    const src_ptr = try cg.sliceOrArrayPtr(src, src_ty);
+    defer len.free(cg);
+    var dst_ptr = try cg.sliceOrArrayPtr(dst, dst_ty);
+    defer if (dst_ty.isSlice(zcu)) dst_ptr.free(cg);
+    var src_ptr = try cg.sliceOrArrayPtr(src, src_ty);
+    defer if (src_ty.isSlice(zcu)) src_ptr.free(cg);
     try cg.memcpy(dst_ptr, src_ptr, len);
 
     return cg.finishAir(inst, .none, &.{ bin_op.lhs, bin_op.rhs });
@@ -7210,7 +7272,7 @@ fn airMemmove(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     const ptr_elem_ty = dst_ty.childType(zcu);
     const src = try cg.resolveInst(bin_op.rhs);
     const src_ty = cg.typeOf(bin_op.rhs);
-    const len = switch (dst_ty.ptrSize(zcu)) {
+    var len = switch (dst_ty.ptrSize(zcu)) {
         .slice => blk: {
             const slice_len = try cg.sliceLen(dst);
             if (ptr_elem_ty.abiSize(zcu) != 1) {
@@ -7226,8 +7288,11 @@ fn airMemmove(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
         }),
         .c, .many => unreachable,
     };
-    const dst_ptr = try cg.sliceOrArrayPtr(dst, dst_ty);
-    const src_ptr = try cg.sliceOrArrayPtr(src, src_ty);
+    defer len.free(cg);
+    var dst_ptr = try cg.sliceOrArrayPtr(dst, dst_ty);
+    defer if (dst_ty.isSlice(zcu)) dst_ptr.free(cg);
+    var src_ptr = try cg.sliceOrArrayPtr(src, src_ty);
+    defer if (src_ty.isSlice(zcu)) src_ptr.free(cg);
     try cg.memmove(dst_ptr, src_ptr, len);
 
     return cg.finishAir(inst, .none, &.{ bin_op.lhs, bin_op.rhs });
@@ -7295,7 +7360,8 @@ fn airDbgVar(
 ) InnerError!void {
     _ = is_ptr;
     _ = local_tag;
-    return cg.finishAir(inst, .none, &.{});
+    const pl_op = cg.air.instructions.items(.data)[@backingInt(inst)].pl_op;
+    return cg.finishAir(inst, .none, &.{pl_op.operand});
 }
 
 fn airTry(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
@@ -7555,9 +7621,10 @@ fn airCmpxchg(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     const expected_val = try cg.resolveInst(extra.expected_value);
     const new_val = try cg.resolveInst(extra.new_value);
 
-    const cmp_result = try cg.allocLocal(Type.bool);
+    var cmp_result = try cg.allocLocal(Type.bool);
+    defer cmp_result.free(cg);
 
-    const ptr_val = if (cg.useAtomicFeature()) val: {
+    var ptr_val = if (cg.useAtomicFeature()) val: {
         const val_local = try cg.allocLocal(ty);
         try cg.emitMemBase(ptr_operand);
         try cg.emitWValue(expected_val);
@@ -7599,7 +7666,8 @@ fn airCmpxchg(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
         try cg.addTag(.i32_xor);
         try cg.addImm32(1);
         try cg.addTag(.i32_and);
-        const and_result = try WValue.toLocal(.stack, cg, Type.bool);
+        var and_result = try WValue.toLocal(.stack, cg, Type.bool);
+        defer and_result.free(cg);
         const result_ptr = try cg.allocStack(result_ty);
         try cg.store(result_ptr, and_result, .bool, .{ .offset = ty.abiSize(zcu) });
         try cg.store(result_ptr, ptr_val, ty, .{});
@@ -7611,6 +7679,7 @@ fn airCmpxchg(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
         try cg.addTag(.select);
         break :val .stack;
     };
+    defer ptr_val.free(cg);
 
     return cg.finishAir(inst, result, &.{ extra.ptr, extra.expected_value, extra.new_value });
 }
@@ -7695,7 +7764,8 @@ fn airAtomicRmw(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
                         .alignment = ty.abiAlignment(zcu).toStdMem(),
                     },
                 );
-                const select_res = try cg.allocLocal(ty);
+                var select_res = try cg.allocLocal(ty);
+                defer select_res.free(cg);
                 try cg.addLocal(.local_tee, select_res.local);
                 _ = try cg.intCmp(int_ty, .neq, .stack, value); // leave on stack so we can use it for br_if
 
@@ -7908,6 +7978,11 @@ fn airAsm(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     if (unwrapped_asm.source.len != 0) {
         var local_map: assembly.LocalMap = .empty;
         defer local_map.deinit(cg.gpa);
+        var input_locals: std.ArrayList(WValue) = try .initCapacity(cg.gpa, inputs.len);
+        defer {
+            for (input_locals.items) |*input_local| input_local.free(cg);
+            input_locals.deinit(cg.gpa);
+        }
 
         {
             var it = unwrapped_asm.iterateOutputs();
@@ -7940,6 +8015,7 @@ fn airAsm(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
 
                 try cg.emitWValue(operand);
                 const op_local = try WValue.toLocal(.stack, cg, cg.typeOf(input.operand));
+                input_locals.appendAssumeCapacity(op_local);
 
                 const gop = try local_map.getOrPutValue(cg.gpa, name, op_local.local);
                 if (gop.found_existing) {
