@@ -199,6 +199,7 @@ pub fn clone() callconv(.naked) u32 {
         \\  nop
         \\
         \\ mov #1, r3 ! SYS_exit
+        \\ mov r0, r4
         \\ trapa #31
         \\ or r0, r0
         \\ or r0, r0

@@ -144,6 +144,7 @@ pub fn clone() callconv(.naked) u32 {
         \\ brald r15, r3
         \\  nop
         \\
+        \\ ori r5, r3, 0
         \\ ori r12, r0, 1 # SYS_exit
         \\ brki r14, 0x8
     );
