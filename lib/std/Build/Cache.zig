@@ -650,8 +650,10 @@ pub const Manifest = struct {
     };
 
     pub const AddInputPathOptions = struct {
+        /// If provided, will be closed when `check` is called, unless `request_handle` is also set.
         handle: PathHandle = .{ .file = null },
         stat: ?Stat = null,
+        /// If set, file handle will remain open after `check` is called.
         request_handle: bool = false,
         /// Can request file or directory contents depending on `handle`.
         request_contents: bool = false,
