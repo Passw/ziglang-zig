@@ -439,7 +439,7 @@ pub const Manifest = struct {
     /// The data per tracked input file that is stored in the manifest file.
     pub const File = extern struct {
         size: u64 align(1),
-        inode: u64 align(1),
+        inode: Io.File.INode align(1),
         /// Nanoseconds.
         mtime: i64 align(1),
         /// To simplify the hashing logic, this value is computed from size, inode, and mtime
