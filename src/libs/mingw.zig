@@ -254,7 +254,7 @@ pub fn buildImportLib(comp: *Compilation, lib_name: []const u8, prog_node: std.P
     var diag: Cache.Manifest.CheckDiagnostic = undefined;
     const status = man.check(&diag, prog_node) catch |err| switch (err) {
         error.CacheCheckFailed => {
-            comp.setMiscFailure(.windows_import_lib, "{s} cache check failed: {f}", .{
+            comp.lockAndSetMiscFailure(.windows_import_lib, "{s} cache check failed: {f}", .{
                 final_lib_basename, diag.fmt(&man),
             });
             return error.AlreadyReported;
