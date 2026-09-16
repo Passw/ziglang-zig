@@ -646,7 +646,7 @@ fn addExtraAssumeCapacity(cg: *CodeGen, extra: anytype) error{OutOfMemory}!u32 {
                 i32 => @bitCast(@field(extra, field_name)),
                 InternPool.Index,
                 InternPool.Nav.Index,
-                mem.Alignment,
+                Alignment,
                 => @backingInt(@field(extra, field_name)),
                 else => @compileError("Unsupported field type " ++ @typeName(field_type)),
             }),
@@ -2386,7 +2386,7 @@ fn store(cg: *CodeGen, lhs: WValue, rhs: WValue, ty: Type, memarg: MemArg) Inner
         cg.mir_extra.appendAssumeCapacity(@backingInt(std.wasm.SimdOpcode.v128_store));
         _ = try cg.addExtraAssumeCapacity(Mir.MemArg{
             .offset = base_offset + memarg.offset,
-            .alignment = alignment.toStdMem(),
+            .alignment = alignment,
         });
         return cg.addInst(.{ .tag = .simd_prefix, .data = .{ .payload = extra_index } });
     }
@@ -2416,7 +2416,7 @@ fn store(cg: *CodeGen, lhs: WValue, rhs: WValue, ty: Type, memarg: MemArg) Inner
         store_opcode,
         .{
             .offset = base_offset + memarg.offset,
-            .alignment = alignment.toStdMem(),
+            .alignment = alignment,
         },
     );
 }
@@ -2480,7 +2480,7 @@ fn load(cg: *CodeGen, operand: WValue, ty: Type, memarg: MemArg) InnerError!WVal
         cg.mir_extra.appendAssumeCapacity(@backingInt(std.wasm.SimdOpcode.v128_load));
         _ = try cg.addExtraAssumeCapacity(Mir.MemArg{
             .offset = base_offset + memarg.offset,
-            .alignment = alignment.toStdMem(),
+            .alignment = alignment,
         });
         try cg.addInst(.{ .tag = .simd_prefix, .data = .{ .payload = extra_index } });
         return .stack;
@@ -2511,7 +2511,7 @@ fn load(cg: *CodeGen, operand: WValue, ty: Type, memarg: MemArg) InnerError!WVal
         load_opcode,
         .{
             .offset = base_offset + memarg.offset,
-            .alignment = alignment.toStdMem(),
+            .alignment = alignment,
         },
     );
 
@@ -6141,7 +6141,7 @@ fn airIsErr(cg: *CodeGen, inst: Air.Inst.Index, opcode: std.wasm.Opcode, op_kind
             try cg.emitMemBase(operand);
             try cg.addMemArg(.i32_load16_u, .{
                 .offset = operand.memOffset() + errUnionErrorOffset(pl_ty, zcu),
-                .alignment = Type.anyerror.abiAlignment(zcu).toStdMem(),
+                .alignment = Type.anyerror.abiAlignment(zcu),
             });
         } else {
             try cg.emitWValue(operand);
@@ -6827,7 +6827,7 @@ fn airSplat(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
                 cg.mir_extra.appendAssumeCapacity(opcode);
                 _ = try cg.addExtraAssumeCapacity(Mir.MemArg{
                     .offset = operand.memOffset(),
-                    .alignment = elem_ty.abiAlignment(zcu).toStdMem(),
+                    .alignment = elem_ty.abiAlignment(zcu),
                 });
                 try cg.addInst(.{ .tag = .simd_prefix, .data = .{ .payload = extra_index } });
                 return cg.finishAir(inst, .stack, &.{ty_op.operand});
@@ -7418,7 +7418,7 @@ fn lowerTry(
             const err_offset = errUnionErrorOffset(pl_ty, zcu);
             try cg.addMemArg(.i32_load16_u, .{
                 .offset = err_union.memOffset() + err_offset,
-                .alignment = Type.anyerror.abiAlignment(zcu).toStdMem(),
+                .alignment = Type.anyerror.abiAlignment(zcu),
             });
         } else {
             try cg.emitWValue(err_union);
@@ -7637,7 +7637,7 @@ fn airCmpxchg(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
             else => |size| return cg.fail("TODO: implement `@cmpxchg` for types with abi size '{d}'", .{size}),
         }, .{
             .offset = ptr_operand.memOffset(),
-            .alignment = ty.abiAlignment(zcu).toStdMem(),
+            .alignment = ty.abiAlignment(zcu),
         });
         try cg.addLocal(.local_tee, val_local.local);
         _ = try cg.intCmp(int_ty, .eq, .stack, expected_val);
@@ -7701,7 +7701,7 @@ fn airAtomicLoad(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
         try cg.emitMemBase(ptr);
         try cg.addAtomicMemArg(tag, .{
             .offset = ptr.memOffset(),
-            .alignment = ty.abiAlignment(zcu).toStdMem(),
+            .alignment = ty.abiAlignment(zcu),
         });
     } else {
         _ = try cg.load(ptr, ty, .{});
@@ -7761,7 +7761,7 @@ fn airAtomicRmw(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
                     },
                     .{
                         .offset = ptr.memOffset(),
-                        .alignment = ty.abiAlignment(zcu).toStdMem(),
+                        .alignment = ty.abiAlignment(zcu),
                     },
                 );
                 var select_res = try cg.allocLocal(ty);
@@ -7822,7 +7822,7 @@ fn airAtomicRmw(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
                 };
                 try cg.addAtomicMemArg(tag, .{
                     .offset = ptr.memOffset(),
-                    .alignment = ty.abiAlignment(zcu).toStdMem(),
+                    .alignment = ty.abiAlignment(zcu),
                 });
                 return cg.finishAir(inst, .stack, &.{ pl_op.operand, extra.operand });
             },
@@ -7935,7 +7935,7 @@ fn airAtomicStore(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
         try cg.emitWValue(operand);
         try cg.addAtomicMemArg(tag, .{
             .offset = ptr.memOffset(),
-            .alignment = ty.abiAlignment(zcu).toStdMem(),
+            .alignment = ty.abiAlignment(zcu),
         });
     } else {
         try cg.store(ptr, operand, ty, .{});

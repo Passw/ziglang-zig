@@ -686,7 +686,7 @@ fn parseMemArg(cg: *CodeGen, inst: []const u8, word_it: *mem.TokenIterator(u8, .
             return cg.fail("Malformed assembly, malformed offset \"{s}\"", .{alignment_str});
         };
 
-        return .{ .offset = @bitCast(offset), .alignment = @fromBackingInt(@intCast(alignment_p2)) };
+        return .{ .offset = @bitCast(offset), .alignment = .fromLog2Units(alignment_p2) };
     } else {
         const offset_str = mem_arg_str;
         const offset = std.fmt.parseInt(i64, offset_str, 0) catch {

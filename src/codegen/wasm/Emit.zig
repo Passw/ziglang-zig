@@ -990,7 +990,7 @@ pub fn lower(emit: *Emit) Error!void {
 /// Asserts 20 unused capacity.
 fn encodeMemArg(code: *ArrayList(u8), mem_arg: Mir.MemArg) void {
     assert(code.unusedCapacitySlice().len >= 20);
-    writeUleb128(code, @backingInt(mem_arg.alignment));
+    writeUleb128(code, mem_arg.alignment.toLog2Units());
     writeUleb128(code, mem_arg.offset);
 }
 

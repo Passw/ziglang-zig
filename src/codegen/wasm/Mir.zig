@@ -705,7 +705,7 @@ pub fn extraData(self: *const Mir, comptime T: type, index: usize) struct { data
             Wasm.UavsExeIndex,
             InternPool.Nav.Index,
             InternPool.Index,
-            std.mem.Alignment,
+            Alignment,
             => @fromBackingInt(@intCast(self.extra[i])),
             else => @compileError("Unsupported field type " ++ @typeName(field_type)),
         };
@@ -755,7 +755,7 @@ pub const Float64 = struct {
 
 pub const MemArg = struct {
     offset: u64,
-    alignment: std.mem.Alignment,
+    alignment: Alignment,
 };
 
 pub const UavRefOff = struct {
