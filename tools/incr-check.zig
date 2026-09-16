@@ -152,16 +152,11 @@ pub fn main(init: std.process.Init) !void {
 
     var child_args: std.ArrayList([]const u8) = .empty;
     try child_args.appendSlice(arena, &.{
-        resolved_zig_exe,
-        "build-exe",
-        "-fincremental",
-        "-fno-ubsan-rt",
-        "-target",
-        try target_query.zigTriple(arena),
-        "--cache-dir",
-        ".local-cache",
-        "--global-cache-dir",
-        ".global-cache",
+        resolved_zig_exe,     "build-exe",
+        "-fincremental",      "-fno-ubsan-rt",
+        "-target",            try target_query.zigTriple(arena),
+        "--cache-dir",        ".local-cache",
+        "--global-cache-dir", ".global-cache",
     });
 
     if (opt_resolved_lib_dir) |resolved_lib_dir| {
@@ -199,15 +194,13 @@ pub fn main(init: std.process.Init) !void {
             resolved_zig_exe;
 
         try cc_child_args.appendSlice(arena, &.{
-            resolved_cc_zig_exe,
-            "cc",
-            "-target",
-            try target_query.zigTriple(arena),
-            "-I",
-            opt_resolved_lib_dir.?, // verified earlier
+            resolved_cc_zig_exe,  "build-exe",
+            "-target",            try target_query.zigTriple(arena),
+            "--cache-dir",        ".local-cache",
+            "--global-cache-dir", ".global-cache",
+            "-I",  opt_resolved_lib_dir.?, // verified earlier
+            "-lc",
         });
-
-        try cc_child_args.append(arena, "-o");
     }
 
     const allow_compiler_stderr = debug_log_args.items.len != 0;
@@ -669,8 +662,17 @@ const Eval = struct {
         const child_prog_node = prog_node.start("build cbe output", 0);
         defer child_prog_node.end();
 
-        try eval.cc_child_args.appendSlice(eval.arena, &.{ out_path, c_path });
+        try eval.cc_child_args.append(eval.arena, try std.fmt.allocPrint(eval.arena, "-femit-bin={s}", .{out_path}));
+        try eval.cc_child_args.append(eval.arena, c_path);
         defer eval.cc_child_args.items.len -= 2;
+
+        if (eval.allow_compiler_stderr) {
+            const cmd: std.zig.SubprocessCommand = .{
+                .argv = eval.cc_child_args.items,
+                .cwd = eval.tmp_dir_path,
+            };
+            std.log.scoped(.spawn).info("{f}", .{cmd});
+        }
 
         const result = std.process.run(eval.arena, eval.io, .{
             .argv = eval.cc_child_args.items,
