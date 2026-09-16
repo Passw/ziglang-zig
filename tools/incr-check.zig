@@ -163,7 +163,6 @@ pub fn main(init: std.process.Init) !void {
         "--global-cache-dir",
         ".global-cache",
     });
-    try child_args.append(arena, "--listen=-");
 
     if (opt_resolved_lib_dir) |resolved_lib_dir| {
         try child_args.appendSlice(arena, &.{ "--zig-lib-dir", resolved_lib_dir });
@@ -187,6 +186,7 @@ pub fn main(init: std.process.Init) !void {
     for (case.modules) |mod| {
         try child_args.append(arena, try std.fmt.allocPrint(arena, "-M{s}={s}", .{ mod.name, mod.file }));
     }
+    try child_args.append(arena, "--listen=-");
 
     const zig_prog_node = prog_node.start("zig", 0);
     defer zig_prog_node.end();
@@ -208,6 +208,16 @@ pub fn main(init: std.process.Init) !void {
         });
 
         try cc_child_args.append(arena, "-o");
+    }
+
+    const allow_compiler_stderr = debug_log_args.items.len != 0;
+
+    if (allow_compiler_stderr) {
+        const cmd: std.zig.SubprocessCommand = .{
+            .argv = child_args.items,
+            .cwd = tmp_dir_path,
+        };
+        std.log.scoped(.spawn).info("{f}", .{cmd});
     }
 
     var child = try std.process.spawn(io, .{
@@ -233,7 +243,7 @@ pub fn main(init: std.process.Init) !void {
         .tmp_dir = tmp_dir,
         .tmp_dir_path = tmp_dir_path,
         .child = &child,
-        .allow_compiler_stderr = debug_log_args.items.len != 0,
+        .allow_compiler_stderr = allow_compiler_stderr,
         .quiet = quiet,
         .preserve_tmp_on_fatal = preserve_tmp,
         .cc_child_args = &cc_child_args,
