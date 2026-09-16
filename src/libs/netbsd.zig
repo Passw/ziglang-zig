@@ -413,7 +413,20 @@ pub fn buildSharedObjects(comp: *Compilation, prog_node: std.Progress.Node) anye
         .request_contents = true,
     });
 
-    if (.hit == try man.check(prog_node)) {
+    var diag: Cache.Manifest.CheckDiagnostic = undefined;
+    const status = man.check(&diag, prog_node) catch |err| switch (err) {
+        error.CacheCheckFailed => {
+            comp.lockAndSetMiscFailure(
+                .netbsd_shared_objects,
+                "compiling NetBSD libc shared objects: checking cache failed: {f}",
+                .{diag.fmt(&man)},
+            );
+            return error.AlreadyReported;
+        },
+        error.OutOfMemory, error.Canceled => |e| return e,
+    };
+    log.debug("netbsd_shared_objects cache {f}", .{status.fmt(&man)});
+    if (status == .hit) {
         const digest = man.hitDigestHex();
         return queueSharedObjects(comp, .{
             .lock = man.toOwnedLock(),

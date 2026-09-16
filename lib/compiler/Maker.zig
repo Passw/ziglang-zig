@@ -1399,7 +1399,13 @@ fn configure(graph: *Graph, options: ConfigureOptions) !ScannedConfig {
             defer compile_prog_node.end();
 
             if (config_man) |man| {
-                if (.hit == try man.check(compile_prog_node)) {
+                var diagnostic: Cache.Manifest.CheckDiagnostic = undefined;
+                const status = man.check(&diagnostic, compile_prog_node) catch |err| switch (err) {
+                    error.Canceled, error.OutOfMemory => |e| return e,
+                    error.CacheCheckFailed => fatal("checking cache failed: {f}", .{diagnostic.fmt(man)}),
+                };
+                log.debug("configuration cache {f}", .{status.fmt(man)});
+                if (status == .hit) {
                     const digest = man.hitDigestHex();
                     const path: Path = .{
                         .root_dir = graph.local_cache_root,

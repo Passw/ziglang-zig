@@ -251,26 +251,17 @@ pub fn buildImportLib(comp: *Compilation, lib_name: []const u8, prog_node: std.P
     const final_lib_basename = try std.fmt.allocPrint(gpa, "{s}.lib", .{lib_name});
     errdefer gpa.free(final_lib_basename);
 
-    const status = man.check(prog_node) catch |err| switch (err) {
-        error.CacheCheckFailed => switch (man.diagnostic) {
-            .none => unreachable,
-            .manifest_oversize => {
-                comp.setMiscFailure(.windows_import_lib, "checking cache failed: {t}", .{man.diagnostic});
-                return error.AlreadyReported;
-            },
-            .manifest_create, .manifest_stat, .manifest_read, .manifest_lock => |e| {
-                comp.setMiscFailure(.windows_import_lib, "checking cache failed: {t} {t}", .{ man.diagnostic, e });
-                return error.AlreadyReported;
-            },
-            .file_open, .file_stat, .file_read, .file_hash => |op| {
-                comp.setMiscFailure(.windows_import_lib, "checking cache failed: {f} {t} {t}", .{
-                    op.path(&man), man.diagnostic, op.err,
-                });
-                return error.AlreadyReported;
-            },
+    var diag: Cache.Manifest.CheckDiagnostic = undefined;
+    const status = man.check(&diag, prog_node) catch |err| switch (err) {
+        error.CacheCheckFailed => {
+            comp.setMiscFailure(.windows_import_lib, "{s} cache check failed: {f}", .{
+                final_lib_basename, diag.fmt(&man),
+            });
+            return error.AlreadyReported;
         },
         error.OutOfMemory, error.Canceled => |e| return e,
     };
+    log.debug("{s} cache {f}", .{ final_lib_basename, status.fmt(&man) });
     if (status == .hit) {
         const digest = man.hitDigestHex();
         const sub_path = try std.fs.path.join(gpa, &.{ "o", &digest, final_lib_basename });

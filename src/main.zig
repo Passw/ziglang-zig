@@ -4878,7 +4878,13 @@ fn cmdTranslateC(
     Compilation.cache_helpers.hashCSource(&man, c_source_file) catch |err|
         fatal("unable to process {q}: {t}", .{ c_source_file.src_path, err });
 
-    const result: Compilation.TranslateCResult = if (.hit == try man.check(prog_node)) .{
+    var diag: Cache.Manifest.CheckDiagnostic = undefined;
+    const status = man.check(&diag, prog_node) catch |err| switch (err) {
+        error.OutOfMemory, error.Canceled => |e| return e,
+        error.CacheCheckFailed => fatal("translate-c checking cache failed: {f}", .{diag.fmt(&man)}),
+    };
+    std.log.debug("translate-c cache {f}", .{status.fmt(&man)});
+    const result: Compilation.TranslateCResult = if (status == .hit) .{
         .digest = man.hitDigest(),
         .cache_hit = true,
         .errors = std.zig.ErrorBundle.empty,

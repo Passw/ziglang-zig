@@ -2813,27 +2813,14 @@ pub fn update(comp: *Compilation, main_progress_node: std.Progress.Node) UpdateE
                 man.want_shared_lock = false;
             }
 
-            const status = man.check(main_progress_node) catch |err| switch (err) {
+            var diag: Cache.Manifest.CheckDiagnostic = undefined;
+            const status = man.check(&diag, main_progress_node) catch |err| switch (err) {
                 error.Canceled, error.OutOfMemory => |e| return e,
-                error.CacheCheckFailed => switch (man.diagnostic) {
-                    .none => unreachable,
-                    .manifest_oversize => {
-                        return comp.setMiscFailure(.check_whole_cache, "checking cache failed: {t}", .{
-                            man.diagnostic,
-                        });
-                    },
-                    .manifest_create, .manifest_stat, .manifest_read, .manifest_lock => |e| {
-                        return comp.setMiscFailure(.check_whole_cache, "checking cache failed: {t} {t}", .{
-                            man.diagnostic, e,
-                        });
-                    },
-                    .file_open, .file_stat, .file_read, .file_hash => |op| {
-                        return comp.setMiscFailure(.check_whole_cache, "checking cache failed: {f} {t} {t}", .{
-                            op.path(&man), man.diagnostic, op.err,
-                        });
-                    },
+                error.CacheCheckFailed => {
+                    return comp.setMiscFailure(.check_whole_cache, "checking cache failed: {f}", .{diag.fmt(&man)});
                 },
             };
+            log.debug("{s} whole cache {f} ignore_hit={}", .{ comp.root_name, status.fmt(&man), ignore_hit });
             if (status == .hit and !ignore_hit) {
                 // In this case the cache hit contains the full set of file system inputs. Nice!
                 if (comp.file_system_inputs) |buf| try man.populateFileSystemInputs(buf);
@@ -2844,7 +2831,6 @@ pub fn update(comp: *Compilation, main_progress_node: std.Progress.Node) UpdateE
                 }
 
                 comp.last_update_was_cache_hit = true;
-                log.debug("CacheMode.whole cache hit for {s}", .{comp.root_name});
                 const bin_digest = man.hitDigest();
 
                 comp.digest = bin_digest;
@@ -2853,7 +2839,6 @@ pub fn update(comp: *Compilation, main_progress_node: std.Progress.Node) UpdateE
                 whole.lock = man.toOwnedLock();
                 return;
             }
-            log.debug("CacheMode.whole cache miss for {s}", .{comp.root_name});
 
             if (ignore_hit) {
                 // Okay, now set this back so that `Manifest.finalize` will downgrade our lock later.
@@ -5536,7 +5521,18 @@ fn updateCObject(comp: *Compilation, c_object: *CObject, c_obj_prog_node: std.Pr
     const target = comp.getTarget();
     assert(target.ofmt != .c);
     const o_ext = target.ofmt.fileExt(target.cpu.arch);
-    const digest = if (!comp.disable_c_depfile and .hit == try man.check(child_progress_node)) man.hitDigestHex() else miss: {
+    const digest = d: {
+        if (!comp.disable_c_depfile) {
+            var diagnostic: Cache.Manifest.CheckDiagnostic = undefined;
+            const status = man.check(&diagnostic, child_progress_node) catch |err| switch (err) {
+                error.Canceled, error.OutOfMemory => |e| return e,
+                error.CacheCheckFailed => {
+                    return comp.failCObj(c_object, "checking cache failed: {f}", .{diagnostic.fmt(&man)});
+                },
+            };
+            log.debug("C object cache {f}", .{status.fmt(&man)});
+            if (status == .hit) break :d man.hitDigestHex();
+        }
         var argv: std.array_list.Managed([]const u8) = .init(gpa);
         defer argv.deinit();
 
@@ -5811,16 +5807,28 @@ fn updateCObject(comp: *Compilation, c_object: *CObject, c_obj_prog_node: std.Pr
         }
 
         // We don't actually care whether it's a cache hit or miss; we just need the digest and the lock.
-        if (comp.disable_c_depfile) _ = try man.check(child_progress_node);
+        const digest = inner: {
+            if (comp.disable_c_depfile) {
+                var diagnostic: Cache.Manifest.CheckDiagnostic = undefined;
+                const status = man.check(&diagnostic, child_progress_node) catch |err| switch (err) {
+                    error.OutOfMemory, error.Canceled => |e| return e,
+                    error.CacheCheckFailed => {
+                        return comp.failCObj(c_object, "checking cache failed: {f}", .{diagnostic.fmt(&man)});
+                    },
+                };
+                log.debug("ignored C object cache {f}", .{status.fmt(&man)});
+                if (status == .hit) break :inner man.hitDigestHex();
+            }
+            break :inner man.missDigestHex();
+        };
 
         // Rename into place.
-        const digest = man.missDigestHex();
         const o_sub_path = try fs.path.join(arena, &.{ "o", &digest });
         var o_dir = try comp.dirs.local_cache.handle.createDirPathOpen(io, o_sub_path, .{});
         defer o_dir.close(io);
         const tmp_basename = fs.path.basename(out_obj_path);
         try Io.Dir.rename(zig_cache_tmp_dir, tmp_basename, o_dir, o_basename, io);
-        break :miss digest;
+        break :d digest;
     };
 
     if (man.have_exclusive_lock) {
@@ -5896,7 +5904,15 @@ fn updateWin32Resource(comp: *Compilation, win32_resource: *Win32Resource, win32
         const rc_basename = try std.fmt.allocPrint(arena, "{s}.rc", .{src_basename});
         const res_basename = try std.fmt.allocPrint(arena, "{s}.res", .{src_basename});
 
-        const digest = if (.hit == try man.check(child_progress_node)) man.hitDigestHex() else blk: {
+        var diag: Cache.Manifest.CheckDiagnostic = undefined;
+        const status = man.check(&diag, child_progress_node) catch |err| switch (err) {
+            error.OutOfMemory, error.Canceled => |e| return e,
+            error.CacheCheckFailed => return comp.failWin32Resource(win32_resource, "checking cache failed: {f}", .{
+                diag.fmt(&man),
+            }),
+        };
+        log.debug("win32 resource cache {f}", .{status.fmt(&man)});
+        const digest = if (status == .hit) man.hitDigestHex() else miss: {
             // The digest only depends on the .manifest file, so we can
             // get the digest now and write the .res directly to the cache
             const digest = man.missDigestHex();
@@ -5961,7 +5977,7 @@ fn updateWin32Resource(comp: *Compilation, win32_resource: *Win32Resource, win32
 
             try spawnZigRc(comp, win32_resource, arena, argv.items, child_progress_node);
 
-            break :blk digest;
+            break :miss digest;
         };
 
         if (man.have_exclusive_lock) {
@@ -5988,7 +6004,15 @@ fn updateWin32Resource(comp: *Compilation, win32_resource: *Win32Resource, win32
 
     const rc_basename_noext = src_basename[0 .. src_basename.len - fs.path.extension(src_basename).len];
 
-    const digest = if (.hit == try man.check(child_progress_node)) man.hitDigestHex() else blk: {
+    var diagnostic: Cache.Manifest.CheckDiagnostic = undefined;
+    const status = man.check(&diagnostic, child_progress_node) catch |err| switch (err) {
+        error.OutOfMemory, error.Canceled => |e| return e,
+        error.CacheCheckFailed => return comp.failWin32Resource(win32_resource, "checking cache failed: {f}", .{
+            diagnostic.fmt(&man),
+        }),
+    };
+    log.debug("win32 resource cache {f}", .{status.fmt(&man)});
+    const digest = if (status == .hit) man.hitDigestHex() else miss: {
         var zig_cache_tmp_dir = try comp.dirs.local_cache.handle.createDirPathOpen(io, "tmp", .{});
         defer zig_cache_tmp_dir.close(io);
 
@@ -6066,7 +6090,7 @@ fn updateWin32Resource(comp: *Compilation, win32_resource: *Win32Resource, win32
         defer o_dir.close(io);
         const tmp_basename = fs.path.basename(out_res_path);
         try Io.Dir.rename(zig_cache_tmp_dir, tmp_basename, o_dir, res_filename, io);
-        break :blk digest;
+        break :miss digest;
     };
 
     if (man.have_exclusive_lock) {

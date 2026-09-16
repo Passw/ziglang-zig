@@ -705,7 +705,20 @@ pub fn buildSharedObjects(comp: *Compilation, prog_node: std.Progress.Node) anye
         .request_contents = true,
     });
 
-    if (.hit == try man.check(prog_node)) {
+    var diag: Cache.Manifest.CheckDiagnostic = undefined;
+    const status = man.check(&diag, prog_node) catch |err| switch (err) {
+        error.OutOfMemory, error.Canceled => |e| return e,
+        error.CacheCheckFailed => {
+            comp.lockAndSetMiscFailure(
+                .glibc_shared_objects,
+                "compiling glibc shared objects: checking cache failed: {f}",
+                .{diag.fmt(&man)},
+            );
+            return error.AlreadyReported;
+        },
+    };
+    log.debug("glibc_shared_objects cache {f}", .{status.fmt(&man)});
+    if (status == .hit) {
         const digest = man.hitDigestHex();
         return queueSharedObjects(comp, .{
             .lock = man.toOwnedLock(),

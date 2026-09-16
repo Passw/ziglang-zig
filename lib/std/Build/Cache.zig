@@ -289,7 +289,6 @@ pub const Manifest = struct {
     /// Indexes line up with `files`, but only up until `hit` is called. Uses
     /// `Cache.gpa`.
     input_paths: std.ArrayList(InputPath) = .empty,
-    diagnostic: Diagnostic = .none,
     /// Keeps track of the last time we performed a file system write to observe
     /// what time the file system thinks it is, according to its own granularity.
     recent_problematic_timestamp: Io.Timestamp = .zero,
@@ -591,8 +590,7 @@ pub const Manifest = struct {
         }
     };
 
-    pub const Diagnostic = union(enum) {
-        none,
+    pub const CheckDiagnostic = union(enum) {
         manifest_create: Io.File.OpenError,
         manifest_stat: Io.File.StatError,
         manifest_oversize,
@@ -617,6 +615,31 @@ pub const Manifest = struct {
                 };
             }
         };
+
+        pub const Format = struct {
+            diagnostic: CheckDiagnostic,
+            manifest: *const Manifest,
+
+            pub fn format(this: @This(), w: *Io.Writer) Io.Writer.Error!void {
+                switch (this.diagnostic) {
+                    .manifest_oversize => return w.writeAll(@tagName(this.diagnostic)),
+                    .manifest_create, .manifest_stat, .manifest_read, .manifest_lock => |e| {
+                        return w.print("{t} {t}", .{ this.diagnostic, e });
+                    },
+                    .file_open, .file_stat, .file_read, .file_hash => |op| {
+                        const path = op.path(this.manifest);
+                        return w.print("{t} {t} {f}", .{ this.diagnostic, op.err, path });
+                    },
+                }
+            }
+        };
+
+        pub fn fmt(diagnostic: CheckDiagnostic, manifest: *const Manifest) Format {
+            return .{
+                .diagnostic = diagnostic,
+                .manifest = manifest,
+            };
+        }
     };
 
     pub const Stat = struct {
@@ -816,6 +839,28 @@ pub const Manifest = struct {
         directory_status_changed: File.Offset,
         metadata_changed: File.Offset,
         contents_changed: File.Offset,
+
+        pub const Format = struct {
+            check_result: CheckResult,
+            manifest: *const Manifest,
+
+            pub fn format(this: @This(), w: *Io.Writer) Io.Writer.Error!void {
+                switch (this.check_result) {
+                    .hit, .incomplete_manifest, .invalid_manifest => return w.writeAll(@tagName(this.check_result)),
+                    .path_deleted, .directory_status_changed, .metadata_changed, .contents_changed => |off| {
+                        const path = off.path(this.manifest.contents.items);
+                        return w.print("{t} {s}", .{ this.check_result, path });
+                    },
+                }
+            }
+        };
+
+        pub fn fmt(check_result: CheckResult, manifest: *const Manifest) Format {
+            return .{
+                .check_result = check_result,
+                .manifest = manifest,
+            };
+        }
     };
 
     pub const CheckError = error{
@@ -836,13 +881,17 @@ pub const Manifest = struct {
     /// The lock on the manifest file is released when `deinit` is called. As another
     /// option, one may call `toOwnedLock` to obtain a smaller object which can represent
     /// the lock. `deinit` is safe to call whether or not `toOwnedLock` has been called.
-    pub fn check(man: *Manifest, parent_progress_node: std.Progress.Node) CheckError!CheckResult {
+    pub fn check(
+        man: *Manifest,
+        diag: *CheckDiagnostic,
+        parent_progress_node: std.Progress.Node,
+    ) CheckError!CheckResult {
         const node = parent_progress_node.start("Reusing Cache Artifacts", 0);
         defer node.end();
-        return checkProgressless(man);
+        return checkProgressless(man, diag);
     }
 
-    pub fn checkProgressless(man: *Manifest) CheckError!CheckResult {
+    pub fn checkProgressless(man: *Manifest, diag: *CheckDiagnostic) CheckError!CheckResult {
         assert(man.state == .input);
         assert(man.manifest_file == null);
 
@@ -851,8 +900,6 @@ pub const Manifest = struct {
         for (man.files.keys()[0..man.input_paths.items.len]) |file_off| {
             man.hashFlagsAndPath(file_off, &man.hash.hasher);
         }
-
-        man.diagnostic = .none;
 
         var input_digest: BinDigest = undefined;
         man.hash.hasher.final(&input_digest);
@@ -879,10 +926,7 @@ pub const Manifest = struct {
                     man.manifest_file = man.cache.manifest_dir.openFile(io, manifest_file_path, .{
                         .mode = .read_write,
                         .lock = .shared,
-                    }) catch |e| {
-                        man.diagnostic = .{ .manifest_create = e };
-                        return error.CacheCheckFailed;
-                    };
+                    }) catch |e| return fail(diag, .{ .manifest_create = e });
                     break;
                 },
                 error.FileNotFound => {
@@ -895,10 +939,7 @@ pub const Manifest = struct {
                     // disambiguates by returning EEXIST, indicating original
                     // failure was a race, or ENOENT, indicating deletion of
                     // the directory of our open handle.
-                    if (!builtin.os.tag.isDarwin()) {
-                        man.diagnostic = .{ .manifest_create = error.FileNotFound };
-                        return error.CacheCheckFailed;
-                    }
+                    if (!builtin.os.tag.isDarwin()) return fail(diag, .{ .manifest_create = error.FileNotFound });
 
                     if (man.cache.manifest_dir.createFile(io, manifest_file_path, .{
                         .read = true,
@@ -912,22 +953,13 @@ pub const Manifest = struct {
                         break;
                     } else |excl_err| switch (excl_err) {
                         error.WouldBlock, error.PathAlreadyExists => continue,
-                        error.FileNotFound => {
-                            man.diagnostic = .{ .manifest_create = error.FileNotFound };
-                            return error.CacheCheckFailed;
-                        },
+                        error.FileNotFound => return fail(diag, .{ .manifest_create = error.FileNotFound }),
                         error.Canceled => |e| return e,
-                        else => |e| {
-                            man.diagnostic = .{ .manifest_create = e };
-                            return error.CacheCheckFailed;
-                        },
+                        else => |e| return fail(diag, .{ .manifest_create = e }),
                     }
                 },
                 error.Canceled => |e| return e,
-                else => |e| {
-                    man.diagnostic = .{ .manifest_create = e };
-                    return error.CacheCheckFailed;
-                },
+                else => |e| return fail(diag, .{ .manifest_create = e }),
             }
         }
 
@@ -949,16 +981,16 @@ pub const Manifest = struct {
 
         hit: {
             const miss_result = miss: {
-                const result = try man.checkLocked();
+                const result = try man.checkLocked(diag);
                 if (result == .hit) {
                     break :hit;
-                } else if (!try man.upgradeToExclusiveLock()) {
+                } else if (!try man.upgradeToExclusiveLock(diag)) {
                     break :miss result;
                 }
                 // Missed with the shared lock, and upgraded to an exclusive lock. However, another process may have
                 // modified the cache directory, so we need to check again before deciding to miss.
                 man.shrinkFilesToInput();
-                const refreshed_result = try man.checkLocked();
+                const refreshed_result = try man.checkLocked(diag);
                 if (refreshed_result == .hit) break :hit;
                 break :miss refreshed_result;
             };
@@ -970,10 +1002,7 @@ pub const Manifest = struct {
         }
 
         if (man.want_shared_lock) {
-            man.downgradeToSharedLock() catch |err| {
-                man.diagnostic = .{ .manifest_lock = err };
-                return error.CacheCheckFailed;
-            };
+            man.downgradeToSharedLock() catch |err| return fail(diag, .{ .manifest_lock = err });
         }
 
         man.state = .hit;
@@ -1006,7 +1035,7 @@ pub const Manifest = struct {
     }
 
     /// Does not observe or modify `self.hash.hasher`. Asserts `self.files` contains only the original input files.
-    fn checkLocked(m: *Manifest) CheckError!CheckResult {
+    fn checkLocked(m: *Manifest, diag: *CheckDiagnostic) CheckError!CheckResult {
         assert(m.files.count() == m.input_paths.items.len);
         const gpa = m.cache.gpa;
         const io = m.cache.io;
@@ -1014,15 +1043,15 @@ pub const Manifest = struct {
 
         const manifest_stat = manifest_file.stat(io) catch |err| switch (err) {
             error.Canceled => |e| return e,
-            else => |e| return fail(&m.diagnostic, .{ .manifest_stat = e }),
+            else => |e| return fail(diag, .{ .manifest_stat = e }),
         };
         const manifest_size = std.math.cast(u32, manifest_stat.size) orelse
-            return fail(&m.diagnostic, .manifest_oversize);
+            return fail(diag, .manifest_oversize);
 
         if (manifest_size == 0 or manifest_size < m.contents.items.len) {
             // Manifest file was never finalized.
             try m.contents.ensureUnusedCapacity(gpa, 1);
-            return populateMissingInputFileHashes(m, 0, .incomplete_manifest);
+            return populateMissingInputFileHashes(m, diag, 0, .incomplete_manifest);
         }
 
         // We must not clobber existing `Manifest.contents` because it possibly contains prepopulated stat and digest
@@ -1039,9 +1068,9 @@ pub const Manifest = struct {
         {
             const n = manifest_file.readPositionalAll(io, m.contents.items, 0) catch |err| switch (err) {
                 error.Canceled => |e| return e,
-                else => |e| return fail(&m.diagnostic, .{ .manifest_read = e }),
+                else => |e| return fail(diag, .{ .manifest_read = e }),
             };
-            if (n != manifest_size) return missInput(m, 0, input_contents_len, manifest_size, .incomplete_manifest);
+            if (n != manifest_size) return missInput(m, diag, 0, input_contents_len, manifest_size, .incomplete_manifest);
         }
         const disk_contents = m.contents.items[0..manifest_size];
         const input_contents = m.contents.items[manifest_size..][0..input_contents_len];
@@ -1050,12 +1079,12 @@ pub const Manifest = struct {
         var off: usize = 0;
         for (m.input_paths.items, m.files.keys()[0..m.input_paths.items.len], 0..) |*input_path, file_off, i| {
             if (@backingInt(file_off) + 1 >= disk_contents.len)
-                return missInput(m, i, input_contents_len, manifest_size, .incomplete_manifest);
+                return missInput(m, diag, i, input_contents_len, manifest_size, .incomplete_manifest);
             if (!mem.eql(u8, file_off.flagsAndPath(disk_contents), file_off.flagsAndPath(input_contents)))
-                return missInput(m, i, input_contents_len, manifest_size, .invalid_manifest);
+                return missInput(m, diag, i, input_contents_len, manifest_size, .invalid_manifest);
 
-            const result = try checkInputPath(m, file_off, input_path, disk_contents, input_contents);
-            if (result != .hit) return missInput(m, i + 1, input_contents_len, manifest_size, result);
+            const result = try checkInputPath(m, diag, file_off, input_path, disk_contents, input_contents);
+            if (result != .hit) return missInput(m, diag, i + 1, input_contents_len, manifest_size, result);
             off = @backingInt(file_off);
         }
 
@@ -1074,7 +1103,7 @@ pub const Manifest = struct {
             if (path.len == 0) return .invalid_manifest;
 
             try m.files.putContext(gpa, file_off, {}, .{ .contents = disk_contents });
-            const result = try checkDiscoveredPath(m, file_off, disk_contents);
+            const result = try checkDiscoveredPath(m, diag, file_off, disk_contents);
             if (result != .hit) return result;
 
             off += File.sizeOf(path.len);
@@ -1098,6 +1127,7 @@ pub const Manifest = struct {
     /// missed one.
     fn missInput(
         m: *Manifest,
+        diag: *CheckDiagnostic,
         next_file_index: usize,
         input_contents_len: usize,
         manifest_size: usize,
@@ -1114,18 +1144,19 @@ pub const Manifest = struct {
             m.contents.items[manifest_size + off ..][0..copy_len],
         );
         m.contents.shrinkRetainingCapacity(input_contents_len);
-        return populateMissingInputFileHashes(m, next_file_index, result);
+        return populateMissingInputFileHashes(m, diag, next_file_index, result);
     }
 
     fn populateMissingInputFileHashes(
         m: *Manifest,
+        diag: *CheckDiagnostic,
         next_file_index: usize,
         result: CheckResult,
     ) CheckError!CheckResult {
         const file_offs = m.files.keys();
         const contents = m.contents.items;
         for (file_offs[next_file_index..], m.input_paths.items[next_file_index..]) |input_file_off, *input_path| {
-            try populateInputPath(m, input_file_off, input_path, contents);
+            try populateInputPath(m, diag, input_file_off, input_path, contents);
         }
         return result;
     }
@@ -1134,6 +1165,7 @@ pub const Manifest = struct {
     /// system. Only ensures that metadata and digest are available.
     fn populateInputPath(
         m: *Manifest,
+        diag: *CheckDiagnostic,
         file_off: File.Offset,
         input_path: *InputPath,
         contents: []u8,
@@ -1156,21 +1188,21 @@ pub const Manifest = struct {
             const actual_stat = switch (input_path.getHandle(input_file)) {
                 .none => parent_dir.statFile(io, file_path, .{}) catch |err| switch (err) {
                     error.Canceled => |e| return e,
-                    else => |e| return fail(&m.diagnostic, .{ .file_stat = .{
+                    else => |e| return fail(diag, .{ .file_stat = .{
                         .file_offset = file_off,
                         .err = e,
                     } }),
                 },
                 .file => |opened_file| opened_file.stat(io) catch |err| switch (err) {
                     error.Canceled => |e| return e,
-                    else => |e| return fail(&m.diagnostic, .{ .file_stat = .{
+                    else => |e| return fail(diag, .{ .file_stat = .{
                         .file_offset = file_off,
                         .err = e,
                     } }),
                 },
                 .dir => |opened_dir| opened_dir.stat(io) catch |err| switch (err) {
                     error.Canceled => |e| return e,
-                    else => |e| return fail(&m.diagnostic, .{ .file_stat = .{
+                    else => |e| return fail(diag, .{ .file_stat = .{
                         .file_offset = file_off,
                         .err = e,
                     } }),
@@ -1179,7 +1211,7 @@ pub const Manifest = struct {
             const actual_is_directory = actual_stat.kind == .directory;
             if (actual_is_directory != input_file.flags.is_directory) {
                 // Since this is an input file, this is a failure, not a cache miss.
-                return fail(&m.diagnostic, .{ .file_stat = .{
+                return fail(diag, .{ .file_stat = .{
                     .file_offset = file_off,
                     .err = if (actual_is_directory) error.IsDir else error.NotDir,
                 } });
@@ -1210,7 +1242,7 @@ pub const Manifest = struct {
                     .access_sub_paths = false,
                 }) catch |err| switch (err) {
                     error.Canceled => |e| return e,
-                    else => |e| return fail(&m.diagnostic, .{ .file_open = .{
+                    else => |e| return fail(diag, .{ .file_open = .{
                         .file_offset = file_off,
                         .err = e,
                     } }),
@@ -1224,7 +1256,7 @@ pub const Manifest = struct {
                 assert(!stat_path_ok);
                 const actual_stat = opened_dir.stat(io) catch |err| switch (err) {
                     error.Canceled => |e| return e,
-                    else => |e| return fail(&m.diagnostic, .{ .file_stat = .{
+                    else => |e| return fail(diag, .{ .file_stat = .{
                         .file_offset = file_off,
                         .err = e,
                     } }),
@@ -1235,7 +1267,7 @@ pub const Manifest = struct {
             const dir_contents_start = m.all_input_content.items.len;
             hashDir(gpa, io, opened_dir, &input_file.digest, &m.all_input_content) catch |err| switch (err) {
                 error.Canceled, error.OutOfMemory => |e| return e,
-                else => |e| return fail(&m.diagnostic, .{ .file_read = .{
+                else => |e| return fail(diag, .{ .file_read = .{
                     .file_offset = file_off,
                     .err = e,
                 } }),
@@ -1254,7 +1286,7 @@ pub const Manifest = struct {
             else
                 parent_dir.openFile(io, file_path, .{ .mode = .read_only }) catch |err| switch (err) {
                     error.Canceled => |e| return e,
-                    else => |e| return fail(&m.diagnostic, .{ .file_open = .{
+                    else => |e| return fail(diag, .{ .file_open = .{
                         .file_offset = file_off,
                         .err = e,
                     } }),
@@ -1268,7 +1300,7 @@ pub const Manifest = struct {
                 assert(!stat_path_ok);
                 const actual_stat = opened_file.stat(io) catch |err| switch (err) {
                     error.Canceled => |e| return e,
-                    else => |e| return fail(&m.diagnostic, .{ .file_stat = .{
+                    else => |e| return fail(diag, .{ .file_stat = .{
                         .file_offset = file_off,
                         .err = e,
                     } }),
@@ -1281,7 +1313,7 @@ pub const Manifest = struct {
                     const start = m.all_input_content.items.len;
                     hashFileAppend(io, opened_file, &input_file.digest, &m.all_input_content, gpa) catch |err| switch (err) {
                         error.Canceled, error.OutOfMemory => |e| return e,
-                        else => |e| return fail(&m.diagnostic, .{ .file_read = .{
+                        else => |e| return fail(diag, .{ .file_read = .{
                             .file_offset = file_off,
                             .err = e,
                         } }),
@@ -1293,7 +1325,7 @@ pub const Manifest = struct {
                 },
                 .unrequested => hashFile(io, opened_file, &input_file.digest) catch |err| switch (err) {
                     error.Canceled => |e| return e,
-                    else => |e| return fail(&m.diagnostic, .{ .file_read = .{
+                    else => |e| return fail(diag, .{ .file_read = .{
                         .file_offset = file_off,
                         .err = e,
                     } }),
@@ -1306,6 +1338,7 @@ pub const Manifest = struct {
     /// Upon return, disk_contents digest and stat will be populated regardless of whether hit or miss occurs.
     fn checkInputPath(
         m: *Manifest,
+        diag: *CheckDiagnostic,
         file_off: File.Offset,
         input_path: *InputPath,
         disk_contents: []u8,
@@ -1337,21 +1370,21 @@ pub const Manifest = struct {
                 const actual_stat = switch (input_path.getHandle(input_file)) {
                     .none => parent_dir.statFile(io, file_path, .{}) catch |err| switch (err) {
                         error.Canceled => |e| return e,
-                        else => |e| return fail(&m.diagnostic, .{ .file_stat = .{
+                        else => |e| return fail(diag, .{ .file_stat = .{
                             .file_offset = file_off,
                             .err = e,
                         } }),
                     },
                     .file => |opened_file| opened_file.stat(io) catch |err| switch (err) {
                         error.Canceled => |e| return e,
-                        else => |e| return fail(&m.diagnostic, .{ .file_stat = .{
+                        else => |e| return fail(diag, .{ .file_stat = .{
                             .file_offset = file_off,
                             .err = e,
                         } }),
                     },
                     .dir => |opened_dir| opened_dir.stat(io) catch |err| switch (err) {
                         error.Canceled => |e| return e,
-                        else => |e| return fail(&m.diagnostic, .{ .file_stat = .{
+                        else => |e| return fail(diag, .{ .file_stat = .{
                             .file_offset = file_off,
                             .err = e,
                         } }),
@@ -1362,7 +1395,7 @@ pub const Manifest = struct {
                 const actual_is_directory = actual_stat.kind == .directory;
                 if (actual_is_directory != disk_file.flags.is_directory) {
                     // Since this is an input file, this is a failure, not a cache miss.
-                    return fail(&m.diagnostic, .{ .file_stat = .{
+                    return fail(diag, .{ .file_stat = .{
                         .file_offset = file_off,
                         .err = if (actual_is_directory) error.IsDir else error.NotDir,
                     } });
@@ -1393,7 +1426,7 @@ pub const Manifest = struct {
                     .access_sub_paths = false,
                 }) catch |err| switch (err) {
                     error.Canceled => |e| return e,
-                    else => |e| return fail(&m.diagnostic, .{ .file_open = .{
+                    else => |e| return fail(diag, .{ .file_open = .{
                         .file_offset = file_off,
                         .err = e,
                     } }),
@@ -1406,7 +1439,7 @@ pub const Manifest = struct {
             if (!input_path.have_stat) {
                 const actual_stat = opened_dir.stat(io) catch |err| switch (err) {
                     error.Canceled => |e| return e,
-                    else => |e| return fail(&m.diagnostic, .{ .file_stat = .{
+                    else => |e| return fail(diag, .{ .file_stat = .{
                         .file_offset = file_off,
                         .err = e,
                     } }),
@@ -1417,7 +1450,7 @@ pub const Manifest = struct {
             const dir_contents_start = m.all_input_content.items.len;
             hashDir(gpa, io, opened_dir, &disk_file.digest, &m.all_input_content) catch |err| switch (err) {
                 error.Canceled, error.OutOfMemory => |e| return e,
-                else => |e| return fail(&m.diagnostic, .{ .file_read = .{
+                else => |e| return fail(diag, .{ .file_read = .{
                     .file_offset = file_off,
                     .err = e,
                 } }),
@@ -1439,7 +1472,7 @@ pub const Manifest = struct {
             else
                 parent_dir.openFile(io, file_path, .{ .mode = .read_only }) catch |err| switch (err) {
                     error.Canceled => |e| return e,
-                    else => |e| return fail(&m.diagnostic, .{ .file_open = .{
+                    else => |e| return fail(diag, .{ .file_open = .{
                         .file_offset = file_off,
                         .err = e,
                     } }),
@@ -1452,7 +1485,7 @@ pub const Manifest = struct {
             if (!input_path.have_stat) {
                 const actual_stat = opened_file.stat(io) catch |err| switch (err) {
                     error.Canceled => |e| return e,
-                    else => |e| return fail(&m.diagnostic, .{ .file_stat = .{
+                    else => |e| return fail(diag, .{ .file_stat = .{
                         .file_offset = file_off,
                         .err = e,
                     } }),
@@ -1465,7 +1498,7 @@ pub const Manifest = struct {
                     const start = m.all_input_content.items.len;
                     hashFileAppend(io, opened_file, &disk_file.digest, &m.all_input_content, gpa) catch |err| switch (err) {
                         error.Canceled, error.OutOfMemory => |e| return e,
-                        else => |e| return fail(&m.diagnostic, .{ .file_read = .{
+                        else => |e| return fail(diag, .{ .file_read = .{
                             .file_offset = file_off,
                             .err = e,
                         } }),
@@ -1477,7 +1510,7 @@ pub const Manifest = struct {
                 },
                 .unrequested => hashFile(io, opened_file, &disk_file.digest) catch |err| switch (err) {
                     error.Canceled => |e| return e,
-                    else => |e| return fail(&m.diagnostic, .{ .file_read = .{
+                    else => |e| return fail(diag, .{ .file_read = .{
                         .file_offset = file_off,
                         .err = e,
                     } }),
@@ -1490,7 +1523,12 @@ pub const Manifest = struct {
         }
     }
 
-    fn checkDiscoveredPath(m: *Manifest, file_off: File.Offset, contents: []u8) CheckError!CheckResult {
+    fn checkDiscoveredPath(
+        m: *Manifest,
+        diag: *CheckDiagnostic,
+        file_off: File.Offset,
+        contents: []u8,
+    ) CheckError!CheckResult {
         const file = file_off.get(contents);
         const cache = m.cache;
         const gpa = cache.gpa;
@@ -1502,7 +1540,7 @@ pub const Manifest = struct {
             const actual_stat = parent_dir.statFile(io, file_path, .{}) catch |err| switch (err) {
                 error.FileNotFound => return .{ .path_deleted = file_off },
                 error.Canceled => |e| return e,
-                else => |e| return fail(&m.diagnostic, .{ .file_stat = .{
+                else => |e| return fail(diag, .{ .file_stat = .{
                     .file_offset = file_off,
                     .err = e,
                 } }),
@@ -1525,7 +1563,7 @@ pub const Manifest = struct {
                 error.FileNotFound => return .{ .path_deleted = file_off },
                 error.NotDir => return .{ .directory_status_changed = file_off },
                 error.Canceled => |e| return e,
-                else => |e| return fail(&m.diagnostic, .{ .file_open = .{
+                else => |e| return fail(diag, .{ .file_open = .{
                     .file_offset = file_off,
                     .err = e,
                 } }),
@@ -1534,7 +1572,7 @@ pub const Manifest = struct {
 
             const actual_stat = opened_dir.stat(io) catch |err| switch (err) {
                 error.Canceled => |e| return e,
-                else => |e| return fail(&m.diagnostic, .{ .file_stat = .{
+                else => |e| return fail(diag, .{ .file_stat = .{
                     .file_offset = file_off,
                     .err = e,
                 } }),
@@ -1545,7 +1583,7 @@ pub const Manifest = struct {
                 defer m.all_input_content.shrinkRetainingCapacity(dir_contents_start);
                 hashDir(gpa, io, opened_dir, &file.digest, &m.all_input_content) catch |err| switch (err) {
                     error.Canceled, error.OutOfMemory => |e| return e,
-                    else => |e| return fail(&m.diagnostic, .{ .file_read = .{
+                    else => |e| return fail(diag, .{ .file_read = .{
                         .file_offset = file_off,
                         .err = e,
                     } }),
@@ -1560,7 +1598,7 @@ pub const Manifest = struct {
             error.FileNotFound => return .{ .path_deleted = file_off },
             error.IsDir => return .{ .directory_status_changed = file_off },
             error.Canceled => |e| return e,
-            else => |e| return fail(&m.diagnostic, .{ .file_open = .{
+            else => |e| return fail(diag, .{ .file_open = .{
                 .file_offset = file_off,
                 .err = e,
             } }),
@@ -1569,7 +1607,7 @@ pub const Manifest = struct {
 
         const actual_stat = opened_file.stat(io) catch |err| switch (err) {
             error.Canceled => |e| return e,
-            else => |e| return fail(&m.diagnostic, .{ .file_stat = .{
+            else => |e| return fail(diag, .{ .file_stat = .{
                 .file_offset = file_off,
                 .err = e,
             } }),
@@ -1579,7 +1617,7 @@ pub const Manifest = struct {
             const prev_digest: BinDigest = file.digest;
             hashFile(io, opened_file, &file.digest) catch |err| switch (err) {
                 error.Canceled => |e| return e,
-                else => |e| return fail(&m.diagnostic, .{ .file_read = .{
+                else => |e| return fail(diag, .{ .file_read = .{
                     .file_offset = file_off,
                     .err = e,
                 } }),
@@ -1591,8 +1629,7 @@ pub const Manifest = struct {
         return .hit;
     }
 
-    fn fail(ptr: *Diagnostic, d: Diagnostic) error{CacheCheckFailed} {
-        assert(ptr.* == .none);
+    fn fail(ptr: *CheckDiagnostic, d: CheckDiagnostic) error{CacheCheckFailed} {
         ptr.* = d;
         return error.CacheCheckFailed;
     }
@@ -2002,22 +2039,19 @@ pub const Manifest = struct {
         self.have_exclusive_lock = false;
     }
 
-    fn upgradeToExclusiveLock(self: *Manifest) error{CacheCheckFailed}!bool {
-        if (self.have_exclusive_lock) return false;
-        assert(self.manifest_file != null);
-        const io = self.cache.io;
+    fn upgradeToExclusiveLock(m: *Manifest, diag: *CheckDiagnostic) error{CacheCheckFailed}!bool {
+        if (m.have_exclusive_lock) return false;
+        assert(m.manifest_file != null);
+        const io = m.cache.io;
 
         if (std.process.can_spawn or !builtin.single_threaded) {
-            const manifest_file = self.manifest_file.?;
+            const manifest_file = m.manifest_file.?;
             // Here we intentionally have a period where the lock is released, in case there are
             // other processes holding a shared lock.
             manifest_file.unlock(io);
-            manifest_file.lock(io, .exclusive) catch |err| {
-                self.diagnostic = .{ .manifest_lock = err };
-                return error.CacheCheckFailed;
-            };
+            manifest_file.lock(io, .exclusive) catch |err| return fail(diag, .{ .manifest_lock = err });
         }
-        self.have_exclusive_lock = true;
+        m.have_exclusive_lock = true;
         return true;
     }
 
@@ -2327,7 +2361,8 @@ test "cache file and then recall it" {
                 .sub_path = temp_file,
             }, .{});
 
-            try testing.expectEqual(.incomplete_manifest, try man.check(.none));
+            var diag: Manifest.CheckDiagnostic = undefined;
+            try testing.expectEqual(.incomplete_manifest, try man.check(&diag, .none));
 
             digest1 = man.missDigestHex();
             try man.finalize();
@@ -2345,7 +2380,8 @@ test "cache file and then recall it" {
             }, .{});
 
             // Cache hit! We just "built" the same file
-            try testing.expectEqual(.hit, try man.check(.none));
+            var diag: Manifest.CheckDiagnostic = undefined;
+            try testing.expectEqual(.hit, try man.check(&diag, .none));
             digest2 = man.hitDigestHex();
 
             try testing.expectEqual(false, man.have_exclusive_lock);
@@ -2406,7 +2442,8 @@ test "check that changing a file causes cache miss" {
                 .sub_path = temp_file,
             }, .{ .request_contents = true });
 
-            try testing.expectEqual(.incomplete_manifest, try man.check(.none));
+            var diag: Manifest.CheckDiagnostic = undefined;
+            try testing.expectEqual(.incomplete_manifest, try man.check(&diag, .none));
 
             try testing.expectEqualStrings(original_temp_file_contents, temp_file_idx.contents(&man));
 
@@ -2428,9 +2465,10 @@ test "check that changing a file causes cache miss" {
             }, .{ .request_contents = true });
 
             // The one input file changed.
+            var diag: Manifest.CheckDiagnostic = undefined;
             try testing.expectEqual(
                 @as(Manifest.CheckResult, .{ .contents_changed = temp_file_idx.offset(&man) }),
-                try man.check(.none),
+                try man.check(&diag, .none),
             );
 
             try testing.expectEqualStrings(updated_temp_file_contents, temp_file_idx.contents(&man));
@@ -2473,7 +2511,8 @@ test "no file inputs" {
 
         man.hash.addBytes("1234");
 
-        try testing.expectEqual(.incomplete_manifest, try man.check(.none));
+        var diag: Manifest.CheckDiagnostic = undefined;
+        try testing.expectEqual(.incomplete_manifest, try man.check(&diag, .none));
 
         digest1 = man.missDigestHex();
 
@@ -2485,7 +2524,8 @@ test "no file inputs" {
 
         man.hash.addBytes("1234");
 
-        try testing.expectEqual(.hit, try man.check(.none));
+        var diag: Manifest.CheckDiagnostic = undefined;
+        try testing.expectEqual(.hit, try man.check(&diag, .none));
         digest2 = man.hitDigestHex();
         try testing.expectEqual(false, man.have_exclusive_lock);
     }
@@ -2545,7 +2585,8 @@ test "Manifest with files added after initial hash" {
                 .sub_path = temp_file1,
             }, .{});
 
-            try testing.expectEqual(.incomplete_manifest, try man.check(.none));
+            var diag: Manifest.CheckDiagnostic = undefined;
+            try testing.expectEqual(.incomplete_manifest, try man.check(&diag, .none));
 
             try man.addDiscoveredPath(.{ .discovered_path = .{ .unresolved = .{
                 .root_dir = tmp_directory,
@@ -2565,7 +2606,8 @@ test "Manifest with files added after initial hash" {
                 .sub_path = temp_file1,
             }, .{});
 
-            try testing.expect(.hit == try man.check(.none));
+            var diag: Manifest.CheckDiagnostic = undefined;
+            try testing.expect(.hit == try man.check(&diag, .none));
             digest2 = man.hitDigestHex();
 
             try testing.expectEqual(false, man.have_exclusive_lock);
@@ -2591,7 +2633,8 @@ test "Manifest with files added after initial hash" {
                 .sub_path = temp_file1,
             }, .{});
 
-            switch (try man.check(.none)) {
+            var diag: Manifest.CheckDiagnostic = undefined;
+            switch (try man.check(&diag, .none)) {
                 .contents_changed => |off| {
                     try testing.expectEqualStrings(temp_file2, off.path(man.contents.items));
                 },

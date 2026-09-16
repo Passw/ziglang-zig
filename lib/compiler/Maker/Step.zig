@@ -726,7 +726,10 @@ pub fn handleChildProcessTerm(s: *Step, maker: *Maker, term: std.process.Child.T
 /// Prefer `cacheHitWatched` unless you already added watch inputs
 /// separately from using the cache system.
 pub fn cacheHit(s: *Step, maker: *Maker, man: *Cache.Manifest, parent_progress_node: std.Progress.Node) !bool {
-    const hit = .hit == (man.check(parent_progress_node) catch |err| return failWithCacheError(s, maker, man, err));
+    var diag: Cache.Manifest.CheckDiagnostic = undefined;
+    const status = man.check(&diag, parent_progress_node) catch |err|
+        return failWithCacheError(s, maker, man, &diag, err);
+    const hit = .hit == status; // TODO cache miss reason in the build summary
     s.result_cached = hit;
     return hit;
 }
@@ -736,7 +739,10 @@ pub fn cacheHit(s: *Step, maker: *Maker, man: *Cache.Manifest, parent_progress_n
 ///
 /// Must be accompanied with `finalizeManifestAndWatch`.
 pub fn cacheHitWatched(s: *Step, maker: *Maker, man: *Cache.Manifest, parent_progress_node: std.Progress.Node) !bool {
-    const hit = .hit == (man.check(parent_progress_node) catch |err| return failWithCacheError(s, maker, man, err));
+    var diag: Cache.Manifest.CheckDiagnostic = undefined;
+    const status = man.check(&diag, parent_progress_node) catch |err|
+        return failWithCacheError(s, maker, man, &diag, err);
+    const hit = .hit == status; // TODO cache miss reason in the build summary
     s.result_cached = hit;
     // The above call to hit() populates the manifest with files, so in case of
     // a hit, we need to populate watch inputs.
@@ -748,20 +754,11 @@ fn failWithCacheError(
     s: *Step,
     maker: *Maker,
     man: *const Cache.Manifest,
+    diag: *const Cache.Manifest.CheckDiagnostic,
     err: Cache.Manifest.CheckError,
 ) error{ OutOfMemory, Canceled, MakeFailed } {
     switch (err) {
-        error.CacheCheckFailed => switch (man.diagnostic) {
-            .none => unreachable,
-            .manifest_oversize => return s.fail(maker, "checking cache failed: {t}", .{man.diagnostic}),
-            .manifest_create, .manifest_stat, .manifest_read, .manifest_lock => |e| {
-                return s.fail(maker, "checking cache failed: {t} {t}", .{ man.diagnostic, e });
-            },
-            .file_open, .file_stat, .file_read, .file_hash => |op| {
-                const path = op.path(man);
-                return s.fail(maker, "checking cache failed: {f} {t} {t}", .{ path, man.diagnostic, op.err });
-            },
-        },
+        error.CacheCheckFailed => return s.fail(maker, "checking cache failed: {f}", .{diag.fmt(man)}),
         error.OutOfMemory, error.Canceled => |e| return e,
     }
 }
