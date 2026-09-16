@@ -3270,6 +3270,7 @@ fn buildOutputType(
     };
 
     const cwd_path = try std.zig.getResolvedCwd(io, arena);
+    std.log.debug("cwd_path={s}", .{cwd_path});
 
     // This `init` calls `fatal` on error.
     var dirs: std.zig.Directories = .init(arena, io, .{
