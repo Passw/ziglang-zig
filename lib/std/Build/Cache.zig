@@ -499,9 +499,10 @@ pub const Manifest = struct {
             pub fn flagsAndPath(off: File.Offset, contents: []const u8) [:0]const u8 {
                 const flags_off = @offsetOf(File, "flags");
                 comptime assert(@offsetOf(File, "path_start") - flags_off == 1);
-                const hash_start = @backingInt(off) + flags_off;
-                const hash_end = mem.findScalarPos(u8, contents, hash_start, 0).?;
-                return contents[hash_start..hash_end :0];
+                const start = @backingInt(off) + flags_off;
+                // Scan for the sentinel starting from the path_start offset because flags might be zero.
+                const end = mem.findScalarPos(u8, contents, start + 1, 0).?;
+                return contents[start..end :0];
             }
 
             pub fn pathFallible(off: File.Offset, contents: []const u8) error{InvalidFormat}![:0]const u8 {
@@ -898,7 +899,8 @@ pub const Manifest = struct {
         // This is *not* hashing the contents of the input files. It is the
         // flags (including prefix) and path only.
         for (man.files.keys()[0..man.input_paths.items.len]) |file_off| {
-            man.hashFlagsAndPath(file_off, &man.hash.hasher);
+            const flags_and_path = file_off.flagsAndPath(man.contents.items);
+            man.hash.hasher.update(mem.absorbSentinel(flags_and_path));
         }
 
         var input_digest: BinDigest = undefined;
@@ -2287,10 +2289,6 @@ pub const Manifest = struct {
         var hasher = hasher_init;
         hasher.update(contents.items[contents_start..][0..contents_len]);
         hasher.final(bin_digest);
-    }
-
-    fn hashFlagsAndPath(m: *const Manifest, off: File.Offset, hasher: *Hasher) void {
-        hasher.update(off.flagsAndPath(m.contents.items));
     }
 };
 

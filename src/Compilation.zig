@@ -5530,7 +5530,7 @@ fn updateCObject(comp: *Compilation, c_object: *CObject, c_obj_prog_node: std.Pr
                     return comp.failCObj(c_object, "checking cache failed: {f}", .{diagnostic.fmt(&man)});
                 },
             };
-            log.debug("C object cache {f}", .{status.fmt(&man)});
+            log.debug("C object {q} cache {f}", .{ c_object.src.src_path, status.fmt(&man) });
             if (status == .hit) break :d man.hitDigestHex();
         }
         var argv: std.array_list.Managed([]const u8) = .init(gpa);
