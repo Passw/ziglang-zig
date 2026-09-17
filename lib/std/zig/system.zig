@@ -374,10 +374,10 @@ pub fn resolveTargetQuery(io: Io, query: Target.Query) DetectError!Target {
     }
 
     var cpu = switch (query.cpu_model) {
-        .native => detectNativeCpuAndFeatures(io, query_cpu_arch, os, query),
+        .native => detectNativeCpuAndFeatures(io, query_cpu_arch),
         .baseline => Target.Cpu.baseline(query_cpu_arch, os),
         .determined_by_arch_os => if (query.cpu_arch == null)
-            detectNativeCpuAndFeatures(io, query_cpu_arch, os, query)
+            detectNativeCpuAndFeatures(io, query_cpu_arch)
         else
             Target.Cpu.baseline(query_cpu_arch, os),
         .explicit => |model| model.toCpu(query_cpu_arch),
@@ -535,13 +535,13 @@ fn updateCpuFeatures(
     set.removeFeatureSet(sub_set);
 }
 
-fn detectNativeCpuAndFeatures(io: Io, cpu_arch: Target.Cpu.Arch, os: Target.Os, query: Target.Query) ?Target.Cpu {
+fn detectNativeCpuAndFeatures(io: Io, cpu_arch: Target.Cpu.Arch) ?Target.Cpu {
     // Here we switch on a comptime value rather than `cpu_arch`. This is valid because `cpu_arch`,
     // although it is a runtime value, is guaranteed to be one of the architectures in the set
     // of the respective switch prong.
     switch (builtin.cpu.arch) {
-        .loongarch32, .loongarch64 => return @import("system/loongarch.zig").detectNativeCpuAndFeatures(cpu_arch, os, query),
-        .x86_64, .x86 => return @import("system/x86.zig").detectNativeCpuAndFeatures(cpu_arch, os, query),
+        .loongarch32, .loongarch64 => return @import("system/loongarch.zig").detectNativeCpuAndFeatures(cpu_arch),
+        .x86_64, .x86 => return @import("system/x86.zig").detectNativeCpuAndFeatures(cpu_arch),
         else => {},
     }
 
