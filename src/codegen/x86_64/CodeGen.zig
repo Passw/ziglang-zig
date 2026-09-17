@@ -1224,9 +1224,7 @@ fn formatWipMir(data: FormatWipMirData, w: *Writer) Writer.Error!void {
             .pseudo_dbg_enter_block_none,
             .pseudo_dbg_leave_block_none,
             .pseudo_dbg_end_none,
-            .pseudo_dbg_arg_none,
             .pseudo_dbg_var_args_none,
-            .pseudo_dbg_var_none,
             .pseudo_dead_none,
             => {},
             .pseudo_dbg_line_stmt_line_column,
@@ -2318,39 +2316,32 @@ fn genMainBody(
             };
             defer zir_param_index += 1;
 
-            if (comptime_args.len > 0) switch (comptime_args.get(ip)[zir_param_index]) {
-                .none => {},
-                else => |comptime_arg| {
-                    try cg.mir_locals.append(cg.gpa, .{ .name = name, .type = ip.typeOf(comptime_arg) });
-                    _ = try cg.addInst(.{
-                        .tag = .pseudo,
-                        .ops = .pseudo_dbg_arg_val,
-                        .data = .{ .ip_index = comptime_arg },
-                    });
-                    continue;
+            const arg_ty: Type, const arg_val: ?Value = arg: switch (if (comptime_args.len > 0)
+                comptime_args.get(ip)[zir_param_index]
+            else
+                .none) {
+                else => |arg_val| .{ .fromInterned(ip.typeOf(arg_val)), .fromInterned(arg_val) },
+                .none => {
+                    const arg_ty: Type = .fromInterned(fn_info.param_types.get(ip)[fn_param_index]);
+                    fn_param_index += 1;
+                    break :arg .{ arg_ty, try arg_ty.onePossibleValue(pt) };
                 },
             };
-
-            const arg_ty = fn_info.param_types.get(ip)[fn_param_index];
-            try cg.mir_locals.append(cg.gpa, .{ .name = name, .type = arg_ty });
-            fn_param_index += 1;
-
-            if (air_arg_index == air_args_body.len) {
-                try cg.asmPseudo(.pseudo_dbg_arg_none);
+            try cg.mir_locals.append(cg.gpa, .{ .name = name, .type = arg_ty.toIntern() });
+            if (arg_val) |val| {
+                _ = try cg.addInst(.{
+                    .tag = .pseudo,
+                    .ops = .pseudo_dbg_arg_val,
+                    .data = .{ .ip_index = val.toIntern() },
+                });
                 continue;
             }
+
             const air_arg_inst = air_args_body[air_arg_index];
             const air_arg_data = cg.air.instructions.items(.data)[air_arg_index].arg;
-            if (air_arg_data.zir_param_index != zir_param_index) {
-                try cg.asmPseudo(.pseudo_dbg_arg_none);
-                continue;
-            }
             air_arg_index += 1;
-            try cg.genLocalDebugInfo(
-                .arg,
-                .fromInterned(arg_ty),
-                cg.getResolvedInstValue(air_arg_inst).short,
-            );
+            assert(air_arg_data.zir_param_index == zir_param_index);
+            try cg.genLocalDebugInfo(.arg, arg_ty, cg.getResolvedInstValue(air_arg_inst).short);
         }
         if (fn_info.is_var_args) try cg.asmPseudo(.pseudo_dbg_var_args_none);
     }
