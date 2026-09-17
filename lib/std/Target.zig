@@ -499,7 +499,10 @@ pub const Os = struct {
 
                             break :blk default_min;
                         },
-                        .android = 29,
+                        .android = switch (arch) {
+                            .riscv64 => 35,
+                            else => 29,
+                        },
                     },
                 },
                 .rtems => .{
