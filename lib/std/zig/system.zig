@@ -995,7 +995,7 @@ fn detectAbiAndDynamicLinker(io: Io, cpu: Target.Cpu, os: Target.Os, query: Targ
         // will then look for a dynamic linker with a matching path on the system and pick the ABI
         // we associated it with here.
         .arch_os_abi => for (all_abis) |abi| {
-            const ld = Target.DynamicLinker.standard(cpu, os, abi);
+            const ld = Target.DynamicLinker.standard(cpu, os.tag, abi);
 
             // Does the generated target triple actually have a standard dynamic linker path?
             if (ld.get() == null) continue;
@@ -1141,7 +1141,7 @@ fn defaultAbiAndDynamicLinker(cpu: Target.Cpu, os: Target.Os, query: Target.Quer
         .os = os,
         .abi = abi,
         .ofmt = query.ofmt orelse Target.ObjectFormat.default(os.tag, cpu.arch),
-        .dynamic_linker = query.dynamic_linker orelse .standard(cpu, os, abi),
+        .dynamic_linker = query.dynamic_linker orelse .standard(cpu, os.tag, abi),
     };
 }
 
