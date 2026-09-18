@@ -180614,6 +180614,7 @@ fn airAtomicStore(self: *CodeGen, inst: Air.Inst.Index, order: std.lang.AtomicOr
 fn airMemset(self: *CodeGen, inst: Air.Inst.Index, safety: bool) !void {
     const pt = self.pt;
     const zcu = pt.zcu;
+    const ip = &zcu.intern_pool;
     const bin_op = self.air.instructions.items(.data)[@backingInt(inst)].bin_op;
 
     result: {
@@ -180645,29 +180646,32 @@ fn airMemset(self: *CodeGen, inst: Air.Inst.Index, safety: bool) !void {
 
         const elem_abi_size: u31 = @intCast(elem_ty.abiSize(zcu));
 
-        if (elem_abi_size == 1) {
-            const dst_ptr: MCValue = switch (dst_ty.ptrSize(zcu)) {
-                .slice => switch (dst) {
-                    .register_pair => |dst_regs| .{ .register = dst_regs[0] },
-                    else => dst,
+        const dst_ptr: MCValue, const len: MCValue = switch (dst_ty.ptrSize(zcu)) {
+            .slice => switch (dst) {
+                else => .{ dst, dst.address().offset(8).deref() },
+                .register_pair => |dst_regs| .{
+                    .{ .register = dst_regs[0] },
+                    .{ .register = dst_regs[1] },
                 },
-                .one => dst,
-                .c, .many => unreachable,
-            };
-            const len: MCValue = switch (dst_ty.ptrSize(zcu)) {
-                .slice => switch (dst) {
-                    .register_pair => |dst_regs| .{ .register = dst_regs[1] },
-                    else => dst.address().offset(8).deref(),
+                .load_uav => |uav| switch (ip.indexToKey(uav.val)) {
+                    else => unreachable,
+                    .undef => .{ .undef, .undef },
+                    .slice => |slice| .{
+                        try self.lowerValue(.fromInterned(slice.ptr)),
+                        try self.lowerValue(.fromInterned(slice.len)),
+                    },
                 },
-                .one => .{ .immediate = dst_ty.childType(zcu).arrayLen(zcu) },
-                .c, .many => unreachable,
-            };
-            const len_lock: ?RegisterLock = switch (len) {
-                .register => |reg| self.register_manager.lockRegAssumeUnused(reg),
-                else => null,
-            };
-            defer if (len_lock) |lock| self.register_manager.unlockReg(lock);
+            },
+            .one => .{ dst, .{ .immediate = dst_ty.childType(zcu).arrayLen(zcu) } },
+            .c, .many => unreachable,
+        };
+        const len_lock: ?RegisterLock = switch (len) {
+            .register => |reg| self.register_manager.lockRegAssumeUnused(reg),
+            else => null,
+        };
+        defer if (len_lock) |lock| self.register_manager.unlockReg(lock);
 
+        if (elem_abi_size == 1) {
             try self.genInlineMemset(dst_ptr, src_val, len, .{ .safety = safety });
             break :result;
         }
@@ -180675,25 +180679,16 @@ fn airMemset(self: *CodeGen, inst: Air.Inst.Index, safety: bool) !void {
         // Store the first element, and then rely on memcpy copying forwards.
         // Length zero requires a runtime check - so we handle arrays specially
         // here to elide it.
-        switch (dst_ty.ptrSize(zcu)) {
-            .slice => {
+        switch (len) {
+            else => {
                 const slice_ptr_ty = dst_ty.slicePtrFieldType(zcu);
-
-                const dst_ptr: MCValue = switch (dst) {
-                    .register_pair => |dst_regs| .{ .register = dst_regs[0] },
-                    else => dst,
-                };
-                const len: MCValue = switch (dst) {
-                    .register_pair => |dst_regs| .{ .register = dst_regs[1] },
-                    else => dst.address().offset(8).deref(),
-                };
 
                 // Used to store the number of elements for comparison.
                 // After comparison, updated to store number of bytes needed to copy.
                 const len_reg = try self.register_manager.allocReg(null, abi.RegisterClass.gp);
                 const len_mcv: MCValue = .{ .register = len_reg };
-                const len_lock = self.register_manager.lockRegAssumeUnused(len_reg);
-                defer self.register_manager.unlockReg(len_lock);
+                const len_reg_lock = self.register_manager.lockRegAssumeUnused(len_reg);
+                defer self.register_manager.unlockReg(len_reg_lock);
 
                 try self.spillEflagsIfOccupied();
                 try self.genSetReg(len_reg, .usize, len, .{});
@@ -180725,12 +180720,10 @@ fn airMemset(self: *CodeGen, inst: Air.Inst.Index, safety: bool) !void {
 
                 self.performReloc(skip_reloc);
             },
-            .one => {
+            .immediate => |len_imm| {
                 const elem_ptr_ty = try pt.singleMutPtrType(elem_ty);
 
-                const len = dst_ty.childType(zcu).arrayLen(zcu);
-
-                assert(len != 0); // prevented by Sema
+                assert(len_imm != 0); // prevented by Sema
                 try self.store(elem_ptr_ty, dst, src_val, .{ .safety = safety });
 
                 const second_elem_ptr_reg =
@@ -180745,10 +180738,9 @@ fn airMemset(self: *CodeGen, inst: Air.Inst.Index, safety: bool) !void {
                     .off = elem_abi_size,
                 } }, .{});
 
-                const bytes_to_copy: MCValue = .{ .immediate = elem_abi_size * (len - 1) };
+                const bytes_to_copy: MCValue = .{ .immediate = elem_abi_size * (len_imm - 1) };
                 try self.genInlineMemcpy(second_elem_ptr_mcv, dst, bytes_to_copy, .{ .no_alias = false });
             },
-            .c, .many => unreachable,
         }
     }
     return self.finishAir(inst, .unreach, .{ bin_op.lhs, bin_op.rhs, .none });
@@ -182771,17 +182763,27 @@ const Temp = struct {
                 assert(limb_index == 0);
                 new_temp_index.tracking(cg).* = .init(.{ .lea_nav = nav });
             },
-            .load_uav => |uav| {
-                const new_reg =
-                    try cg.register_manager.allocReg(new_temp_index.toIndex(), abi.RegisterClass.gp);
-                new_temp_index.tracking(cg).* = .init(.{ .register = new_reg });
-                try cg.asmRegisterMemory(.{ ._, .mov }, new_reg.to64(), .{
-                    .base = .{ .uav = uav },
-                    .mod = .{ .rm = .{
-                        .size = .qword,
-                        .disp = @as(u31, limb_index) * 8,
-                    } },
-                });
+            .load_uav => |uav| switch (cg.pt.zcu.intern_pool.indexToKey(uav.val)) {
+                else => {
+                    const new_reg = try cg.register_manager.allocReg(
+                        new_temp_index.toIndex(),
+                        abi.RegisterClass.gp,
+                    );
+                    new_temp_index.tracking(cg).* = .init(.{ .register = new_reg });
+                    try cg.asmRegisterMemory(.{ ._, .mov }, new_reg.to64(), .{
+                        .base = .{ .uav = uav },
+                        .mod = .{ .rm = .{
+                            .size = .qword,
+                            .disp = @as(u31, limb_index) * 8,
+                        } },
+                    });
+                },
+                .slice => |slice| new_temp_index.tracking(cg).* =
+                    .init(try cg.lowerValue(.fromInterned(switch (limb_index) {
+                        else => unreachable,
+                        0 => slice.ptr,
+                        1 => slice.len,
+                    }))),
             },
             .lea_uav => |uav| {
                 assert(limb_index == 0);
@@ -182870,15 +182872,11 @@ const Temp = struct {
     fn toLimb(temp: *Temp, limb_ty: Type, limb_index: u28, cg: *CodeGen) InnerError!void {
         switch (temp.unwrap(cg)) {
             .ref => {},
-            .temp => |temp_index| {
+            .temp => |temp_index| inplace: {
                 const temp_tracking = temp_index.tracking(cg);
                 switch (temp_tracking.short) {
-                    else => {},
-                    .register, .lea_frame, .lea_nav, .lea_uav, .lea_lazy_sym => {
-                        assert(limb_index == 0);
-                        cg.temp_type[@backingInt(temp_index)] = limb_ty;
-                        return;
-                    },
+                    else => break :inplace,
+                    .register, .lea_frame, .lea_nav, .lea_uav, .lea_lazy_sym => assert(limb_index == 0),
                     .register_pair => |regs| {
                         switch (temp_tracking.long) {
                             .none, .reserved_frame => {},
@@ -182888,8 +182886,6 @@ const Temp = struct {
                         for (regs, 0..) |reg, reg_index| if (reg_index != limb_index)
                             cg.register_manager.freeReg(reg);
                         temp_tracking.* = .init(.{ .register = regs[limb_index] });
-                        cg.temp_type[@backingInt(temp_index)] = limb_ty;
-                        return;
                     },
                     .load_frame => |frame_addr| if (!frame_addr.index.isNamed()) {
                         assert(std.meta.eql(temp_tracking.long.load_frame, frame_addr));
@@ -182897,10 +182893,19 @@ const Temp = struct {
                             .index = frame_addr.index,
                             .off = frame_addr.off + @as(u31, limb_index) * 8,
                         } });
-                        cg.temp_type[@backingInt(temp_index)] = limb_ty;
-                        return;
+                    },
+                    .load_uav => |uav| switch (cg.pt.zcu.intern_pool.indexToKey(uav.val)) {
+                        else => break :inplace,
+                        .slice => |slice| temp_tracking.* =
+                            .init(try cg.lowerValue(.fromInterned(switch (limb_index) {
+                                else => unreachable,
+                                0 => slice.ptr,
+                                1 => slice.len,
+                            }))),
                     },
                 }
+                cg.temp_type[@backingInt(temp_index)] = limb_ty;
+                return;
             },
             .err_ret_trace => unreachable,
         }
