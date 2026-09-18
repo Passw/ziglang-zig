@@ -180695,6 +180695,7 @@ fn airMemset(self: *CodeGen, inst: Air.Inst.Index, safety: bool) !void {
                 const len_lock = self.register_manager.lockRegAssumeUnused(len_reg);
                 defer self.register_manager.unlockReg(len_lock);
 
+                try self.spillEflagsIfOccupied();
                 try self.genSetReg(len_reg, .usize, len, .{});
                 try self.asmRegisterRegister(.{ ._, .@"test" }, len_reg, len_reg);
 
