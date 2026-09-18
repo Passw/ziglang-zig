@@ -439,10 +439,9 @@ pub fn addOptionPath(options: *Options, name: []const u8, path: LazyPath) void {
     path.addStepDependencies(&options.step);
 }
 
-/// The added option has type `[]const u8` and value of the provided path.
-/// This interface treats the resolved path string as pure data, meaning it
-/// does not track anything about the meaning or contents of this path, and
-/// therefore also does not create any related dependencies.
+/// The added option has type `[]const u8` and value of the provided path. The resolved path is interpreted as
+/// a string without tracking anything about the meaning or contents, and therefore may be a file, directory,
+/// not exist, or even be an invalid path, and likewise does not create any file system or `Step` dependencies.
 ///
 /// See also:
 /// * `addOptionPath`
