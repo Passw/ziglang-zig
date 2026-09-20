@@ -424,6 +424,7 @@ pub fn Modulus(comptime max_bits: comptime_int) type {
             return self.limbs_count() * t_bits - self.leading;
         }
 
+        /// Returns the encoded length, in bytes.
         pub fn encodedLen(self: Self) usize {
             return @divCeil(self.bits(), 8);
         }
@@ -491,6 +492,7 @@ pub fn Modulus(comptime max_bits: comptime_int) type {
             return self.v.toBytes(bytes, endian);
         }
 
+        /// Returns the modulus as an integer
         pub fn toUint(self: Self) FeUint {
             return self.v;
         }
