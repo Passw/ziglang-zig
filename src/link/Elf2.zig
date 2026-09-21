@@ -6228,17 +6228,9 @@ fn loadInputInner(elf: *Elf, input: link.Input) (Error || error{BadMagic})!void 
         },
         .res => unreachable,
         .dso => |dso| {
-            if (dso.exact_name) |exact_name| {
-                // This means the path field is still valid, but the NEEDED entry must be set to
-                // exactly the `exact_name` string.
-                std.debug.panic("load dso_exact {q}", .{exact_name});
-                if (elf.shndx.dynamic != .UNDEF) {
-                    try elf.needed.put(elf.base.comp.gpa, try elf.string(.dynstr, exact_name), {});
-                }
-            }
             try elf.needed.ensureUnusedCapacity(elf.base.comp.gpa, 1);
             var fr = dso.file.reader(io, &buf);
-            elf.loadDso(dso.path, &fr) catch |err| switch (err) {
+            elf.loadDso(dso.path, dso.fallback_soname, &fr) catch |err| switch (err) {
                 else => |e| return e,
                 error.EndOfStream => return diags.failParse(dso.path, "unexpected eof", .{}),
                 error.AccessDenied, error.Unexpected, error.Unseekable => |e| return diags.fail(
@@ -6860,7 +6852,12 @@ fn populateArchiveMemberName(elf: *Elf, member_ar_hdr: *std.elf.ar_hdr, member_n
     @memcpy(dest_slice[0 .. dest_slice.len - 2], member_name);
     @memcpy(dest_slice[dest_slice.len - 2 ..], "/\n"); // yes, the terminator is weird
 }
-fn loadDso(elf: *Elf, path: std.Build.Cache.Path, fr: *Io.File.Reader) (LoadParseInputError || error{BadMagic})!void {
+fn loadDso(
+    elf: *Elf,
+    path: std.Build.Cache.Path,
+    fallback_soname: link.Input.Dso.FallbackSoname,
+    fr: *Io.File.Reader,
+) (LoadParseInputError || error{BadMagic})!void {
     const comp = elf.base.comp;
     const gpa = comp.gpa;
     const diags = &comp.link_diags;
@@ -6956,7 +6953,10 @@ fn loadDso(elf: *Elf, path: std.Build.Cache.Path, fr: *Io.File.Reader) (LoadPars
                     }
                     break std.mem.sliceTo(dynstr[@intCast(val)..], 0);
                 }
-            } else std.fs.path.basename(path.sub_path);
+            } else switch (fallback_soname) {
+                .basename => std.fs.path.basename(path.sub_path),
+                .full_path => try path.toString(comp.arena),
+            };
             try elf.needed.put(gpa, try elf.string(.dynstr, soname), {});
 
             // Scan the symbol table and populate `elf.dso_globals`.

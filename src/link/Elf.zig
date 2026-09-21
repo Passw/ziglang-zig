@@ -735,7 +735,7 @@ pub fn loadInput(self: *Elf, input: link.Input) !void {
         } else {
             try parseArchive(gpa, io, diags, &self.file_handles, &self.files, target, debug_fmt_strip, default_sym_version, &self.objects, obj);
         },
-        .dso => |dso| try parseDso(gpa, io, diags, dso, &self.shared_objects, &self.files, target),
+        .dso => |dso| try parseDso(gpa, comp.arena, io, diags, dso, &self.shared_objects, &self.files, target),
     }
 }
 
@@ -1106,6 +1106,7 @@ fn parseArchive(
 
 fn parseDso(
     gpa: Allocator,
+    arena: Allocator,
     io: Io,
     diags: *Diags,
     dso: link.Input.Dso,
@@ -1118,13 +1119,16 @@ fn parseDso(
 
     const handle = dso.file;
 
-    if (dso.exact_name != null) @panic("TODO");
-
     const stat: Stat = .init(try handle.stat(io));
     var header = try SharedObject.parseHeader(gpa, io, diags, dso.path, handle, stat, target);
     defer header.deinit(gpa);
 
-    const soname = header.soname() orelse dso.path.basename();
+    const fallback_soname: []const u8 = switch (dso.fallback_soname) {
+        .full_path => try dso.path.toString(arena),
+        .basename => fs.path.basename(dso.path.sub_path),
+    };
+
+    const soname = header.soname() orelse fallback_soname;
 
     const gop = try shared_objects.getOrPut(gpa, soname);
     if (gop.found_existing) return;
@@ -1156,6 +1160,7 @@ fn parseDso(
             .symbols_extra = .empty,
             .symbols_resolver = .empty,
             .output_symtab_ctx = .{},
+            .fallback_soname = fallback_soname,
         },
     });
     const so = fileLookup(files.*, index, null).?.shared_object;

@@ -1154,6 +1154,13 @@ fn elfLink(lld: *Lld, arena: Allocator) !void {
             argv.appendAssumeCapacity("--as-needed");
             var as_needed = true;
 
+            // When we have a DSO input, in order to trick LLD into putting the basename in its
+            // `DT_NEEDED` entry while still allowing us to tell it the exact path to the shared
+            // object, we pass it on the CLI as "-l:/absolute/path/to/libfoo.so". This will treat
+            // the given path not actually as an absolute path, but as relative to the library
+            // search path, so the root directory must therefore be the only library search path.
+            try argv.append("-L/");
+
             for (base.comp.link_inputs) |link_input| switch (link_input) {
                 .res => unreachable, // Windows-only
                 .object, .archive => continue,
@@ -1171,24 +1178,16 @@ fn elfLink(lld: *Lld, arena: Allocator) !void {
                         },
                     }
 
-                    if (dso.exact_name) |exact_name| {
-                        // LLD does not have a way to specify full path to the DSO while also specifying
-                        // the exact value for NEEDED, so we have to use a combination of -L and -l args.
-                        assert(mem.endsWith(u8, dso.path.sub_path, exact_name));
-                        const truncated_path: Cache.Path = .{
-                            .root_dir = dso.path.root_dir,
-                            .sub_path = dso.path.sub_path[0 .. dso.path.sub_path.len - exact_name.len],
-                        };
-                        try argv.ensureUnusedCapacity(3);
-                        argv.appendAssumeCapacity("-L");
-                        argv.appendAssumeCapacity(try truncated_path.toString(arena));
-                        argv.appendAssumeCapacity(try arena.print("-l:{s}", .{exact_name}));
-                    } else {
-                        // By this time, we depend on these libs being dynamically linked
-                        // libraries and not static libraries (the check for that needs to be earlier),
-                        // but they could be full paths to .so files, in which case we
-                        // want to avoid prepending "-l".
-                        argv.appendAssumeCapacity(try dso.path.toString(arena));
+                    // By this time, we depend on these libs being dynamically linked libraries and
+                    // not static libraries (the check for that needs to be earlier), but they could
+                    // be full file paths, in which case we don't want to use the "-l:" strategy.
+                    switch (dso.fallback_soname) {
+                        .basename => try argv.append(try arena.print("-l:{s}", .{try fs.path.resolve(arena, &.{
+                            comp.dirs.cwd,
+                            dso.path.root_dir.path orelse ".",
+                            dso.path.sub_path,
+                        })})),
+                        .full_path => try argv.append(try dso.path.toString(arena)),
                     }
                 },
             };

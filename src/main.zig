@@ -1351,6 +1351,7 @@ fn buildOutputType(
                                 .search_strategy = lib_search_strategy,
                                 .allow_so_scripts = allow_so_scripts,
                             },
+                            .name_done = false,
                         } });
                     } else if (mem.eql(u8, arg, "--needed-library") or
                         mem.eql(u8, arg, "-needed-l") or
@@ -1366,6 +1367,7 @@ fn buildOutputType(
                                 .search_strategy = lib_search_strategy,
                                 .allow_so_scripts = allow_so_scripts,
                             },
+                            .name_done = false,
                         } });
                     } else if (mem.eql(u8, arg, "-weak_library") or mem.eql(u8, arg, "-weak-l")) {
                         try create_module.cli_link_inputs.append(arena, .{ .name_query = .{
@@ -1377,6 +1379,7 @@ fn buildOutputType(
                                 .search_strategy = lib_search_strategy,
                                 .allow_so_scripts = allow_so_scripts,
                             },
+                            .name_done = false,
                         } });
                     } else if (mem.eql(u8, arg, "-D")) {
                         try cc_argv.appendSlice(arena, &.{ arg, args_iter.nextOrFatal() });
@@ -1839,6 +1842,7 @@ fn buildOutputType(
                                 .search_strategy = lib_search_strategy,
                                 .allow_so_scripts = allow_so_scripts,
                             },
+                            .name_done = false,
                         } });
                     } else if (mem.cutPrefix(u8, arg, "-needed-l")) |name| {
                         try create_module.cli_link_inputs.append(arena, .{ .name_query = .{
@@ -1850,6 +1854,7 @@ fn buildOutputType(
                                 .search_strategy = lib_search_strategy,
                                 .allow_so_scripts = allow_so_scripts,
                             },
+                            .name_done = false,
                         } });
                     } else if (mem.cutPrefix(u8, arg, "-weak-l")) |name| {
                         try create_module.cli_link_inputs.append(arena, .{ .name_query = .{
@@ -1861,6 +1866,7 @@ fn buildOutputType(
                                 .search_strategy = lib_search_strategy,
                                 .allow_so_scripts = allow_so_scripts,
                             },
+                            .name_done = false,
                         } });
                     } else if (mem.startsWith(u8, arg, "-D")) {
                         try cc_argv.append(arena, arg);
@@ -2095,8 +2101,8 @@ fn buildOutputType(
                                     .preferred_mode = lib_preferred_mode,
                                     .search_strategy = lib_search_strategy,
                                     .allow_so_scripts = allow_so_scripts,
-                                    .name_done = true,
                                 },
+                                .name_done = true,
                             } });
                         } else {
                             const compiler_rt_classification = target_util.classifyCompilerRtLibName(it.only_arg);
@@ -2122,6 +2128,7 @@ fn buildOutputType(
                                         .search_strategy = lib_search_strategy,
                                         .allow_so_scripts = allow_so_scripts,
                                     },
+                                    .name_done = false,
                                 } });
                             }
                         }
@@ -2552,6 +2559,7 @@ fn buildOutputType(
                             .search_strategy = lib_search_strategy,
                             .allow_so_scripts = allow_so_scripts,
                         },
+                        .name_done = false,
                     } }),
                     .weak_framework => try create_module.frameworks.put(arena, it.only_arg, .{ .weak = true }),
                     .headerpad_max_install_names => headerpad_max_install_names = true,
@@ -2921,6 +2929,7 @@ fn buildOutputType(
                             .search_strategy = lib_search_strategy,
                             .allow_so_scripts = allow_so_scripts,
                         },
+                        .name_done = false,
                     } });
                 } else if (mem.cutPrefix(u8, arg, "-weak-l")) |rest| {
                     try create_module.cli_link_inputs.append(arena, .{ .name_query = .{
@@ -2932,6 +2941,7 @@ fn buildOutputType(
                             .search_strategy = lib_search_strategy,
                             .allow_so_scripts = allow_so_scripts,
                         },
+                        .name_done = false,
                     } });
                 } else if (mem.eql(u8, arg, "-weak_library")) {
                     try create_module.cli_link_inputs.append(arena, .{ .name_query = .{
@@ -2943,6 +2953,7 @@ fn buildOutputType(
                             .search_strategy = lib_search_strategy,
                             .allow_so_scripts = allow_so_scripts,
                         },
+                        .name_done = false,
                     } });
                 } else if (mem.eql(u8, arg, "-compatibility_version")) {
                     const compat_version = linker_args_it.nextOrFatal();
@@ -4181,6 +4192,10 @@ fn createModule(
 
                 if (fs.path.isAbsolute(lib_name)) {
                     fatal("cannot use absolute path as a system library: {s}", .{lib_name});
+                }
+
+                if (!nq.name_done and std.mem.findScalar(u8, nq.name, '/') != null) {
+                    fatal("cannot use path separator in system library name: {s}", .{lib_name});
                 }
 
                 unresolved_link_inputs.appendAssumeCapacity(cli_link_input);

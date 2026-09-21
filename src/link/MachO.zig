@@ -655,11 +655,7 @@ fn dumpArgv(self: *MachO, comp: *Compilation) !void {
             .object, .archive => |obj| try argv.append(try obj.path.toString(arena)),
             .res => |res| try argv.append(try res.path.toString(arena)),
             .dso => |dso| {
-                if (dso.exact_name) |exact_name| {
-                    try argv.appendSlice(&.{ "-l", try arena.print(":{s}", .{exact_name}) });
-                } else {
-                    try argv.append(try dso.path.toString(arena));
-                }
+                try argv.append(try dso.path.toString(arena));
             },
         };
 
@@ -789,11 +785,7 @@ fn dumpArgv(self: *MachO, comp: *Compilation) !void {
                 } else {
                     argv.appendAssumeCapacity("-l");
                 }
-                if (dso.exact_name) |exact_name| {
-                    argv.appendAssumeCapacity(try arena.print(":{s}", .{exact_name}));
-                } else {
-                    argv.appendAssumeCapacity(try dso.path.toString(arena));
-                }
+                argv.appendAssumeCapacity(try dso.path.toString(arena));
             },
         };
 

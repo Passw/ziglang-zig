@@ -1819,15 +1819,23 @@ pub const UnresolvedInput = union(enum) {
     path_query: PathQuery,
     /// Strings that come from GNU ld scripts. Is it a filename? Is it a path?
     /// Who knows! Fuck around and find out.
-    ambiguous_name: NameQuery,
+    ambiguous_name: AmbiguousNameQuery,
 
     pub const NameQuery = struct {
         name: []const u8,
         query: Query,
+        // Corresponds to GNU ld `-l :path/to/filename`, meaning that `name` is a path relative to
+        // the library search path rather than just a library name.
+        name_done: bool,
     };
 
     pub const PathQuery = struct {
         path: Path,
+        query: Query,
+    };
+
+    pub const AmbiguousNameQuery = struct {
+        name: []const u8,
         query: Query,
     };
 
@@ -1838,14 +1846,6 @@ pub const UnresolvedInput = union(enum) {
         must_link: bool = false,
         hidden: bool = false,
         allow_so_scripts: bool = false,
-        // Corresponds to GNU ld `-l :path/to/filename`:
-        // * No extra rpaths.
-        // * NEEDED entry should be exactly the string
-        //   after the colon. No file system paths prepended.
-        // * The DSO still must be found at compile/link
-        //   time and its entries used to resolve symbols.
-        // CGo compilation depends on this.
-        name_done: bool = false,
         preferred_mode: std.lang.LinkMode,
         search_strategy: SearchStrategy,
 
@@ -1891,15 +1891,9 @@ pub const Input = union(enum) {
         needed: bool,
         weak: bool,
         reexport: bool,
-        /// Does not include any ":" prefix. Indicates that this string, exactly, should go into the NEEDED
-        /// entry, without affecting any rpaths.
-        exact_name: ?[]const u8,
-    };
+        fallback_soname: FallbackSoname,
 
-    pub const DsoExact = struct {
-        /// Includes the ":" prefix. This is intended to be put into the DSO
-        /// section verbatim with no corresponding rpaths.
-        name: []const u8,
+        pub const FallbackSoname = enum { basename, full_path };
     };
 
     pub fn path(input: Input) Path {
@@ -1950,7 +1944,7 @@ pub fn hashInputs(man: *Cache.Manifest, link_inputs: []const Input) !void {
                 man.hash.add(dso.needed);
                 man.hash.add(dso.weak);
                 man.hash.add(dso.reexport);
-                man.hash.addOptionalBytes(dso.exact_name);
+                man.hash.add(dso.fallback_soname);
             },
         }
     }
@@ -2001,7 +1995,7 @@ pub fn resolveInputs(
             .name_query => |name_query| {
                 const query = name_query.query;
 
-                // Checked in the first pass above while looking for libc libraries.
+                // Checked in the first pass in `main.zig` while looking for libc libraries.
                 assert(!fs.path.isAbsolute(name_query.name));
 
                 checked_paths.clearRetainingCapacity();
@@ -2229,7 +2223,7 @@ fn resolveLibInput(
 
     const lib_name = name_query.name;
 
-    if (target.os.tag.isDarwin() and link_mode == .dynamic and !name_query.query.name_done) tbd: {
+    if (target.os.tag.isDarwin() and link_mode == .dynamic and !name_query.name_done) tbd: {
         // Prefer .tbd over .dylib.
         const test_path: Path = .{
             .root_dir = lib_directory,
@@ -2241,13 +2235,22 @@ fn resolveLibInput(
             else => |e| fatal("searching for tbd library {qf}: {t}", .{ test_path, e }),
         };
         errdefer file.close(io);
-        return finishResolveLibInput(io, resolved_inputs, archive_dedup, test_path, file, link_mode, name_query.query);
+        return finishResolveLibInput(
+            io,
+            resolved_inputs,
+            archive_dedup,
+            test_path,
+            file,
+            link_mode,
+            name_query.query,
+            .basename,
+        );
     }
 
     {
         const test_path: Path = .{
             .root_dir = lib_directory,
-            .sub_path = if (name_query.query.name_done) lib_name else try std.fmt.allocPrint(arena, "{s}{s}{s}", .{
+            .sub_path = if (name_query.name_done) lib_name else try std.fmt.allocPrint(arena, "{s}{s}{s}", .{
                 target.libPrefix(),
                 lib_name,
                 switch (link_mode) {
@@ -2260,7 +2263,7 @@ fn resolveLibInput(
         switch (try resolvePathInputLib(gpa, arena, io, unresolved_inputs, resolved_inputs, ld_script_bytes, archive_dedup, target, .{
             .path = test_path,
             .query = name_query.query,
-        }, link_mode, color)) {
+        }, link_mode, color, .basename)) {
             .no_match => {},
             .ok => return .ok,
         }
@@ -2268,7 +2271,7 @@ fn resolveLibInput(
 
     // In the case of Darwin, the main check will be .dylib, so here we
     // additionally check for .so files.
-    if (target.os.tag.isDarwin() and link_mode == .dynamic and !name_query.query.name_done) so: {
+    if (target.os.tag.isDarwin() and link_mode == .dynamic and !name_query.name_done) so: {
         const test_path: Path = .{
             .root_dir = lib_directory,
             .sub_path = try std.fmt.allocPrint(arena, "lib{s}.so", .{lib_name}),
@@ -2279,12 +2282,21 @@ fn resolveLibInput(
             else => |e| fatal("unable to search for so library {qf}: {t}", .{ test_path, e }),
         };
         errdefer file.close(io);
-        return finishResolveLibInput(io, resolved_inputs, archive_dedup, test_path, file, link_mode, name_query.query);
+        return finishResolveLibInput(
+            io,
+            resolved_inputs,
+            archive_dedup,
+            test_path,
+            file,
+            link_mode,
+            name_query.query,
+            .basename,
+        );
     }
 
     // In the case of MinGW, the main check will be .lib but we also need to
     // look for `libfoo.a`.
-    if (target.isMinGW() and link_mode == .static and !name_query.query.name_done) mingw: {
+    if (target.isMinGW() and link_mode == .static and !name_query.name_done) mingw: {
         const test_path: Path = .{
             .root_dir = lib_directory,
             .sub_path = try std.fmt.allocPrint(arena, "lib{s}.a", .{lib_name}),
@@ -2295,13 +2307,22 @@ fn resolveLibInput(
             else => |e| fatal("unable to search for static library {qf}: {t}", .{ test_path, e }),
         };
         errdefer file.close(io);
-        return finishResolveLibInput(io, resolved_inputs, archive_dedup, test_path, file, link_mode, name_query.query);
+        return finishResolveLibInput(
+            io,
+            resolved_inputs,
+            archive_dedup,
+            test_path,
+            file,
+            link_mode,
+            name_query.query,
+            .basename,
+        );
     }
 
     // In the case of OpenBSD, dynamic libraries are always versioned, without
     // unversioned symlinks. OpenBSD patches LLD to select the highest-versioned
     // shared library, and this code is intended to match that upstream behavior.
-    if (target.isOpenBSDLibC() and link_mode == .dynamic and !name_query.query.name_done) versioned: {
+    if (target.isOpenBSDLibC() and link_mode == .dynamic and !name_query.name_done) versioned: {
         const prefix = try std.fmt.allocPrint(arena, "lib{s}.so.", .{lib_name});
 
         var dir = lib_directory.handle.openDir(io, ".", .{ .iterate = true }) catch |err| switch (err) {
@@ -2347,7 +2368,7 @@ fn resolveLibInput(
             switch (try resolvePathInputLib(gpa, arena, io, unresolved_inputs, resolved_inputs, ld_script_bytes, archive_dedup, target, .{
                 .path = test_path,
                 .query = name_query.query,
-            }, link_mode, color)) {
+            }, link_mode, color, .basename)) {
                 .no_match => {},
                 .ok => return .ok,
             }
@@ -2388,6 +2409,7 @@ fn finishResolveLibInput(
     file: Io.File,
     link_mode: std.lang.LinkMode,
     query: UnresolvedInput.Query,
+    fallback_soname: Input.Dso.FallbackSoname,
 ) ResolveLibInputResult {
     switch (link_mode) {
         .static => {
@@ -2413,9 +2435,7 @@ fn finishResolveLibInput(
                 .needed = query.needed,
                 .weak = query.weak,
                 .reexport = query.reexport,
-                // Here we assume that `Path.sub_path` is usable as `exact_name`, however the code after this point
-                // has no business making that assumption.
-                .exact_name = if (query.name_done) path.sub_path else null,
+                .fallback_soname = fallback_soname,
             },
         }),
     }
@@ -2439,8 +2459,34 @@ fn resolvePathInput(
     color: std.zig.Color,
 ) Allocator.Error!?ResolveLibInputResult {
     switch (Compilation.classifyFileExt(pq.path.sub_path)) {
-        .static_library => return try resolvePathInputLib(gpa, arena, io, unresolved_inputs, resolved_inputs, ld_script_bytes, archive_dedup, target, pq, .static, color),
-        .shared_library => return try resolvePathInputLib(gpa, arena, io, unresolved_inputs, resolved_inputs, ld_script_bytes, archive_dedup, target, pq, .dynamic, color),
+        .static_library => return try resolvePathInputLib(
+            gpa,
+            arena,
+            io,
+            unresolved_inputs,
+            resolved_inputs,
+            ld_script_bytes,
+            archive_dedup,
+            target,
+            pq,
+            .static,
+            color,
+            .full_path,
+        ),
+        .shared_library => return try resolvePathInputLib(
+            gpa,
+            arena,
+            io,
+            unresolved_inputs,
+            resolved_inputs,
+            ld_script_bytes,
+            archive_dedup,
+            target,
+            pq,
+            .dynamic,
+            color,
+            .full_path,
+        ),
         .object => {
             var file = pq.path.root_dir.handle.openFile(io, pq.path.sub_path, .{}) catch |err|
                 fatal("failed to open object {f}: {t}", .{ pq.path, err });
@@ -2483,6 +2529,7 @@ fn resolvePathInputLib(
     pq: UnresolvedInput.PathQuery,
     link_mode: std.lang.LinkMode,
     color: std.zig.Color,
+    fallback_soname: Input.Dso.FallbackSoname,
 ) Allocator.Error!ResolveLibInputResult {
     try resolved_inputs.ensureUnusedCapacity(gpa, 1);
     try archive_dedup.ensureUnusedCapacity(gpa, 1);
@@ -2510,7 +2557,16 @@ fn resolvePathInputLib(
             mem.startsWith(u8, buf, std.elf.ARMAG_THIN))
         {
             // Appears to be an ELF or archive file.
-            return finishResolveLibInput(io, resolved_inputs, archive_dedup, test_path, file, link_mode, pq.query);
+            return finishResolveLibInput(
+                io,
+                resolved_inputs,
+                archive_dedup,
+                test_path,
+                file,
+                link_mode,
+                pq.query,
+                fallback_soname,
+            );
         }
         const stat = file.stat(io) catch |err|
             fatal("failed to stat {f}: {t}", .{ test_path, err });
@@ -2561,6 +2617,7 @@ fn resolvePathInputLib(
                 unresolved_inputs.appendAssumeCapacity(.{ .name_query = .{
                     .name = try arena.dupe(u8, arg.path["-l".len..]),
                     .query = query,
+                    .name_done = false,
                 } });
             } else {
                 unresolved_inputs.appendAssumeCapacity(.{ .ambiguous_name = .{
@@ -2578,7 +2635,16 @@ fn resolvePathInputLib(
         else => |e| fatal("unable to search for {t} library {f}: {t}", .{ link_mode, test_path, e }),
     };
     errdefer file.close(io);
-    return finishResolveLibInput(io, resolved_inputs, archive_dedup, test_path, file, link_mode, pq.query);
+    return finishResolveLibInput(
+        io,
+        resolved_inputs,
+        archive_dedup,
+        test_path,
+        file,
+        link_mode,
+        pq.query,
+        fallback_soname,
+    );
 }
 
 pub fn openObject(io: Io, path: Path, must_link: bool, hidden: bool) !Input.Object {
@@ -2601,7 +2667,7 @@ pub fn openDso(io: Io, path: Path, needed: bool, weak: bool, reexport: bool) !In
         .needed = needed,
         .weak = weak,
         .reexport = reexport,
-        .exact_name = null,
+        .fallback_soname = .full_path,
     };
 }
 
