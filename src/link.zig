@@ -995,11 +995,7 @@ pub const File = struct {
                 .{},
             ) catch |err| {
                 const diags = &base.comp.link_diags;
-                return diags.fail("failed to copy '{f}' to '{f}': {t}", .{
-                    std.fmt.alt(@as(Path, cached_pp_file_path), .formatEscapeChar),
-                    std.fmt.alt(@as(Path, emit), .formatEscapeChar),
-                    err,
-                });
+                return diags.fail("failed to copy {qf} to {qf}: {t}", .{ cached_pp_file_path, emit, err });
             };
             return;
         }
@@ -1740,7 +1736,7 @@ pub fn doZcuTask(comp: *Compilation, tid: Zcu.PerThread.Id, task: ZcuTask) void 
                 if (comp.bin_file) |lf| {
                     lf.updateLineNumber(pt, line_update.inst, line_update.line) catch |err| switch (err) {
                         error.OutOfMemory => diags.setAllocFailure(),
-                        else => |e| log.err("update line number failed: {s}", .{@errorName(e)}),
+                        else => |e| log.err("update line number failed: {t}", .{e}),
                     };
                 }
             }
@@ -1753,7 +1749,7 @@ pub fn doZcuTask(comp: *Compilation, tid: Zcu.PerThread.Id, task: ZcuTask) void 
                 if (comp.bin_file) |lf| {
                     lf.lostTracking(pt, ti) catch |err| switch (err) {
                         error.OutOfMemory => diags.setAllocFailure(),
-                        else => |e| log.err("lost tracking failed: {s}", .{@errorName(e)}),
+                        else => |e| log.err("lost tracking failed: {t}", .{e}),
                     };
                 }
             }
@@ -1845,6 +1841,14 @@ pub const UnresolvedInput = union(enum) {
         must_link: bool = false,
         hidden: bool = false,
         allow_so_scripts: bool = false,
+        // Corresponds to GNU ld `-l :path/to/filename`:
+        // * No extra rpaths.
+        // * NEEDED entry should be exactly the string
+        //   after the colon. No file system paths prepended.
+        // * The DSO still must be found at compile/link
+        //   time and its entries used to resolve symbols.
+        // CGo compilation depends on this.
+        name_done: bool = false,
         preferred_mode: std.lang.LinkMode,
         search_strategy: SearchStrategy,
 
@@ -2201,8 +2205,8 @@ pub fn resolveInputs(
     if (failed_libs.items.len > 0) {
         for (failed_libs.items) |f| {
             const searched_paths = if (f.checked_paths.len == 0) " none" else f.checked_paths;
-            std.log.err("unable to find {s} system library '{s}' using strategy '{s}'. searched paths:{s}", .{
-                @tagName(f.preferred_mode), f.name, @tagName(f.strategy), searched_paths,
+            std.log.err("unable to find {t} system library {q} using strategy {t}. searched paths:{s}", .{
+                f.preferred_mode, f.name, f.strategy, searched_paths,
             });
         }
         std.process.exit(1);
@@ -2237,7 +2241,7 @@ fn resolveLibInput(
 
     const lib_name = name_query.name;
 
-    if (target.os.tag.isDarwin() and link_mode == .dynamic) tbd: {
+    if (target.os.tag.isDarwin() and link_mode == .dynamic and !name_query.query.name_done) tbd: {
         // Prefer .tbd over .dylib.
         const test_path: Path = .{
             .root_dir = lib_directory,
@@ -2246,7 +2250,7 @@ fn resolveLibInput(
         try checked_paths.print(gpa, "\n  {f}", .{test_path});
         var file = test_path.root_dir.handle.openFile(io, test_path.sub_path, .{}) catch |err| switch (err) {
             error.FileNotFound => break :tbd,
-            else => |e| fatal("unable to search for tbd library '{f}': {s}", .{ test_path, @errorName(e) }),
+            else => |e| fatal("searching for tbd library {qf}: {t}", .{ test_path, e }),
         };
         errdefer file.close(io);
         return finishResolveLibInput(io, resolved_inputs, archive_dedup, test_path, file, link_mode, name_query.query);
@@ -2255,8 +2259,9 @@ fn resolveLibInput(
     {
         const test_path: Path = .{
             .root_dir = lib_directory,
-            .sub_path = try std.fmt.allocPrint(arena, "{s}{s}{s}", .{
-                target.libPrefix(), lib_name,
+            .sub_path = if (name_query.query.name_done) lib_name else try std.fmt.allocPrint(arena, "{s}{s}{s}", .{
+                target.libPrefix(),
+                lib_name,
                 switch (link_mode) {
                     .static => target.staticLibSuffix(),
                     .dynamic => target.dynamicLibSuffix(),
@@ -2275,7 +2280,7 @@ fn resolveLibInput(
 
     // In the case of Darwin, the main check will be .dylib, so here we
     // additionally check for .so files.
-    if (target.os.tag.isDarwin() and link_mode == .dynamic) so: {
+    if (target.os.tag.isDarwin() and link_mode == .dynamic and !name_query.query.name_done) so: {
         const test_path: Path = .{
             .root_dir = lib_directory,
             .sub_path = try std.fmt.allocPrint(arena, "lib{s}.so", .{lib_name}),
@@ -2283,9 +2288,7 @@ fn resolveLibInput(
         try checked_paths.print(gpa, "\n  {f}", .{test_path});
         var file = test_path.root_dir.handle.openFile(io, test_path.sub_path, .{}) catch |err| switch (err) {
             error.FileNotFound => break :so,
-            else => |e| fatal("unable to search for so library '{f}': {s}", .{
-                test_path, @errorName(e),
-            }),
+            else => |e| fatal("unable to search for so library {qf}: {t}", .{ test_path, e }),
         };
         errdefer file.close(io);
         return finishResolveLibInput(io, resolved_inputs, archive_dedup, test_path, file, link_mode, name_query.query);
@@ -2293,7 +2296,7 @@ fn resolveLibInput(
 
     // In the case of MinGW, the main check will be .lib but we also need to
     // look for `libfoo.a`.
-    if (target.isMinGW() and link_mode == .static) mingw: {
+    if (target.isMinGW() and link_mode == .static and !name_query.query.name_done) mingw: {
         const test_path: Path = .{
             .root_dir = lib_directory,
             .sub_path = try std.fmt.allocPrint(arena, "lib{s}.a", .{lib_name}),
@@ -2301,7 +2304,7 @@ fn resolveLibInput(
         try checked_paths.print(gpa, "\n  {f}", .{test_path});
         var file = test_path.root_dir.handle.openFile(io, test_path.sub_path, .{}) catch |err| switch (err) {
             error.FileNotFound => break :mingw,
-            else => |e| fatal("unable to search for static library '{f}': {s}", .{ test_path, @errorName(e) }),
+            else => |e| fatal("unable to search for static library {qf}: {t}", .{ test_path, e }),
         };
         errdefer file.close(io);
         return finishResolveLibInput(io, resolved_inputs, archive_dedup, test_path, file, link_mode, name_query.query);
@@ -2310,12 +2313,14 @@ fn resolveLibInput(
     // In the case of OpenBSD, dynamic libraries are always versioned, without
     // unversioned symlinks. OpenBSD patches LLD to select the highest-versioned
     // shared library, and this code is intended to match that upstream behavior.
-    if (target.isOpenBSDLibC() and link_mode == .dynamic) versioned: {
+    if (target.isOpenBSDLibC() and link_mode == .dynamic and !name_query.query.name_done) versioned: {
         const prefix = try std.fmt.allocPrint(arena, "lib{s}.so.", .{lib_name});
 
         var dir = lib_directory.handle.openDir(io, ".", .{ .iterate = true }) catch |err| switch (err) {
             error.NotDir, error.FileNotFound => break :versioned,
-            else => |e| fatal("unable to search for shared library '{s}.*': {s}", .{ prefix, @errorName(e) }),
+            else => |e| fatal("unable to search for shared library \"{f}.*\": {t}", .{
+                std.zig.fmtString(prefix), e,
+            }),
         };
         defer dir.close(io);
 
@@ -2325,7 +2330,7 @@ fn resolveLibInput(
 
         var iter = dir.iterate();
         while (iter.next(io) catch |err| {
-            fatal("unable to scan library directory '{s}'", .{@errorName(err)});
+            fatal("scanning library directory: {t}", .{err});
         }) |entry| {
             if (entry.kind != .file) continue;
             if (!std.mem.startsWith(u8, entry.name, prefix)) continue;
@@ -2445,7 +2450,7 @@ fn resolvePathInput(
         .shared_library => return try resolvePathInputLib(gpa, arena, io, unresolved_inputs, resolved_inputs, ld_script_bytes, archive_dedup, target, pq, .dynamic, color),
         .object => {
             var file = pq.path.root_dir.handle.openFile(io, pq.path.sub_path, .{}) catch |err|
-                fatal("failed to open object {f}: {s}", .{ pq.path, @errorName(err) });
+                fatal("failed to open object {f}: {t}", .{ pq.path, err });
             errdefer file.close(io);
             try resolved_inputs.append(gpa, .{ .object = .{
                 .path = pq.path,
@@ -2457,7 +2462,7 @@ fn resolvePathInput(
         },
         .res => {
             var file = pq.path.root_dir.handle.openFile(io, pq.path.sub_path, .{}) catch |err|
-                fatal("failed to open windows resource {f}: {s}", .{ pq.path, @errorName(err) });
+                fatal("failed to open windows resource {f}: {t}", .{ pq.path, err });
             errdefer file.close(io);
             try resolved_inputs.append(gpa, .{ .res = .{
                 .path = pq.path,
@@ -2498,14 +2503,14 @@ fn resolvePathInputLib(
     }) {
         var file = test_path.root_dir.handle.openFile(io, test_path.sub_path, .{}) catch |err| switch (err) {
             error.FileNotFound => return .no_match,
-            else => |e| fatal("unable to search for {t} library '{f}': {t}", .{
+            else => |e| fatal("unable to search for {t} library {qf}: {t}", .{
                 link_mode, std.fmt.alt(test_path, .formatEscapeChar), e,
             }),
         };
         errdefer file.close(io);
         try ld_script_bytes.resize(gpa, @max(std.elf.MAGIC.len, std.elf.ARMAG.len));
         const n = file.readPositionalAll(io, ld_script_bytes.items, 0) catch |err|
-            fatal("failed to read '{f}': {t}", .{ std.fmt.alt(test_path, .formatEscapeChar), err });
+            fatal("failed to read {qf}: {t}", .{ test_path, err });
         const buf = ld_script_bytes.items[0..n];
         if (mem.startsWith(u8, buf, std.elf.MAGIC) or
             mem.startsWith(u8, buf, std.elf.ARMAG) or
@@ -2577,9 +2582,7 @@ fn resolvePathInputLib(
 
     var file = test_path.root_dir.handle.openFile(io, test_path.sub_path, .{}) catch |err| switch (err) {
         error.FileNotFound => return .no_match,
-        else => |e| fatal("unable to search for {s} library {f}: {s}", .{
-            @tagName(link_mode), test_path, @errorName(e),
-        }),
+        else => |e| fatal("unable to search for {t} library {f}: {t}", .{ link_mode, test_path, e }),
     };
     errdefer file.close(io);
     return finishResolveLibInput(io, resolved_inputs, archive_dedup, test_path, file, link_mode, pq.query);

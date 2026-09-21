@@ -70,10 +70,6 @@ var stdin_buffer: [4096]u8 align(std.heap.page_size_min) = undefined;
 /// This can be global since stdout is a singleton.
 var stdout_buffer: [4096]u8 align(std.heap.page_size_min) = undefined;
 
-/// Shaming all the locations that inappropriately use an O(N) search algorithm.
-/// Please delete this and fix the compilation errors!
-pub const @"bad O(N)" = void;
-
 const normal_usage =
     \\Usage: zig [command] [options]
     \\
@@ -2083,12 +2079,24 @@ fn buildOutputType(
                         // We don't know whether this library is part of libc or libc++ until
                         // we resolve the target, so we simply append to the list for now.
                         if (mem.startsWith(u8, it.only_arg, ":")) {
-                            // -l :path/to/filename is used when callers need
-                            // more control over what's in the resulting
-                            // binary: no extra rpaths and DSO filename exactly
-                            // as provided. CGo compilation depends on this.
-                            try create_module.cli_link_inputs.append(arena, .{ .dso_exact = .{
-                                .name = it.only_arg,
+                            // -l :path/to/filename indicates:
+                            // * No extra rpaths.
+                            // * NEEDED entry should be exactly the string
+                            //   after the colon. No file system paths prepended.
+                            // * The DSO still must be found at compile/link
+                            //   time and its entries used to resolve symbols.
+                            // CGo compilation depends on this.
+                            try create_module.cli_link_inputs.append(arena, .{ .name_query = .{
+                                .name = it.only_arg[1..],
+                                .query = .{
+                                    .must_link = must_link,
+                                    .needed = needed,
+                                    .weak = false,
+                                    .preferred_mode = lib_preferred_mode,
+                                    .search_strategy = lib_search_strategy,
+                                    .allow_so_scripts = allow_so_scripts,
+                                    .name_done = true,
+                                },
                             } });
                         } else {
                             const compiler_rt_classification = target_util.classifyCompilerRtLibName(it.only_arg);
