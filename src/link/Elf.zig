@@ -722,7 +722,6 @@ pub fn loadInput(self: *Elf, input: link.Input) !void {
         const argv = &self.dump_argv_list;
         switch (input) {
             .res => unreachable,
-            .dso_exact => |dso_exact| try argv.appendSlice(gpa, &.{ "-l", dso_exact.name }),
             .object, .archive => |obj| try argv.append(gpa, try obj.path.toString(comp.arena)),
             .dso => |dso| try argv.append(gpa, try dso.path.toString(comp.arena)),
         }
@@ -730,7 +729,6 @@ pub fn loadInput(self: *Elf, input: link.Input) !void {
 
     switch (input) {
         .res => unreachable,
-        .dso_exact => @panic("TODO"),
         .object => |obj| try parseObject(self, obj),
         .archive => |obj| if (self.base.isStaticLib()) {
             // Ignore static library inputs when generating a static library.
@@ -1119,6 +1117,8 @@ fn parseDso(
     defer tracy.end();
 
     const handle = dso.file;
+
+    if (dso.exact_name != null) @panic("TODO");
 
     const stat: Stat = .init(try handle.stat(io));
     var header = try SharedObject.parseHeader(gpa, io, diags, dso.path, handle, stat, target);

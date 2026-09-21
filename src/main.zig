@@ -4277,10 +4277,10 @@ fn createModule(
             &create_module.link_inputs,
             create_module.lib_directories.items,
             color,
-        ) catch |err| fatal("failed to resolve link inputs: {s}", .{@errorName(err)});
+        ) catch |err| fatal("failed to resolve link inputs: {t}", .{err});
 
         if (!create_module.opts.any_dyn_libs) for (create_module.link_inputs.items) |item| switch (item) {
-            .dso, .dso_exact => {
+            .dso => {
                 create_module.opts.any_dyn_libs = true;
                 break;
             },

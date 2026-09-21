@@ -6228,35 +6228,28 @@ fn loadInputInner(elf: *Elf, input: link.Input) (Error || error{BadMagic})!void 
         },
         .res => unreachable,
         .dso => |dso| {
+            if (dso.exact_name) |exact_name| {
+                // This means the path field is still valid, but the NEEDED entry must be set to
+                // exactly the `exact_name` string.
+                std.debug.panic("load dso_exact {q}", .{exact_name});
+                if (elf.shndx.dynamic != .UNDEF) {
+                    try elf.needed.put(elf.base.comp.gpa, try elf.string(.dynstr, exact_name), {});
+                }
+            }
             try elf.needed.ensureUnusedCapacity(elf.base.comp.gpa, 1);
             var fr = dso.file.reader(io, &buf);
             elf.loadDso(dso.path, &fr) catch |err| switch (err) {
                 else => |e| return e,
-                error.EndOfStream => return diags.failParse(
-                    dso.path,
-                    "unexpected eof",
-                    .{},
-                ),
+                error.EndOfStream => return diags.failParse(dso.path, "unexpected eof", .{}),
                 error.AccessDenied, error.Unexpected, error.Unseekable => |e| return diags.fail(
-                    "failed to read \"{f}\": {t}",
-                    .{ dso.path.fmtEscapeString(), e },
+                    "failed to read {qf}: {t}",
+                    .{ dso.path, e },
                 ),
                 error.ReadFailed => switch (fr.err.?) {
                     error.Canceled => |e| return e,
-                    else => |e| return diags.fail(
-                        "failed to read \"{f}\": {t}",
-                        .{ dso.path.fmtEscapeString(), e },
-                    ),
+                    else => |e| return diags.fail("failed to read {qf}: {t}", .{ dso.path, e }),
                 },
             };
-        },
-        .dso_exact => |dso_exact| {
-            log.debug("load dso_exact '{f}'", .{std.zig.fmtString(dso_exact.name)});
-            if (elf.shndx.dynamic != .UNDEF) {
-                try elf.needed.put(elf.base.comp.gpa, try elf.string(.dynstr, dso_exact.name), {});
-            }
-            // TODO: we need to get a resolved file path from the frontend, because we need to read
-            // the shared object to discover symbol types.
         },
     }
 }

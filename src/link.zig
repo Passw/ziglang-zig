@@ -1506,7 +1506,6 @@ pub fn doPrelinkTask(comp: *Compilation, task: PrelinkTask) void {
                         .object => |obj| diags.addParseError(obj.path, "failed to parse object: {t}", .{e}),
                         .archive => |obj| diags.addParseError(obj.path, "failed to parse archive: {t}", .{e}),
                         .res => |res| diags.addParseError(res.path, "failed to parse Windows resource: {t}", .{e}),
-                        .dso_exact => diags.addError("failed to handle dso_exact: {t}", .{e}),
                     },
                 };
                 prog_node.completeOne();
@@ -1821,8 +1820,6 @@ pub const UnresolvedInput = union(enum) {
     /// Strings that come from GNU ld scripts. Is it a filename? Is it a path?
     /// Who knows! Fuck around and find out.
     ambiguous_name: NameQuery,
-    /// Put exactly this string in the dynamic section, no rpath.
-    dso_exact: Input.DsoExact,
 
     pub const NameQuery = struct {
         name: []const u8,
@@ -1875,7 +1872,6 @@ pub const Input = union(enum) {
     /// May not be a GNU ld script. Those are resolved when converting from
     /// `UnresolvedInput` to `Input` values.
     dso: Dso,
-    dso_exact: DsoExact,
 
     pub const Object = struct {
         path: Path,
@@ -1895,6 +1891,9 @@ pub const Input = union(enum) {
         needed: bool,
         weak: bool,
         reexport: bool,
+        /// Does not include any ":" prefix. Indicates that this string, exactly, should go into the NEEDED
+        /// entry, without affecting any rpaths.
+        exact_name: ?[]const u8,
     };
 
     pub const DsoExact = struct {
@@ -1903,21 +1902,17 @@ pub const Input = union(enum) {
         name: []const u8,
     };
 
-    /// Returns `null` in the case of `dso_exact`.
-    pub fn path(input: Input) ?Path {
+    pub fn path(input: Input) Path {
         return switch (input) {
             .object, .archive => |obj| obj.path,
             inline .res, .dso => |x| x.path,
-            .dso_exact => null,
         };
     }
 
-    /// Returns `null` in the case of `dso_exact`.
-    pub fn pathAndFile(input: Input) ?struct { Path, Io.File } {
+    pub fn pathAndFile(input: Input) struct { Path, Io.File } {
         return switch (input) {
             .object, .archive => |obj| .{ obj.path, obj.file },
             inline .res, .dso => |x| .{ x.path, x.file },
-            .dso_exact => null,
         };
     }
 
@@ -1925,7 +1920,6 @@ pub const Input = union(enum) {
         return switch (input) {
             .object, .archive => |obj| obj.path.basename(),
             inline .res, .dso => |x| x.path.basename(),
-            .dso_exact => "dso_exact",
         };
     }
 };
@@ -1956,9 +1950,7 @@ pub fn hashInputs(man: *Cache.Manifest, link_inputs: []const Input) !void {
                 man.hash.add(dso.needed);
                 man.hash.add(dso.weak);
                 man.hash.add(dso.reexport);
-            },
-            .dso_exact => |dso_exact| {
-                man.hash.addBytes(dso_exact.name);
+                man.hash.addOptionalBytes(dso.exact_name);
             },
         }
     }
@@ -2194,10 +2186,6 @@ pub fn resolveInputs(
                 }
                 continue;
             },
-            .dso_exact => |dso_exact| {
-                try resolved_inputs.append(gpa, .{ .dso_exact = dso_exact });
-                continue;
-            },
         }
         comptime unreachable;
     }
@@ -2418,13 +2406,18 @@ fn finishResolveLibInput(
                 .hidden = query.hidden,
             } });
         },
-        .dynamic => resolved_inputs.appendAssumeCapacity(.{ .dso = .{
-            .path = path,
-            .file = file,
-            .needed = query.needed,
-            .weak = query.weak,
-            .reexport = query.reexport,
-        } }),
+        .dynamic => resolved_inputs.appendAssumeCapacity(.{
+            .dso = .{
+                .path = path,
+                .file = file,
+                .needed = query.needed,
+                .weak = query.weak,
+                .reexport = query.reexport,
+                // Here we assume that `Path.sub_path` is usable as `exact_name`, however the code after this point
+                // has no business making that assumption.
+                .exact_name = if (query.name_done) path.sub_path else null,
+            },
+        }),
     }
     return .ok;
 }
@@ -2608,6 +2601,7 @@ pub fn openDso(io: Io, path: Path, needed: bool, weak: bool, reexport: bool) !In
         .needed = needed,
         .weak = weak,
         .reexport = reexport,
+        .exact_name = null,
     };
 }
 
@@ -2639,7 +2633,7 @@ pub fn anyObjectInputs(inputs: []const Input) bool {
 pub fn countObjectInputs(inputs: []const Input) usize {
     var count: usize = 0;
     for (inputs) |input| switch (input) {
-        .dso, .dso_exact => continue,
+        .dso => continue,
         .res, .object, .archive => count += 1,
     };
     return count;
@@ -2649,7 +2643,7 @@ pub fn countObjectInputs(inputs: []const Input) usize {
 pub fn firstObjectInput(inputs: []const Input) ?Input.Object {
     for (inputs) |input| switch (input) {
         .object, .archive => |obj| return obj,
-        .res, .dso, .dso_exact => continue,
+        .res, .dso => continue,
     };
     return null;
 }
