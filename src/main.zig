@@ -803,7 +803,7 @@ const compile_usage =
     \\  --verbose-llvm-cpu-features  Enable compiler debug output for LLVM CPU features
     \\  --debug-log [scope]          Enable printing debug/info log messages for scope
     \\  --debug-compile-errors       Crash with helpful diagnostics at the first compile error
-    \\  --debug-link-snapshot        Enable dumping of the linker's state in JSON format
+    \\  --debug-link-snapshot        Dump linker state and output file information for troubleshooting
     \\  --debug-rt[=mode]            Build compiler runtime libraries with [mode] optimization
     \\                               (debug if [=mode] is omitted)
     \\  --debug-incremental          Enable incremental compilation debug features
