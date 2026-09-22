@@ -5945,8 +5945,8 @@ fn mapInputSection(elf: *Elf, opts: struct {
         .EXEC, .DYN => name: {
             if (std.mem.startsWith(u8, opts.name, ".text.")) break :name ".text";
             if (std.mem.startsWith(u8, opts.name, ".rodata.")) break :name ".rodata";
-            if (std.mem.startsWith(u8, opts.name, ".data.")) break :name ".data";
             if (std.mem.startsWith(u8, opts.name, ".data.rel.ro.")) break :name ".data.rel.ro";
+            if (std.mem.startsWith(u8, opts.name, ".data.")) break :name ".data";
             if (std.mem.startsWith(u8, opts.name, ".tdata.")) break :name ".tdata";
             if (std.mem.startsWith(u8, opts.name, ".gcc_except_table.")) break :name ".gcc_except_table";
             // TODO: actually generate a bss section!
