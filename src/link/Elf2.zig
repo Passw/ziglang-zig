@@ -3730,7 +3730,7 @@ fn create(
         .big => .@"2MSB",
     };
     const osabi: std.elf.OSABI = switch (target.os.tag) {
-        else => if (target.abi.isGnu()) .GNU else .NONE,
+        else => .NONE, // might be changed to `.GNU` by `checkInputIdent`
         .freestanding, .other => .STANDALONE,
         .netbsd => .NETBSD,
         .illumos => .SOLARIS,
@@ -7089,9 +7089,11 @@ fn loadDso(
 /// `error.AlreadyReported`, but if the magic number is missing or incorrect, returns
 /// `error.BadMagic` instead.
 ///
+/// If necessary, modifies our own ident to use `ELF_OSABI_GNU` instead of `ELF_OSABI_NONE`.
+///
 /// Does not advance the position of `r`. Requires `r` to have a 16-byte buffer.
 fn checkInputIdent(
-    elf: *const Elf,
+    elf: *Elf,
     path: std.Build.Cache.Path,
     r: *Io.Reader,
 ) error{ BadMagic, EndOfStream, AlreadyReported, ReadFailed }!void {
@@ -7106,8 +7108,9 @@ fn checkInputIdent(
     }
 
     const ident = try r.peekStructPointer(std.elf.Ident);
-    const target: *const std.elf.Ident =
-        @ptrCast(elf.ni.elf.sliceConst(&elf.mf)[0..@sizeOf(std.elf.Ident)]);
+    const target: *std.elf.Ident = @ptrCast(
+        elf.ni.elf.slice(&elf.mf)[0..@sizeOf(std.elf.Ident)],
+    );
 
     if (ident.class != target.class) return diags.failParse(
         path,
@@ -7124,17 +7127,24 @@ fn checkInputIdent(
         "bad ELF version ({d})",
         .{ident.version},
     );
-
-    // OSABI is a bit more complex. On Linux, `.NONE` and `.GNU` are both valid and both common.
-    // It sounds reasonable to allow the value we chose *and* allow `.NONE`.
-    const expect_abiversion: u8 = abiver: {
-        if (ident.osabi == .NONE) break :abiver 0;
-        if (ident.osabi == target.osabi) break :abiver target.abiversion;
-        return diags.failParse(
+    // OSABI is a bit more complex.
+    const expect_abiversion: u8 = switch (ident.osabi) {
+        .NONE => 0,
+        .GNU => abiversion: {
+            // If we're currently emitting `ELF_OSABI_NONE` then prefer `ELF_OSABI_GNU` to signify
+            // the GNU-specific features, but if we're already emitting a target-specific osabi then
+            // just leave it alone.
+            if (target.osabi == .NONE) target.osabi = .GNU;
+            // Either way, allow the `ELF_OSABI_GNU` input through.
+            break :abiversion 0;
+        },
+        else => if (ident.osabi == target.osabi) abiversion: {
+            break :abiversion target.abiversion;
+        } else return diags.failParse(
             path,
             "bad ELF OS/ABI ({?s})",
             .{std.enums.tagName(std.elf.OSABI, ident.osabi)},
-        );
+        ),
     };
     if (ident.abiversion != expect_abiversion) return diags.failParse(
         path,
