@@ -3434,6 +3434,8 @@ fn serveBuildStepCompleted(
     const step = maker.stepByIndex(step_index);
     const error_bundle = step.result_error_bundle;
 
+    const gf_size = countGeneratedFiles(maker.generated_files, step_index, &maker.scanned_config.configuration);
+
     const body: Server.Message.BuildStepCompleted = .{
         .step_index = step_index,
         .status = status,
@@ -3441,17 +3443,170 @@ fn serveBuildStepCompleted(
             .extra_len = @intCast(error_bundle.extra.len),
             .string_bytes_len = @intCast(error_bundle.string_bytes.len),
         },
+        .generated_files_len = gf_size.count,
     };
     const eb_bytes_len = @sizeOf(u32) * error_bundle.extra.len + error_bundle.string_bytes.len;
-    const bytes_len = @sizeOf(Server.Message.BuildStepCompleted) + eb_bytes_len;
+    const bytes_len = @sizeOf(Server.Message.BuildStepCompleted) + eb_bytes_len +
+        (gf_size.count * @sizeOf(Server.Message.GeneratedFile)) + gf_size.size;
     try s.serveMessageHeader(.{
         .tag = .bsp_step_completed,
         .bytes_len = @intCast(bytes_len),
     });
     try s.out.writeStruct(body, .little);
+
     try s.out.writeSliceEndian(u32, error_bundle.extra, .little);
     try s.out.writeAll(error_bundle.string_bytes);
+
+    try writeGeneratedFiles(maker.generated_files, step_index, &maker.scanned_config.configuration, s.out);
+    try writeGeneratedFilesData(maker.generated_files, step_index, &maker.scanned_config.configuration, s.out);
+
     try s.out.flush();
+}
+
+fn walkGeneratedFiles(
+    step_index: Configuration.Step.Index,
+    conf: *const Configuration,
+    comptime Context: type,
+    context: Context,
+) void {
+    const conf_step = step_index.ptr(conf);
+    switch (conf_step.extended.get(conf.extra)) {
+        .check_file,
+        .fail,
+        .fmt,
+        .install_artifact,
+        .install_dir,
+        .install_file,
+        .top_level,
+        .update_source_files,
+        => {},
+
+        .compile => |compile| {
+            walkGeneratedFilesOne(context, compile.emit_directory.value);
+            walkGeneratedFilesOne(context, compile.generated_docs.value);
+            walkGeneratedFilesOne(context, compile.generated_asm.value);
+            walkGeneratedFilesOne(context, compile.generated_bin.value);
+            walkGeneratedFilesOne(context, compile.generated_pdb.value);
+            walkGeneratedFilesOne(context, compile.generated_implib.value);
+            walkGeneratedFilesOne(context, compile.generated_llvm_bc.value);
+            walkGeneratedFilesOne(context, compile.generated_llvm_ir.value);
+            walkGeneratedFilesOne(context, compile.generated_h.value);
+        },
+        .config_header => |config_header| {
+            walkGeneratedFilesOne(context, config_header.generated_dir);
+        },
+        .find_program => |find_program| {
+            walkGeneratedFilesOne(context, find_program.found_path);
+        },
+        .obj_copy => |obj_copy| {
+            walkGeneratedFilesOne(context, obj_copy.output_file);
+            walkGeneratedFilesOne(context, obj_copy.debug_file.value);
+        },
+        .options => |options| {
+            walkGeneratedFilesOne(context, options.generated_file);
+        },
+        .run => |run| {
+            if (run.captured_stdout.value) |v| walkGeneratedFilesOne(context, v.generated_file);
+            if (run.captured_stderr.value) |v| walkGeneratedFilesOne(context, v.generated_file);
+            for (run.args.slice) |arg|
+                walkGeneratedFilesOne(context, arg.get(conf).generated.value);
+        },
+        .translate_c => |translate_c| {
+            walkGeneratedFilesOne(context, translate_c.output_file);
+        },
+        .write_file => |write_file| {
+            walkGeneratedFilesOne(context, write_file.generated_directory);
+        },
+    }
+}
+
+fn walkGeneratedFilesOne(
+    context: anytype,
+    opt: ?Configuration.GeneratedFileIndex,
+) void {
+    context.visit(opt orelse return);
+}
+
+fn countGeneratedFiles(
+    generated_files: []const GeneratedFile,
+    step_index: Configuration.Step.Index,
+    conf: *const Configuration,
+) struct { count: u32, size: u32 } {
+    const Visitor = struct {
+        generated_files: []const GeneratedFile,
+        count: u32,
+        size: u32,
+
+        fn visit(this: *@This(), i: Configuration.GeneratedFileIndex) void {
+            const data = this.generated_files[@backingInt(i)].data orelse return;
+            this.count += 1;
+            this.size = @intCast(this.size + data.len);
+        }
+    };
+    var v: Visitor = .{
+        .generated_files = generated_files,
+        .count = 0,
+        .size = 0,
+    };
+    walkGeneratedFiles(step_index, conf, *Visitor, &v);
+    return .{
+        .count = v.count,
+        .size = v.size,
+    };
+}
+
+fn writeGeneratedFiles(
+    generated_files: []const GeneratedFile,
+    step_index: Configuration.Step.Index,
+    conf: *const Configuration,
+    writer: *Io.Writer,
+) Io.Writer.Error!void {
+    const Visitor = struct {
+        generated_files: []const GeneratedFile,
+        writer: *Io.Writer,
+        result: Io.Writer.Error!void,
+
+        fn visit(this: *@This(), i: Configuration.GeneratedFileIndex) void {
+            const unpacked = this.generated_files[@backingInt(i)].unpack() orelse return;
+            const payload: Server.Message.GeneratedFile = .{
+                .index = i,
+                .path_len = @intCast(unpacked.sub_path.len),
+            };
+            this.result = this.writer.writeAll(@ptrCast((&payload)[0..1]));
+        }
+    };
+    var v: Visitor = .{
+        .generated_files = generated_files,
+        .writer = writer,
+        .result = {},
+    };
+    walkGeneratedFiles(step_index, conf, *Visitor, &v);
+    return v.result;
+}
+
+fn writeGeneratedFilesData(
+    generated_files: []const GeneratedFile,
+    step_index: Configuration.Step.Index,
+    conf: *const Configuration,
+    writer: *Io.Writer,
+) Io.Writer.Error!void {
+    const Visitor = struct {
+        generated_files: []const GeneratedFile,
+        writer: *Io.Writer,
+        result: Io.Writer.Error!void,
+
+        fn visit(this: *@This(), i: Configuration.GeneratedFileIndex) void {
+            const data = this.generated_files[@backingInt(i)].data orelse return;
+            this.result = this.writer.writeAll(data);
+        }
+    };
+    var v: Visitor = .{
+        .generated_files = generated_files,
+        .writer = writer,
+        .result = {},
+    };
+    walkGeneratedFiles(step_index, conf, *Visitor, &v);
+    return v.result;
 }
 
 fn initStdoutWriter(io: Io) *Writer {
