@@ -161,6 +161,7 @@ pub fn deinit(fuzz: *Fuzz) void {
     fuzz.group.cancel(io);
     fuzz.prog_node.end();
     gpa.free(fuzz.run_steps);
+    fuzz.msg_queue.deinit(gpa);
 }
 
 fn rebuildTestsWorkerRun(

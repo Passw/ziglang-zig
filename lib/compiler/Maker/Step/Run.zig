@@ -18,14 +18,13 @@ const Step = @import("../Step.zig");
 const Maker = @import("../../Maker.zig");
 const Fuzz = @import("../../Maker/Fuzz.zig");
 
-/// If this is a Zig unit test binary, this tracks the names of the unit
-/// tests that are also fuzz tests. Indexes cannot be used as they may
-/// change between reruns.
+/// If this is a Zig unit test binary, this tracks the names of the unit tests that are also fuzz tests.
+/// Indexes cannot be used as they may change between reruns. Memory owned by `Maker.gpa`.
 fuzz_tests: std.ArrayList([]const u8) = .empty,
 cached_test_metadata: ?CachedTestMetadata = null,
 
-/// Populated during the fuzz phase if this run step corresponds to a unit test
-/// executable that contains fuzz tests.
+/// Populated during the fuzz phase if this run step corresponds to a unit test executable that contains fuzz
+/// tests. `Path.sub_path` owned by `Maker.gpa`.
 rebuilt_executable: ?Path = null,
 
 pub fn make(
@@ -376,6 +375,7 @@ pub fn make(
 pub fn deinit(run: *Run, gpa: Allocator, io: Io) void {
     _ = io;
     run.fuzz_tests.deinit(gpa);
+    if (run.rebuilt_executable) |p| gpa.free(p.sub_path);
 }
 
 fn thirdPartyToggle(
