@@ -212,7 +212,7 @@ fn rebuildTestsWorkerRunFallible(
         maker.printErrorMessages(comp_index, .{}, stderr.terminal(), .verbose, .indent) catch {};
     }
 
-    const rebuilt_bin_path = result catch |err| switch (err) {
+    const rebuilt_digest = result catch |err| switch (err) {
         error.MakeFailed => return,
         else => |other| return other,
     };
@@ -235,7 +235,12 @@ fn rebuildTestsWorkerRunFallible(
     });
     defer gpa.free(compile_filename);
 
-    run.rebuilt_executable = try rebuilt_bin_path.join(gpa, compile_filename);
+    const o_hex_digest = rebuilt_digest.toHex().?;
+
+    run.rebuilt_executable = .{
+        .root_dir = graph.local_cache_root,
+        .sub_path = try std.fs.path.join(gpa, &.{ "o", &o_hex_digest, compile_filename }),
+    };
 }
 
 fn fuzzWorkerRun(fuzz: *Fuzz, run_index: Configuration.Step.Index) void {

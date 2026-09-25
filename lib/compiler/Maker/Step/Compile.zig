@@ -943,9 +943,8 @@ pub fn rebuildInFuzzMode(
     maker: *Maker,
     compile_index: Configuration.Step.Index,
     progress_node: std.Progress.Node,
-) !Path {
+) !Step.OptCacheDigest {
     const gpa = maker.gpa;
-    const graph = maker.graph;
     const step = maker.stepByIndex(compile_index);
 
     var arena_allocator: std.heap.ArenaAllocator = .init(gpa);
@@ -964,12 +963,7 @@ pub fn rebuildInFuzzMode(
     defer argv.deinit(gpa);
 
     try lowerZigArgs(arena, compile, compile_index, maker, progress_node, &argv, true);
-    const opt_cache_digest = try Step.evalZigProcess(compile_index, maker, argv.items, progress_node, false);
-    const o_hex_digest = opt_cache_digest.toHex().?;
-    return .{
-        .root_dir = graph.local_cache_root,
-        .sub_path = try Dir.path.join(arena, &.{ "o", &o_hex_digest }),
-    };
+    return Step.evalZigProcess(compile_index, maker, argv.items, progress_node, false);
 }
 
 fn addBool(gpa: Allocator, args: *std.ArrayList([]const u8), arg: []const u8, opt: bool) !void {
