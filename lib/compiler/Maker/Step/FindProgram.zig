@@ -96,7 +96,7 @@ fn checkCandidate(
                 const extended_path = try std.mem.concat(arena, u8, &.{ full_path, ext });
 
                 if (Io.Dir.cwd().access(io, extended_path, .{ .execute = true })) |_| {
-                    maker.generatedPath(found_path).* = .initCwd(extended_path);
+                    _ = try maker.setGeneratedPath(found_path, .cwd, &.{extended_path});
                     return true;
                 } else |err| switch (err) {
                     error.Canceled => |e| return e,
