@@ -1117,6 +1117,7 @@ pub fn get32BitArchVariant(target: *const Target) ?Target {
         .thumbeb,
         .wasm32,
         .x86,
+        .x86c16,
         .xcore,
         .xtensa,
         .xtensaeb,
@@ -1208,7 +1209,7 @@ pub fn get64BitArchVariant(target: *const Target) ?Target {
         .thumb => copy.cpu.arch = .aarch64,
         .thumbeb => copy.cpu.arch = .aarch64_be,
         .wasm32 => copy.cpu.arch = .wasm64,
-        .x86 => copy.cpu.arch = .x86_64,
+        .x86, .x86c16 => copy.cpu.arch = .x86_64,
         .x86_16 => copy.cpu.arch = .x86_64,
     }
     return copy;
@@ -1262,7 +1263,7 @@ pub fn toLLVMTriple(target: *const Target, buf: []u8) []const u8 {
         .ve => "ve",
         .wasm32 => "wasm32",
         .wasm64 => "wasm64",
-        .x86 => "i386",
+        .x86, .x86c16 => "i386",
         .x86_64 => "x86_64",
         .xcore => "xcore",
         .xtensa => "xtensa",

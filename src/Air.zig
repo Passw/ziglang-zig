@@ -2635,7 +2635,7 @@ pub const CompilerRtFunc = enum(u32) {
             .riscv32,
             .riscv32be,
             => false,
-            .x86, .x86_64 => true,
+            .x86, .x86c16, .x86_64 => true,
             .arm, .armeb, .thumb, .thumbeb => switch (target.abi) {
                 .eabi, .eabihf => false,
                 else => true,
@@ -2729,7 +2729,7 @@ pub const CompilerRtFunc = enum(u32) {
             .riscv32,
             .riscv32be,
             => false,
-            .x86, .x86_64 => true,
+            .x86, .x86c16, .x86_64 => true,
             .arm, .armeb, .thumb, .thumbeb => switch (target.abi) {
                 .eabi, .eabihf => false,
                 else => true,

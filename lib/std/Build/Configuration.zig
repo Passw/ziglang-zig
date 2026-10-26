@@ -2430,6 +2430,7 @@ pub const TargetQuery = struct {
         wasm64,
         x86_16,
         x86,
+        x86c16,
         x86_64,
         xcore,
         xtensa,

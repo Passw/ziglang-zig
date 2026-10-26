@@ -417,6 +417,10 @@ pub fn create(arena: Allocator, options: CreateOptions) !*Module {
             try buf.appendSlice("backchain,");
         }
 
+        if (target.cpu.arch == .x86c16) {
+            try buf.appendSlice("+16bit-mode,-32bit-mode,");
+        }
+
         if (target.cpu.arch.isXtensa()) {
             // LLVM does not currently support specifying windowed vs call0 ABI any other way than
             // disabling all windowed instructions altogether. That's kind of silly because a

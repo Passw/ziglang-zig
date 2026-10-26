@@ -5,9 +5,7 @@ const CpuFeature = std.Target.Cpu.Feature;
 const CpuModel = std.Target.Cpu.Model;
 
 pub const Feature = enum {
-    @"16bit_mode",
     @"32bit",
-    @"32bit_mode",
     @"3dnow",
     @"3dnowa",
     @"64bit",
@@ -213,19 +211,9 @@ pub const all_features = blk: {
     const len = @typeInfo(Feature).@"enum".field_names.len;
     std.debug.assert(len <= CpuFeature.Set.needed_bit_count);
     var result: [len]CpuFeature = undefined;
-    result[@backingInt(Feature.@"16bit_mode")] = .{
-        .llvm_name = "16bit-mode",
-        .description = "16-bit mode (i8086)",
-        .dependencies = featureSet(&[_]Feature{}),
-    };
     result[@backingInt(Feature.@"32bit")] = .{
         .llvm_name = null,
         .description = "Support 32-bit instructions",
-        .dependencies = featureSet(&[_]Feature{}),
-    };
-    result[@backingInt(Feature.@"32bit_mode")] = .{
-        .llvm_name = "32bit-mode",
-        .description = "32-bit mode (80386)",
         .dependencies = featureSet(&[_]Feature{}),
     };
     result[@backingInt(Feature.@"3dnow")] = .{

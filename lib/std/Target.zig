@@ -1113,7 +1113,7 @@ pub fn toElfMachine(target: *const Target) std.elf.EM {
         .sparc => if (target.cpu.has(.sparc, .v9)) .SPARC32PLUS else .SPARC,
         .sparc64 => .SPARCV9,
         .ve => .VE,
-        .x86_16, .x86 => .@"386",
+        .x86_16, .x86, .x86c16 => .@"386",
         .x86_64 => .X86_64,
         .xcore => .XCORE,
         .xtensa, .xtensaeb => .XTENSA,
@@ -1145,7 +1145,7 @@ pub fn toCoffMachine(target: *const Target) std.coff.IMAGE.FILE.MACHINE {
         .riscv32 => .RISCV32,
         .riscv64 => .RISCV64,
         .sh => .SH3,
-        .x86 => .I386,
+        .x86, .x86c16 => .I386,
         .x86_64 => .AMD64,
 
         .aarch64_be,
@@ -1410,6 +1410,7 @@ pub const Cpu = struct {
         wasm64,
         x86_16,
         x86,
+        x86c16,
         x86_64,
         xcore,
         xtensa,
@@ -1488,7 +1489,7 @@ pub const Cpu = struct {
                 .spork8 => .spork8,
                 .ve => .ve,
                 .wasm32, .wasm64 => .wasm,
-                .x86_16, .x86, .x86_64 => .x86,
+                .x86_16, .x86, .x86c16, .x86_64 => .x86,
                 .xcore => .xcore,
                 .xtensa, .xtensaeb => .xtensa,
                 .z80, .ez80 => .z80,
@@ -1497,7 +1498,14 @@ pub const Cpu = struct {
 
         pub inline fn isX86(arch: Arch) bool {
             return switch (arch) {
-                .x86_16, .x86, .x86_64 => true,
+                .x86_16, .x86_64 => true,
+                else => arch.isX86_32(),
+            };
+        }
+
+        pub inline fn isX86_32(arch: Arch) bool {
+            return switch (arch) {
+                .x86, .x86c16 => true,
                 else => false,
             };
         }
@@ -1734,6 +1742,7 @@ pub const Cpu = struct {
                 .wasm64,
                 .x86_16,
                 .x86,
+                .x86c16,
                 .x86_64,
                 .xcore,
                 .xtensa,
@@ -1857,7 +1866,7 @@ pub const Cpu = struct {
                 .x86_regcall_v4_win,
                 .x86_vectorcall,
                 .x86_interrupt,
-                => &.{.x86},
+                => &.{ .x86, .x86c16 },
 
                 .x86_16_cdecl,
                 .x86_16_stdcall,
@@ -2096,7 +2105,7 @@ pub const Cpu = struct {
                 .ve => &ve.cpu.ve10,
                 .wasm32, .wasm64 => &wasm.cpu.mvp,
                 .x86_16 => &x86.cpu.i86,
-                .x86 => &x86.cpu.i386,
+                .x86, .x86c16 => &x86.cpu.i386,
                 .x86_64 => &x86.cpu.x86_64,
                 .xcore => &xcore.cpu.xs1b,
                 .xtensa, .xtensaeb => &xtensa.cpu.xtensa,
@@ -2421,7 +2430,7 @@ pub fn supportsAddressSpace(
 
     return switch (address_space) {
         .generic => true,
-        .fs, .gs, .ss => (arch == .x86_64 or arch == .x86 or arch == .x86_16) and (context == null or context == .pointer),
+        .fs, .gs, .ss => (arch.isX86()) and (context == null or context == .pointer),
         // Technically x86 can use segmentation...
         .far => (arch == .x86_16),
 
@@ -3067,6 +3076,7 @@ pub fn ptrBitWidth_arch_abi(cpu_arch: Cpu.Arch, abi: Abi) u16 {
         .thumbeb,
         .wasm32,
         .x86,
+        .x86c16,
         .xcore,
         .xtensa,
         .xtensaeb,
@@ -3326,6 +3336,7 @@ pub fn cTypeBitSize(target: *const Target, c_type: CType) ?u16 {
                     else => 64,
 
                     .x86,
+                    .x86c16,
                     .x86_64,
                     => if (target.cpu.has(.x86, .x87)) 80 else null,
 
@@ -3384,6 +3395,7 @@ pub fn cTypeBitSize(target: *const Target, c_type: CType) ?u16 {
             .longlong, .ulonglong, .double => 64,
             .longdouble => switch (target.cpu.arch) {
                 .x86,
+                .x86c16,
                 .x86_64,
                 => switch (target.abi) {
                     .android, .ohos => 64,
@@ -3597,6 +3609,7 @@ pub fn cTypeAlignment(target: *const Target, c_type: CType) ?u16 {
             .sh,
             .sheb,
             .x86,
+            .x86c16,
             .xcore,
             => 4,
 
@@ -3678,6 +3691,7 @@ pub fn cMaxIntAlignment(target: *const Target) u16 {
         .propeller,
         .sh,
         .sheb,
+        .x86c16,
         .xcore,
         => 4,
 
@@ -3749,6 +3763,7 @@ pub fn cCallingConvention(target: *const Target) ?std.builtin.CallingConvention 
             .windows, .uefi => if (target.isMinGW()) .{ .x86_mingw = .{} } else .{ .x86_win = .{} },
             else => .{ .x86_sysv = .{} },
         },
+        .x86c16 => .{ .x86_sysv = .{} },
         .x86_16 => .{ .x86_16_cdecl = .{} },
         .aarch64, .aarch64_be => if (target.os.tag.isDarwin())
             .{ .aarch64_aapcs_darwin = .{} }

@@ -173227,7 +173227,7 @@ fn genLazy(cg: *CodeGen, lazy_sym: link.File.LazySymbol) InnerError!void {
             for (0..tag_names.len) |tag_index| {
                 var enum_temp = try cg.tempInit(enum_ty, if (enum_ty.abiSize(zcu) <= @as(u4, switch (cg.target.cpu.arch) {
                     else => unreachable,
-                    .x86 => 4,
+                    .x86, .x86c16 => 4,
                     .x86_64 => 8,
                 })) .{ .register = param_reg } else .{ .indirect = .{ .reg = param_reg } });
 
@@ -181082,7 +181082,7 @@ fn resolveCallingConventionValues(
             result.return_value = .init(.unreach);
             result.stack_align = switch (cg.target.cpu.arch) {
                 else => unreachable,
-                .x86 => .@"4",
+                .x86, .x86c16 => .@"4",
                 .x86_64 => .@"8",
             };
         },
@@ -181478,7 +181478,7 @@ fn resolveCallingConventionValues(
                     if (abi.zigcc.return_in_regs) switch (cg.regClassForType(ret_ty)) {
                         .general_purpose, .gphi => if (ret_size <= @as(u4, switch (cg.target.cpu.arch) {
                             else => unreachable,
-                            .x86 => 4,
+                            .x86, .x86c16 => 4,
                             .x86_64 => 8,
                         }))
                             break :return_value .init(.{ .register = registerAlias(ret_gpr[0], ret_size) })
@@ -181509,7 +181509,7 @@ fn resolveCallingConventionValues(
                     if (abi.zigcc.params_in_regs) switch (cg.regClassForType(param_ty)) {
                         .general_purpose, .gphi => if (param_gpr.len >= 1 and param_size <= @as(u4, switch (cg.target.cpu.arch) {
                             else => unreachable,
-                            .x86 => 4,
+                            .x86, .x86c16 => 4,
                             .x86_64 => 8,
                         })) {
                             arg.* = .{ .register = registerAlias(param_gpr[0], param_size) };
@@ -181742,7 +181742,7 @@ fn hasFeature(cg: *CodeGen, feature: std.Target.x86.Feature) bool {
     return switch (feature) {
         .@"64bit" => switch (cg.target.cpu.arch) {
             else => unreachable,
-            .x86 => false,
+            .x86, .x86c16 => false,
             .x86_64 => true,
         },
         .false_deps_getmant,
@@ -181790,7 +181790,7 @@ fn hasFeature(cg: *CodeGen, feature: std.Target.x86.Feature) bool {
         .mmx => false,
         .sahf => switch (cg.target.cpu.arch) {
             else => unreachable,
-            .x86 => true,
+            .x86, .x86c16 => true,
             .x86_64 => null,
         },
         else => null,

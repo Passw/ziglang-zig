@@ -132,7 +132,7 @@ pub fn tripleForTarget(allocator: Allocator, target: *const std.Target) ![]const
         .s390x => "s390x",
         .thumb => "thumb",
         .thumbeb => "thumbeb",
-        .x86 => "i386",
+        .x86, .x86c16 => "i386",
         .x86_64 => "x86_64",
         .xcore => "xcore",
         .xtensa => "xtensa",
@@ -516,7 +516,7 @@ pub const DataLayout = struct {
             .sparc => "E-m:e-p:32:32-i64:64-i128:128-f128:64-n32-S64",
             .sparc64 => "E-m:e-i64:64-i128:128-n32:64-S128",
             .s390x => "E-S64-m:e-i1:8:16-i8:8:16-i64:64-f128:64-v128:64-a:8:16-n32:64",
-            .x86 => if (target.os.tag == .windows or target.os.tag == .uefi) switch (target.abi) {
+            .x86, .x86c16 => if (target.os.tag == .windows or target.os.tag == .uefi) switch (target.abi) {
                 .gnu => if (target.ofmt == .coff)
                     "e-m:x-p:32:32-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:32-n8:16:32-a:0:32-S32"
                 else

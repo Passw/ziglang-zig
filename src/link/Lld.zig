@@ -36,12 +36,12 @@ const Coff = struct {
             .image_base = options.image_base orelse switch (output_mode) {
                 .Exe => switch (target.cpu.arch) {
                     .aarch64, .x86_64 => 0x140000000,
-                    .thumb, .x86 => 0x400000,
+                    .thumb, .x86, .x86c16 => 0x400000,
                     else => return error.UnsupportedCoffArchitecture,
                 },
                 .Lib => switch (target.cpu.arch) {
                     .aarch64, .x86_64 => 0x180000000,
-                    .thumb, .x86 => 0x10000000,
+                    .thumb, .x86, .x86c16 => 0x10000000,
                     else => return error.UnsupportedCoffArchitecture,
                 },
                 .Obj => 0,
@@ -1373,7 +1373,7 @@ fn getLDMOption(target: *const std.Target) ?[]const u8 {
         .riscv64be => "elf64briscv",
         .s390x => "elf64_s390",
         .sparc64 => "elf64_sparc",
-        .x86 => switch (target.os.tag) {
+        .x86, .x86c16 => switch (target.os.tag) {
             .freebsd => "elf_i386_fbsd",
             else => "elf_i386",
         },

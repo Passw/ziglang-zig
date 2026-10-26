@@ -6824,6 +6824,15 @@ pub fn addCCArgs(
                 });
             }
 
+            if (target.cpu.arch == .x86c16) {
+                for (xclang_flags) |xclang| for ([_][]const u8{ "+16bit-mode", "-32bit-mode" }) |feature| try argv.appendSlice(&.{
+                    xclang,
+                    "-target-feature",
+                    xclang,
+                    feature,
+                });
+            }
+
             if (target.cpu.arch.isXtensa()) {
                 // LLVM does not currently support specifying windowed vs call0 ABI any other way than
                 // disabling all windowed instructions altogether. That's kind of silly because a

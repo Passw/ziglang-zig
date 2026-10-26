@@ -5025,6 +5025,14 @@ const targets = [_]ArchTarget{
         },
         .feature_overrides = &.{
             .{
+                .llvm_name = "16bit-mode",
+                .omit = true,
+            },
+            .{
+                .llvm_name = "32bit-mode",
+                .omit = true,
+            },
+            .{
                 .llvm_name = "64bit-mode",
                 .omit = true,
             },
