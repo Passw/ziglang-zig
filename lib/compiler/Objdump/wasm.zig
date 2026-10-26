@@ -6,7 +6,7 @@ pub fn identify(r: *Io.Reader) error{ReadFailed}!bool {
     return std.mem.eql(u8, magic, "\x00asm");
 }
 
-pub fn dump(d: *const Objdump) Objdump.Error!void {
+pub fn dump(d: *Objdump) Objdump.Error!void {
     return d.fail("TODO: dump WASM module", .{});
 }
 

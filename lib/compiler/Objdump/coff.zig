@@ -53,11 +53,9 @@ pub fn identifyImport(r: *Io.Reader) error{ReadFailed}!bool {
     return std.mem.eql(u8, bytes, &.{ 0x00, 0x00, 0xFF, 0xFF });
 }
 
-pub fn dumpImage(d: *const Objdump) Objdump.Error!void {
+pub fn dumpImage(d: *Objdump) Objdump.Error!void {
     // After `identifyImage` we are at the start of the COFF header.
-    if (d.element(.@"file-type")) {
-        try d.w.print("{s}: PE/COFF image\n", .{d.input_name});
-    }
+    try d.w.print("{s}: PE/COFF image\n\n", .{d.input_name});
     dump(d, true) catch |err| switch (err) {
         else => |e| return e,
 
@@ -65,13 +63,10 @@ pub fn dumpImage(d: *const Objdump) Objdump.Error!void {
         error.StreamTooLong,
         => |e| return d.fail("failed to parse COFF image: {t}", .{e}),
     };
-    try d.w.writeByte('\n');
 }
 
-pub fn dumpObject(d: *const Objdump) Objdump.Error!void {
-    if (d.element(.@"file-type")) {
-        try d.w.print("{s}: COFF object\n", .{d.input_name});
-    }
+pub fn dumpObject(d: *Objdump) Objdump.Error!void {
+    try d.w.print("{s}: COFF object\n\n", .{d.input_name});
     dump(d, false) catch |err| switch (err) {
         else => |e| return e,
 
@@ -79,10 +74,9 @@ pub fn dumpObject(d: *const Objdump) Objdump.Error!void {
         error.StreamTooLong,
         => |e| return d.fail("failed to parse COFF object: {t}", .{e}),
     };
-    try d.w.writeByte('\n');
 }
 
-pub fn dumpImport(d: *const Objdump) Objdump.Error!void {
+pub fn dumpImport(d: *Objdump) Objdump.Error!void {
     const r = d.reader();
     const w = d.w;
     const imp_header = r.takeStruct(std.coff.ImportHeader, .little) catch |err| switch (err) {
@@ -106,17 +100,15 @@ pub fn dumpImport(d: *const Objdump) Objdump.Error!void {
         return;
     }
 
-    if (d.element(.@"file-type")) {
-        try w.print("{s}: COFF import\n", .{d.input_name});
-    }
+    try w.print("{s}: COFF import\n\n", .{d.input_name});
 
     try dumpHeader(d, std.coff.ImportHeader, &imp_header, struct {
         pub fn sig1(_: *const Objdump, _: *const std.coff.ImportHeader) !void {}
         pub fn sig2(_: *const Objdump, _: *const std.coff.ImportHeader) !void {}
         pub fn types(id: *const Objdump, h: *const std.coff.ImportHeader) !void {
             try id.w.print(
-                \\{t: >16} import_type 
-                \\{t: >16} name_type 
+                \\{t: >16} import_type
+                \\{t: >16} name_type
                 \\
             , .{ h.types.type, h.types.name_type });
         }
@@ -132,16 +124,15 @@ pub fn dumpImport(d: *const Objdump) Objdump.Error!void {
         \\     import name | {s}
         \\             dll | {s}
         \\
+        \\
     , .{
         sym_name,
         imp_name,
         imp_dll,
     });
-
-    try w.writeByte('\n');
 }
 
-fn dump(d: *const Objdump, is_image: bool) !void {
+fn dump(d: *Objdump, is_image: bool) !void {
     const gpa = d.gpa;
     const r = d.reader();
     const w = d.w;
@@ -151,9 +142,9 @@ fn dump(d: *const Objdump, is_image: bool) !void {
         return d.fail("unable to read COFF header: {t}", .{err});
 
     if (d.opts.file_headers) {
-        if (d.element(.@"header-name")) try w.writeAll("COFF Header:\n");
+        try w.writeAll("COFF Header:\n");
         try dumpHeader(d, std.coff.Header, &header, struct {});
-        if (d.element(.newlines)) try w.writeByte('\n');
+        try w.writeByte('\n');
     }
 
     switch (header.machine) {
@@ -179,7 +170,7 @@ fn dump(d: *const Objdump, is_image: bool) !void {
             break :image_info null;
         }
 
-        if (d.opts.file_headers and d.element(.@"header-name"))
+        if (d.opts.file_headers)
             try w.writeAll("COFF Optional Header:\n");
 
         const magic: std.coff.OptionalHeader.Magic = @fromBackingInt(@intCast(try r.peekInt(u16, .little)));
@@ -230,7 +221,7 @@ fn dump(d: *const Objdump, is_image: bool) !void {
                         }
                         pub fn minor_subsystem_version(_: *const Objdump, _: *const OptionalHeader) !void {}
                     });
-                    if (d.element(.newlines)) try w.writeByte('\n');
+                    try w.writeByte('\n');
                 }
 
                 break :num_data_dirs .{
@@ -241,7 +232,7 @@ fn dump(d: *const Objdump, is_image: bool) !void {
             else => return d.fail("invalid optional header magic number: {x}", .{magic}),
         };
 
-        if (d.opts.file_headers and d.element(.@"header-name"))
+        if (d.opts.file_headers)
             try w.writeAll("Data Directories:\n");
 
         for (0..num_directory_entries) |dir_i| {
@@ -257,7 +248,7 @@ fn dump(d: *const Objdump, is_image: bool) !void {
                     .{ dir.virtual_address, dir.size, @as(DIRECTORY_ENTRY, @fromBackingInt(@intCast(dir_i))) },
                 );
         }
-        if (d.opts.file_headers and d.element(.newlines)) try w.writeByte('\n');
+        if (d.opts.file_headers) try w.writeByte('\n');
 
         break :image_info .{
             .data_dirs = known_dirs[0..@min(known_dirs.len, num_directory_entries)],
@@ -288,11 +279,10 @@ fn dump(d: *const Objdump, is_image: bool) !void {
 
     if (d.opts.strings) {
         if (string_table.len > 0) {
-            if (d.element(.@"table-header"))
-                try w.print(
-                    \\String Table (0x{x} bytes):
-                    \\
-                , .{string_table.len});
+            try w.print(
+                \\String Table (0x{x} bytes):
+                \\
+            , .{string_table.len});
 
             var sr = Io.Reader.fixed(string_table[@sizeOf(u32)..]);
             while (try sr.takeDelimiter(0)) |str| {
@@ -300,8 +290,8 @@ fn dump(d: *const Objdump, is_image: bool) !void {
                 try w.writeByte('\n');
             }
 
-            if (d.element(.newlines)) try w.writeByte('\n');
-        } else try w.writeAll("String table not present\n");
+            try w.writeByte('\n');
+        } else try w.writeAll("String table not present\n\n");
     }
 
     var sections: std.ArrayList(Section) = .empty;
@@ -309,13 +299,13 @@ fn dump(d: *const Objdump, is_image: bool) !void {
     var sections_with_data: u16 = 0;
 
     const load_sections =
-        d.opts.section_headers or
+        d.opts.sections or
         d.opts.symbols or
         d.opts.relocs or
         needs_data_dirs;
 
     if (load_sections) {
-        if (d.opts.section_headers and d.element(.@"table-header"))
+        if (d.opts.sections)
             try w.print(
                 \\Sections in '{s}':
                 \\Num Name          RVA Virt Size Data Size   & Data & Relocs  & Lines # Relocs  # Lines    Flags
@@ -340,7 +330,7 @@ fn dump(d: *const Objdump, is_image: bool) !void {
             };
 
             sections_with_data += @intFromBool(section.header.size_of_raw_data > 0);
-            if (d.opts.section_headers) {
+            if (d.opts.sections) {
                 if (!filterMatches(d.opts.section_filters, section.name)) continue;
                 const raw_name = std.mem.sliceTo(&section.header.name, 0);
                 try w.print(
@@ -348,14 +338,14 @@ fn dump(d: *const Objdump, is_image: bool) !void {
                     .{
                         section_i + 1,
                         raw_name,
-                        fmtIntField(d, section.header.virtual_address, .{ .kind = .va }),
+                        fmtIntField(d, section.header.virtual_address, .{ .kind = .address }),
                         fmtIntField(d, section.header.virtual_size, .{ .kind = .size, .width = .{ .explicit = 9 } }),
                         fmtIntField(d, section.header.size_of_raw_data, .{ .kind = .size, .width = .{ .explicit = 9 } }),
-                        fmtIntField(d, section.header.pointer_to_raw_data, .{ .kind = .va }),
-                        fmtIntField(d, section.header.pointer_to_relocations, .{ .kind = .va }),
-                        fmtIntField(d, section.header.pointer_to_linenumbers, .{ .kind = .va }),
-                        fmtIntField(d, section.header.number_of_relocations, .{ .kind = .va }),
-                        fmtIntField(d, section.header.number_of_linenumbers, .{ .kind = .va }),
+                        fmtIntField(d, section.header.pointer_to_raw_data, .{ .kind = .offset }),
+                        fmtIntField(d, section.header.pointer_to_relocations, .{ .kind = .offset }),
+                        fmtIntField(d, section.header.pointer_to_linenumbers, .{ .kind = .offset }),
+                        fmtIntField(d, section.header.number_of_relocations, .{ .kind = .size }),
+                        fmtIntField(d, section.header.number_of_linenumbers, .{ .kind = .size }),
                         @as(u32, @bitCast(section.header.flags)),
                     },
                 );
@@ -368,7 +358,7 @@ fn dump(d: *const Objdump, is_image: bool) !void {
             }
         }
 
-        if (d.opts.section_headers and d.element(.newlines)) try w.writeByte('\n');
+        if (d.opts.sections) try w.writeByte('\n');
     }
 
     var symbols: std.ArrayList(struct {
@@ -388,7 +378,7 @@ fn dump(d: *const Objdump, is_image: bool) !void {
             d.seekTo(file_location + header.pointer_to_symbol_table) catch |err|
                 return d.fail("unable to seek to symbol table: {t}", .{err});
 
-            if (d.opts.symbols and d.element(.@"table-header"))
+            if (d.opts.symbols)
                 try w.print(
                     \\Symbols in '{s}':
                     \\ Ord    Value  Sect Type           Storage   Name
@@ -433,7 +423,7 @@ fn dump(d: *const Objdump, is_image: bool) !void {
                     continue;
 
                 try w.print("{f} {x:0>8} ", .{
-                    fmtIntField(d, @as(u16, @intCast(symbol_i)), .{ .kind = .ord }),
+                    fmtIntField(d, @as(u16, @intCast(symbol_i)), .{ .kind = .index }),
                     symbol.value,
                 });
                 try switch (symbol.section_number) {
@@ -498,7 +488,7 @@ fn dump(d: *const Objdump, is_image: bool) !void {
                                 .{ weak_external.tag_index, symbol_i },
                             );
 
-                        if (d.redacted(.ord))
+                        if (d.opts.redact.contains(.index))
                             try w.print("  Weak External [falls back to relative ordinal {x:0>8} via {t}]", .{
                                 @as(i64, weak_external.tag_index) - symbol_i,
                                 weak_external.flag,
@@ -580,9 +570,9 @@ fn dump(d: *const Objdump, is_image: bool) !void {
                 }
             }
 
-            if (d.opts.symbols and d.element(.newlines)) try w.writeByte('\n');
+            if (d.opts.symbols) try w.writeByte('\n');
         } else if (d.opts.symbols) {
-            try w.writeAll("No symbol table found\n");
+            try w.writeAll("No symbol table found\n\n");
         }
     }
 
@@ -592,12 +582,11 @@ fn dump(d: *const Objdump, is_image: bool) !void {
         for (sections.items, 0..) |section, section_i| {
             if (section.header.pointer_to_relocations == 0) continue;
 
-            if (d.element(.@"table-header"))
-                try w.print(
-                    \\Relocs for section {x} '{s}' in {s}:
-                    \\  Offset Type                Symbol -> Sect   Name
-                    \\
-                , .{ section_i + 1, section.name, d.input_name });
+            try w.print(
+                \\Relocs for section {x} '{s}' in {s}:
+                \\  Offset Type                Symbol -> Sect   Name
+                \\
+            , .{ section_i + 1, section.name, d.input_name });
 
             d.seekTo(file_location + section.header.pointer_to_relocations) catch |err|
                 return d.fail("unable to seek to section {x} relocation table: {t}", .{ section_i + 1, err });
@@ -613,7 +602,7 @@ fn dump(d: *const Objdump, is_image: bool) !void {
                     continue;
 
                 try w.print("{f} ", .{
-                    fmtIntField(d, reloc.virtual_address, .{ .kind = .va, .zero_fill = true }),
+                    fmtIntField(d, reloc.virtual_address, .{ .kind = .address, .zero_fill = true }),
                 });
                 switch (header.machine) {
                     _ => unreachable,
@@ -633,12 +622,12 @@ fn dump(d: *const Objdump, is_image: bool) !void {
                     );
 
                 try w.print("{f}   {f} | {s}\n", .{
-                    fmtIntField(d, reloc.symbol_table_index, .{ .kind = .ord }),
+                    fmtIntField(d, reloc.symbol_table_index, .{ .kind = .index }),
                     fmtSectionNumber(sym.section_number),
                     sym.name,
                 });
             }
-            if (d.element(.newlines)) try w.writeByte('\n');
+            try w.writeByte('\n');
         }
     }
 
@@ -680,10 +669,7 @@ fn dump(d: *const Objdump, is_image: bool) !void {
             d,
             rva_index,
             sections.items,
-            (image_info orelse {
-                try w.writeAll("COFF objects do not contain an export data directory\n");
-                break :exports;
-            }).data_dirs,
+            (image_info orelse break :exports).data_dirs,
             .EXPORT,
         )) |section_index| {
             const export_dir = r.takeStruct(std.coff.ExportDirectoryTable, .little) catch |err|
@@ -730,18 +716,17 @@ fn dump(d: *const Objdump, is_image: bool) !void {
             const dir_slice = try r.readAllocAll(gpa, dir.size);
             defer gpa.free(dir_slice);
 
-            const dll_name = std.mem.sliceTo(dir_slice[name_loc - dir_loc ..], 0);
-            if (d.element(.@"table-header"))
-                try w.print(
-                    \\
-                    \\Exports from {s}:
-                    \\ Ord Hint      RVA   Name
-                    \\
-                , .{dll_name});
+            const dll_name = std.mem.sliceTo(dir_slice[@intCast(name_loc - dir_loc)..], 0);
+            try w.print(
+                \\
+                \\Exports from {s}:
+                \\ Ord Hint      RVA   Name
+                \\
+            , .{dll_name});
 
-            const name_pointers = dir_slice[name_pointer_loc - dir_loc ..][0 .. export_dir.number_of_names * @sizeOf(u32)];
-            const ords = dir_slice[ord_loc - dir_loc ..][0 .. export_dir.number_of_names * @sizeOf(u16)];
-            const addrs = dir_slice[eat_loc - dir_loc ..][0 .. export_dir.number_of_entries * @sizeOf(u32)];
+            const name_pointers = dir_slice[@intCast(name_pointer_loc - dir_loc)..][0 .. export_dir.number_of_names * @sizeOf(u32)];
+            const ords = dir_slice[@intCast(ord_loc - dir_loc)..][0 .. export_dir.number_of_names * @sizeOf(u16)];
+            const addrs = dir_slice[@intCast(eat_loc - dir_loc)..][0 .. export_dir.number_of_entries * @sizeOf(u32)];
             const name_rva_to_offset = dir.virtual_address + @sizeOf(std.coff.ExportDirectoryTable);
             for (0..export_dir.number_of_names) |name_i| {
                 const name_rva = std.mem.readInt(u32, name_pointers[name_i * @sizeOf(u32) ..][0..@sizeOf(u32)], .little);
@@ -753,14 +738,14 @@ fn dump(d: *const Objdump, is_image: bool) !void {
                 const addr = std.mem.readInt(u32, addrs[@as(u32, ord) * @sizeOf(u32) ..][0..@sizeOf(u32)], .little);
 
                 try w.print("{f} {f} ", .{
-                    fmtIntField(d, @as(u16, @intCast(export_dir.ordinal_base + ord)), .{ .kind = .ord }),
-                    fmtIntField(d, @as(u16, @intCast(name_i)), .{ .kind = .ord }),
+                    fmtIntField(d, @as(u16, @intCast(export_dir.ordinal_base + ord)), .{ .kind = .index }),
+                    fmtIntField(d, @as(u16, @intCast(name_i)), .{ .kind = .index }),
                 });
                 const is_forwarder = addr >= dir.virtual_address and addr < dir_end_rva;
                 if (is_forwarder) {
                     try w.writeAll("forwards");
                 } else {
-                    try w.print("{f}", .{fmtIntField(d, addr, .{ .kind = .rva })});
+                    try w.print("{f}", .{fmtIntField(d, addr, .{ .kind = .address })});
                 }
 
                 try w.print(" | {s}", .{name});
@@ -768,6 +753,7 @@ fn dump(d: *const Objdump, is_image: bool) !void {
                     try w.print(" -> {s}", .{std.mem.sliceTo(dir_slice[addr - name_rva_to_offset ..], 0)});
                 try w.writeByte('\n');
             }
+            try w.writeByte('\n');
         }
     }
 
@@ -776,10 +762,7 @@ fn dump(d: *const Objdump, is_image: bool) !void {
             d,
             rva_index,
             sections.items,
-            (image_info orelse {
-                try w.writeAll("COFF objects do not contain an import data directory\n");
-                break :imports;
-            }).data_dirs,
+            (image_info orelse break :imports).data_dirs,
             .IMPORT,
         )) |_| {
             const Entry = std.coff.ImportDirectoryEntry;
@@ -818,16 +801,14 @@ fn dump(d: *const Objdump, is_image: bool) !void {
 
                 const dll_name = (try r.takeDelimiter(0)).?;
 
-                if (d.element(.@"header-name"))
-                    try w.print("Import table entry for {s}:\n", .{dll_name});
+                try w.print("Import table entry for {s}:\n", .{dll_name});
                 try dumpHeader(d, Entry, &entry, struct {});
 
-                if (d.element(.@"table-header"))
-                    try w.print(
-                        \\
-                        \\ Ord Hint   Name
-                        \\
-                    , .{});
+                try w.print(
+                    \\
+                    \\ Ord Hint   Name
+                    \\
+                , .{});
 
                 const ilt_section = sectionContainingRva(
                     rva_index,
@@ -849,7 +830,7 @@ fn dump(d: *const Objdump, is_image: bool) !void {
                     );
 
                 switch (image_info.?.magic) {
-                    _ => try w.writeAll("(unknown magic)\n"),
+                    _ => try w.writeAll("(unknown magic)\n\n"),
                     inline else => |m| {
                         const TableEntry = std.coff.ImportLookupTableEntry(m);
                         const null_entry: TableEntry = @bitCast(@as(@typeInfo(TableEntry).@"struct".backing_integer.?, 0));
@@ -904,7 +885,7 @@ fn dump(d: *const Objdump, is_image: bool) !void {
                                 try w.print("     {x: >4} | {s}\n", .{ hint, name.? });
                             }
                         }
-                        if (d.element(.newlines)) try w.writeByte('\n');
+                        try w.writeByte('\n');
                     },
                 }
             }
@@ -916,14 +897,11 @@ fn dump(d: *const Objdump, is_image: bool) !void {
             d,
             rva_index,
             sections.items,
-            (image_info orelse {
-                try w.writeAll("COFF objects do not contain a TLS data directory\n");
-                break :tls;
-            }).data_dirs,
+            (image_info orelse break :tls).data_dirs,
             .TLS,
         )) |_| {
             switch (image_info.?.magic) {
-                _ => try w.writeAll("(unknown magic)\n"),
+                _ => try w.writeAll("(unknown magic)\n\n"),
                 inline else => |m| {
                     const TlsDirectoryEntry = std.coff.TlsDirectoryEntry(m);
                     const tls_entry = r.takeStruct(TlsDirectoryEntry, .little) catch |err|
@@ -977,10 +955,10 @@ fn dump(d: *const Objdump, is_image: bool) !void {
                                 .{err},
                             );
 
-                        try w.print("{f}\n", .{fmtIntField(d, callback_va, .{ .kind = .va })});
+                        try w.print("{f}\n", .{fmtIntField(d, callback_va, .{ .kind = .address })});
                         if (callback_va == 0) break;
                     }
-                    if (d.element(.newlines)) try w.writeByte('\n');
+                    try w.writeByte('\n');
                 },
             }
         }
@@ -1001,7 +979,7 @@ const Section = struct {
 };
 
 fn seekToDataDirectory(
-    d: *const Objdump,
+    d: *Objdump,
     rva_index: []const u16,
     sections: []const Section,
     data_dirs: []const std.coff.ImageDataDirectory,
@@ -1027,7 +1005,7 @@ fn seekToDataDirectory(
         return section_index;
     }
 
-    try d.w.print("{t} directory was not present in optional header\n", .{entry});
+    try d.w.print("{t} directory was not present in optional header\n\n", .{entry});
     return null;
 }
 
@@ -1108,7 +1086,14 @@ fn fmtIntField(
 ) std.fmt.Alt(FormatIntField, intFieldString) {
     return .{
         .data = .{
-            .val = if (d.redacted(params.kind)) null else val,
+            .val = val: {
+                if (params.kind) |k| {
+                    if (d.opts.redact.contains(k)) {
+                        break :val null;
+                    }
+                }
+                break :val val;
+            },
             .width = switch (params.width) {
                 .fit_max => @typeInfo(@TypeOf(val)).int.bits / 4,
                 .auto => null,
@@ -1140,17 +1125,27 @@ fn dumpFlags(w: *Io.Writer, comptime fmt: []const u8, comptime T: type, flags: *
 }
 
 fn fieldKind(name: []const u8) ?Objdump.FieldKind {
-    if (std.mem.endsWith(u8, name, "_rva"))
-        return .rva;
-    if (std.mem.endsWith(u8, name, "_va") or
-        std.mem.endsWith(u8, name, "_address") or
-        std.mem.startsWith(u8, name, "pointer_"))
-        return .va;
+    if (std.mem.endsWith(u8, name, "_rva") or
+        std.mem.endsWith(u8, name, "_va") or
+        std.mem.endsWith(u8, name, "_address"))
+    {
+        return .address;
+    }
+
+    if (std.mem.startsWith(u8, name, "pointer_")) {
+        return .offset;
+    }
+
     if (std.mem.startsWith(u8, name, "number_") or
         std.mem.startsWith(u8, name, "size"))
+    {
         return .size;
-    if (std.mem.startsWith(u8, name, "hint"))
-        return .ord;
+    }
+
+    if (std.mem.startsWith(u8, name, "hint")) {
+        return .index;
+    }
+
     return null;
 }
 
@@ -1195,9 +1190,9 @@ fn dumpVersionField(w: *Io.Writer, name: []const u8, major: anytype, minor: anyt
 
 fn dumpRvaField(d: *const Objdump, name: []const u8, rva: u64, base: u64) !void {
     try d.w.print("{f} {s} ({f})\n", .{
-        fmtIntField(d, rva, .{ .kind = .rva }),
+        fmtIntField(d, rva, .{ .kind = .address }),
         name,
-        fmtIntField(d, base + rva, .{ .kind = .va }),
+        fmtIntField(d, base + rva, .{ .kind = .address }),
     });
 }
 

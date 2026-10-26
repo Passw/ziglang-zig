@@ -20,7 +20,7 @@ pub fn identify(r: *Io.Reader) error{ReadFailed}!bool {
     };
 }
 
-pub fn dump(d: *const Objdump) Objdump.Error!void {
+pub fn dump(d: *Objdump) Objdump.Error!void {
     return d.fail("TODO: dump Mach-O object", .{});
 }
 

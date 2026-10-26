@@ -14,6 +14,7 @@ const wasm = @import("Objdump/wasm.zig");
 const coff = @import("Objdump/coff.zig");
 
 gpa: Allocator,
+terminal_mode: Io.Terminal.Mode,
 opts: Options,
 w: *Io.Writer,
 
@@ -23,12 +24,25 @@ seek_base: u64,
 raw_file_reader: *Io.File.Reader,
 limited_reader: ?*Io.Reader.Limited,
 
+any_errors: bool,
+
 pub fn reader(d: *const Objdump) *Io.Reader {
     if (d.limited_reader) |lr| {
         return &lr.interface;
     } else {
         return &d.raw_file_reader.interface;
     }
+}
+
+/// Intended for use from `format` functions printing to `d.w`.
+pub fn setColor(d: *const Objdump, w: *Io.Writer, color: Io.Terminal.Color) Io.Writer.Error!void {
+    assert(w == d.w);
+    const term: Io.Terminal = .{ .writer = w, .mode = d.terminal_mode };
+    term.setColor(color) catch |err| switch (err) {
+        error.Unexpected => {},
+        error.Canceled => term.mode.windows_api.io.recancel(),
+        else => |e| return e,
+    };
 }
 
 pub fn logicalPos(d: *const Objdump) u64 {
@@ -84,93 +98,138 @@ pub const Error = Allocator.Error ||
     error{AlreadyReported};
 
 pub const Options = struct {
+    archive_member_headers: bool,
+    archive_symbols: bool,
+    file_headers: bool,
+    sections: bool,
+    symbols: bool,
+    relocs: bool,
+
+    archive_member_filters: []const []const u8,
+    section_filters: []const []const u8,
+    symbol_filters: []const []const u8,
+
+    basenames: bool,
+    redact: std.enums.EnumSet(FieldKind),
+
+    phdrs: bool,
+    dynamic: bool,
+    symbol_versions: bool,
+    version_definitions: bool,
+
+    imports: bool,
     exports: bool,
     exports_sort: bool,
-    file_headers: bool,
-    imports: bool,
-    archive_symbols: bool,
-    archive_member_headers: bool,
-    archive_member_filters: []const []const u8,
-    elements: std.enums.EnumArray(Element, bool),
-    redact: std.enums.EnumArray(FieldKind, bool),
-    relocs: bool,
-    section_filters: []const []const u8,
-    section_headers: bool,
-    symbol_filters: []const []const u8,
     strings: bool,
-    symbols: bool,
     tls: bool,
 };
 
-pub fn element(self: *const Objdump, e: Element) bool {
-    return self.opts.elements.get(e);
+/// Returns a formatter which supports numeric formatting ("{d}", "{x:0>10}", etc), with the
+/// following differences from the default integer formatting logic:
+///
+/// * If the given `kind` is to be redacted, the value is replaced with '?' bytes.
+///
+/// * If the value is formatted as binary, hexadecimal, or octal, the appropriate base prefix (one
+///   of "0b", "0o", "0x") is automatically prepended. It is written before any "fill" bytes, so it
+///   is generally expected that the caller will use '0' as the fill byte if specifying a width.
+///
+/// * If the value is formatted with a width specifier, then insignificant zeroes (and the base
+///   prefix described above) are rendered to the output in grey (if color is enabled).
+pub fn fmtIntField(d: *const Objdump, val: u64, kind: ?FieldKind) FormatIntField {
+    return .{ .d = d, .val = val, .kind = kind };
 }
+pub const FormatIntField = struct {
+    d: *const Objdump,
+    val: u64,
+    kind: ?FieldKind,
+    pub fn formatNumber(ctx: FormatIntField, w: *Io.Writer, number: std.fmt.Number) Io.Writer.Error!void {
+        const prefix: []const u8 = switch (number.mode) {
+            .decimal => "",
+            .binary => "0b",
+            .octal => "0o",
+            .hex => "0x",
+            .scientific => unreachable, // not supported
+        };
 
-pub fn redacted(self: *const Objdump, opt_kind: ?FieldKind) bool {
-    const kind = opt_kind orelse return false;
-    return self.opts.redact.get(kind);
-}
-
-pub fn fmtAddress(d: *const Objdump, addr: u64, width: FormatAddress.Width) FormatAddress {
-    return .{
-        .addr = if (d.redacted(.va)) null else addr,
-        .width = width,
-    };
-}
-pub const FormatAddress = struct {
-    addr: ?u64,
-    width: Width,
-    pub const Width = enum { no_pad, pad_8, pad_16 };
-    pub fn format(ctx: FormatAddress, w: *Io.Writer) Io.Writer.Error!void {
-        if (ctx.addr) |addr| {
-            switch (ctx.width) {
-                .no_pad => try w.print("0x{X}", .{addr}),
-                .pad_8 => try w.print("0x{X:0>8}", .{addr}),
-                .pad_16 => try w.print("0x{X:0>16}", .{addr}),
+        var buffer: [128]u8 = undefined;
+        const significant_digits: []const u8, const fill_digit: u8 = digits: {
+            if (ctx.kind) |k| {
+                if (ctx.d.opts.redact.contains(k)) {
+                    if (number.width == null) {
+                        // One "?" looks weird, use a few.
+                        break :digits .{ "???", '?' };
+                    } else {
+                        break :digits .{ "", '?' };
+                    }
+                }
             }
+
+            if (number.width != null and number.fill == '0' and ctx.val == 0) {
+                // We want all of the zeroes to be highlighted as insignificant instead of the last
+                // zero appearing as significant.
+                break :digits .{ "", number.fill };
+            }
+
+            var buf_w: std.Io.Writer = .fixed(&buffer);
+            buf_w.printInt(
+                ctx.val,
+                number.mode.base().?,
+                number.case,
+                .{},
+            ) catch |err| switch (err) {
+                // The value is a `u64`, so the worst-case output is 64 bits when base = 2.
+                error.WriteFailed => unreachable,
+            };
+            break :digits .{ buf_w.buffered(), number.fill };
+        };
+
+        if (number.width) |width| {
+            try ctx.d.setColor(w, .dim);
+            try w.writeAll(prefix);
+            try w.splatByteAll(fill_digit, width -| significant_digits.len);
+            try ctx.d.setColor(w, .reset);
+            try w.writeAll(significant_digits);
         } else {
-            switch (ctx.width) {
-                .no_pad, .pad_8 => try w.writeAll("xxxxxxxxxx"),
-                .pad_16 => try w.writeAll("xxxxxxxxxxxxxxxxxx"),
-            }
+            assert(significant_digits.len > 0);
+            try w.writeAll(prefix);
+            try w.writeAll(significant_digits);
         }
     }
 };
 
 pub fn fail(
-    d: *const Objdump,
+    d: *Objdump,
     comptime fmt: []const u8,
     args: anytype,
 ) (Io.Writer.Error || error{AlreadyReported}) {
+    d.any_errors = true;
     try d.w.flush();
     std.log.err("failed to parse {s}: " ++ fmt, .{d.input_name} ++ args);
-    try d.w.writeByte('\n'); // trailing newline for this input
+    try d.w.writeByte('\n'); // trailing blank line for this input
     return error.AlreadyReported;
 }
 
 pub fn warn(
-    d: *const Objdump,
+    d: *Objdump,
     comptime fmt: []const u8,
     args: anytype,
 ) Error!void {
+    d.any_errors = true;
     try d.w.flush();
     std.log.warn(fmt, args);
 }
 
 pub const FieldKind = enum {
-    va,
-    rva,
-    ord,
+    address,
+    offset,
+    index,
     size,
+    @"align",
 };
 
 const Element = enum {
-    @"file-type",
-    @"header-name",
     @"input-path",
     @"member-path",
-    newlines,
-    @"table-header",
 };
 
 pub fn main(init: std.process.Init) (Io.UnexpectedError || Io.Cancelable || Allocator.Error)!u8 {
@@ -181,22 +240,30 @@ pub fn main(init: std.process.Init) (Io.UnexpectedError || Io.Cancelable || Allo
 
     var input_paths: std.ArrayList([]const u8) = .empty;
 
-    var exports: bool = false;
-    var exports_sort: bool = false;
-    var file_headers: bool = false;
-    var imports: bool = false;
-    var archive_symbols: bool = false;
     var archive_member_headers: bool = false;
-    var elements: @FieldType(Options, "elements") = .initFill(true);
-    var redact: @FieldType(Options, "redact") = .initFill(false);
-    var relocs: bool = false;
-    var section_headers: bool = false;
-    var strings: bool = false;
+    var archive_symbols: bool = false;
+    var file_headers: bool = false;
+    var sections: bool = false;
     var symbols: bool = false;
-    var tls: bool = false;
+    var relocs: bool = false;
+
+    var archive_member_filters: std.ArrayList([]const u8) = .empty;
     var section_filters: std.ArrayList([]const u8) = .empty;
     var symbol_filters: std.ArrayList([]const u8) = .empty;
-    var archive_member_filters: std.ArrayList([]const u8) = .empty;
+
+    var basenames: bool = false;
+    var redact: std.enums.EnumSet(FieldKind) = .empty;
+
+    var phdrs: bool = false;
+    var dynamic: bool = false;
+    var symbol_versions: bool = false;
+    var version_definitions: bool = false;
+
+    var imports: bool = false;
+    var exports: bool = false;
+    var exports_sort: bool = false;
+    var strings: bool = false;
+    var tls: bool = false;
 
     for (args[1..]) |arg| {
         if (!mem.startsWith(u8, arg, "-")) {
@@ -207,69 +274,73 @@ pub fn main(init: std.process.Init) (Io.UnexpectedError || Io.Cancelable || Allo
         if (mem.eql(u8, arg, "-h") or mem.eql(u8, arg, "--help")) {
             Io.File.stdout().writeStreamingAll(io, usage) catch |err|
                 fatal("failed to write stdout: {t}", .{err});
-        } else if (mem.eql(u8, arg, "--all-headers")) {
-            file_headers = true;
-            archive_symbols = true;
+            return 0;
+        } else if (mem.eql(u8, arg, "--all")) {
             archive_member_headers = true;
-            section_headers = true;
+            archive_symbols = true;
+            file_headers = true;
+            sections = true;
             symbols = true;
             relocs = true;
-        } else if (mem.startsWith(u8, arg, "--exports")) {
-            exports = true;
-            archive_symbols = true;
-            if (mem.eql(u8, arg["--exports".len..], "=sort"))
-                exports_sort = true;
-        } else if (mem.eql(u8, arg, "--file-headers")) {
-            file_headers = true;
-        } else if (mem.eql(u8, arg, "--imports")) {
+
+            phdrs = true;
+            dynamic = true;
+            symbol_versions = true;
+            version_definitions = true;
+
             imports = true;
-        } else if (mem.eql(u8, arg, "--archive-symbols")) {
-            archive_symbols = true;
+            exports = true;
+            strings = true;
+            tls = true;
         } else if (mem.eql(u8, arg, "--archive-member-headers")) {
             archive_member_headers = true;
-        } else if (mem.startsWith(u8, arg, "--elements=")) {
-            elements = .initFill(false);
-            var split = mem.splitScalar(u8, arg["--elements=".len..], ',');
-            while (split.next()) |elem| {
-                const kind, const add = if (elem.len > 0 and elem[0] == '-')
-                    .{ elem[1..], false }
-                else
-                    .{ elem, true };
-
-                if (std.meta.stringToEnum(Element, kind)) |format_kind| {
-                    elements.set(format_kind, add);
-                } else if (mem.eql(u8, kind, "all")) {
-                    elements = .initFill(add);
-                } else {
-                    fatal("unrecognized element: '{s}'", .{kind});
-                }
-            }
+        } else if (mem.eql(u8, arg, "--archive-symbols")) {
+            archive_symbols = true;
+        } else if (mem.eql(u8, arg, "--file-headers")) {
+            file_headers = true;
+        } else if (mem.eql(u8, arg, "--sections")) {
+            sections = true;
+        } else if (mem.eql(u8, arg, "--symbols")) {
+            symbols = true;
+        } else if (mem.eql(u8, arg, "--relocs")) {
+            relocs = true;
         } else if (mem.startsWith(u8, arg, "--only-archive-member=")) {
             (try archive_member_filters.addOne(arena)).* = try arena.dupe(u8, arg["--only-archive-member=".len..]);
         } else if (mem.startsWith(u8, arg, "--only-section=")) {
             (try section_filters.addOne(arena)).* = try arena.dupe(u8, arg["--only-section=".len..]);
         } else if (mem.startsWith(u8, arg, "--only-symbol=")) {
             (try symbol_filters.addOne(arena)).* = try arena.dupe(u8, arg["--only-symbol=".len..]);
+        } else if (mem.eql(u8, arg, "-s") or mem.eql(u8, arg, "--snapshot")) {
+            basenames = true;
+            redact = .full;
+        } else if (mem.eql(u8, arg, "--basenames")) {
+            basenames = true;
         } else if (mem.startsWith(u8, arg, "--redact=")) {
             const kind = arg["--redact=".len..];
             if (std.meta.stringToEnum(FieldKind, kind)) |field_kind| {
-                redact.set(field_kind, true);
+                redact.insert(field_kind);
             } else if (mem.eql(u8, kind, "all")) {
-                redact = .initFill(true);
+                redact = .full;
             } else {
                 fatal("unrecognized redaction kind: {s}", .{kind});
             }
-        } else if (mem.eql(u8, arg, "--relocs")) {
-            relocs = true;
-        } else if (mem.eql(u8, arg, "--section-headers")) {
-            section_headers = true;
-        } else if (mem.eql(u8, arg, "-s") or mem.eql(u8, arg, "--snapshot")) {
-            elements = .initFill(false);
-            redact = .initFill(true);
+        } else if (mem.eql(u8, arg, "--phdrs")) {
+            phdrs = true;
+        } else if (mem.eql(u8, arg, "--dynamic")) {
+            dynamic = true;
+        } else if (mem.eql(u8, arg, "--symbol-versions")) {
+            symbol_versions = true;
+        } else if (mem.eql(u8, arg, "--version-definitions")) {
+            version_definitions = true;
+        } else if (mem.eql(u8, arg, "--imports")) {
+            imports = true;
+        } else if (mem.eql(u8, arg, "--exports")) {
+            exports = true;
+        } else if (mem.eql(u8, arg, "--exports=sort")) {
+            exports = true;
+            exports_sort = true;
         } else if (mem.eql(u8, arg, "--strings")) {
             strings = true;
-        } else if (mem.eql(u8, arg, "--symbols")) {
-            symbols = true;
         } else if (mem.eql(u8, arg, "--tls")) {
             tls = true;
         } else {
@@ -282,26 +353,41 @@ pub fn main(init: std.process.Init) (Io.UnexpectedError || Io.Cancelable || Allo
     }
 
     const opts: Options = .{
+        .archive_member_headers = archive_member_headers,
+        .archive_symbols = archive_symbols,
+        .file_headers = file_headers,
+        .sections = sections,
+        .symbols = symbols,
+        .relocs = relocs,
+
+        .archive_member_filters = archive_member_filters.items,
+        .section_filters = section_filters.items,
+        .symbol_filters = symbol_filters.items,
+
+        .basenames = basenames,
+        .redact = redact,
+
+        .phdrs = phdrs,
+        .dynamic = dynamic,
+        .symbol_versions = symbol_versions,
+        .version_definitions = version_definitions,
+
+        .imports = imports,
         .exports = exports,
         .exports_sort = exports_sort,
-        .file_headers = file_headers,
-        .imports = imports,
-        .archive_symbols = archive_symbols,
-        .archive_member_headers = archive_member_headers,
-        .archive_member_filters = archive_member_filters.items,
-        .elements = elements,
-        .redact = redact,
-        .relocs = relocs,
-        .section_filters = section_filters.items,
-        .section_headers = section_headers,
         .strings = strings,
-        .symbol_filters = symbol_filters.items,
-        .symbols = symbols,
         .tls = tls,
     };
 
     var stdout_buffer: [4096]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writerStreaming(io, &stdout_buffer);
+
+    const terminal_mode: Io.Terminal.Mode = try .detect(
+        io,
+        .stdout(),
+        if (init.environ_map.get("NO_COLOR")) |s| s.len > 0 else false,
+        if (init.environ_map.get("CLICOLOR_FORCE")) |s| s.len > 0 else false,
+    );
 
     var any_errors: bool = false;
 
@@ -320,16 +406,19 @@ pub fn main(init: std.process.Init) (Io.UnexpectedError || Io.Cancelable || Allo
 
         var d: Objdump = .{
             .gpa = init.gpa,
+            .terminal_mode = terminal_mode,
             .opts = opts,
             .w = &stdout_writer.interface,
-            .input_name = switch (opts.elements.get(.@"input-path")) {
-                true => input_path,
-                false => std.fs.path.basename(input_path),
+            .input_name = switch (opts.basenames) {
+                false => input_path,
+                true => std.fs.path.basename(input_path),
             },
 
             .seek_base = 0,
             .raw_file_reader = &file_reader,
             .limited_reader = null,
+
+            .any_errors = false,
         };
 
         d.dumpOne(input_path) catch |err| switch (err) {
@@ -337,13 +426,14 @@ pub fn main(init: std.process.Init) (Io.UnexpectedError || Io.Cancelable || Allo
                 error.Canceled => |e| return e,
                 else => |e| fatal("failed to write stdout: {t}", .{e}),
             },
-            error.AlreadyReported => any_errors = true,
             else => |e| return e,
         };
         stdout_writer.flush() catch |err| switch (err) {
             error.Canceled => |e| return e,
             else => |e| fatal("failed to write stdout: {t}", .{e}),
         };
+
+        if (d.any_errors) any_errors = true;
     }
 
     if (any_errors) {
@@ -356,20 +446,19 @@ pub fn main(init: std.process.Init) (Io.UnexpectedError || Io.Cancelable || Allo
 const DumpOneError = Allocator.Error ||
     Io.Writer.Error ||
     Io.Cancelable ||
-    Io.UnexpectedError ||
-    error{AlreadyReported};
+    Io.UnexpectedError;
 
 fn dumpOne(d: *Objdump, input_path: []const u8) DumpOneError!void {
     d.dumpOneInner() catch |err| switch (err) {
         error.ReadFailed => switch (d.raw_file_reader.err.?) {
             error.Canceled => |e| return e,
             else => |e| {
+                d.any_errors = true;
                 try d.w.flush();
                 std.log.err("failed to read {q}: {t}", .{ input_path, e });
-                try d.w.writeByte('\n'); // trailing newline for this input
-                return error.AlreadyReported;
             },
         },
+        error.AlreadyReported => assert(d.any_errors),
         else => |e| return e,
     };
 }
@@ -424,36 +513,38 @@ const usage =
     \\
     \\Options:
     \\  -h, --help                         Print this help and exit
-    \\  --all-headers                      Alias for --file-headers --linker-member=2 --member-headers --section-headers --relocs --symbols
-    \\  --exports[=sort]                   Display exported symbols. 
-    \\                                     In the case of COFF import libraries, displays the symbol list and import headers.
-    \\                                     Specify =sort to optionally sort the import headers by symbol name.
-    \\  --file-headers                     Display file-format specific headers
-    \\  --imports                          Display imported symbols
-    \\  --archive-symbols                  Display contents of archive symbol table[s]
+    \\  --all                              Display all available information, including file-format-specific
     \\  --archive-member-headers           Display archive member headers
-    \\  --elements=[e1],[e2],-[e3],...     Select which formatting elements are displayed. Intended for snapshot testing.
-    \\      file-type                      File type summary
-    \\      header-name                    Name that precedes a header block     
-    \\      input-path                     Display full input paths. If removed, only basenames will be used.
-    \\      member-path                    Display full member paths. If removed, only basenames will be used.
-    \\      newlines                       Newlines between output sections
-    \\      table-header                   Table headers with column names
-    \\      all                            (default) All of the above
-    \\  --only-member=[name]               Only consider archive members names that contain [name]. Can be specified multiple times.
+    \\  --archive-symbols                  Display contents of archive symbol tables
+    \\  --file-headers                     Display file-format specific headers
+    \\  --sections                         Display section headers
+    \\  --symbols                          Display symbol tables
+    \\  --relocs                           Display relocations
+    \\  --only-archive-member=[name]       Only consider archive members names that contain [name]. Can be specified multiple times.
     \\  --only-section=[name]              Only consider section names that contain [name]. Can be specified multiple times.
     \\  --only-symbol=[name]               Only consider symbol names that contain [name]. Can be specified multiple times.
+    \\  -s, --snapshot                     Alias for --basenames --redact=all
+    \\  --basenames                        Only show the basenames of input files and archive members instead of their full paths.
     \\  --redact=[kind]                    Redact the specified field kind. Intended for snapshot testing.
-    \\      rva                            Relative virtual addresses
-    \\      va                             Virtual addresses and file offsets
-    \\      ord                            Symbol ordinals / hints
+    \\      address                        Virtual addresses
+    \\      offset                         File offsets
+    \\      index                          Indices and ordinals
     \\      size                           Sizes and lengths
+    \\      align                          Alignments
     \\      all                            All of the above
-    \\  --relocs                           Display relocations
-    \\  -s, --snapshot                     Alias for --redact=all --elements=-all
-    \\  --section-headers                  Display section headers
+    \\
+    \\ELF-specific options:
+    \\  --phdrs                            Display program headers
+    \\  --dynamic                          Display dynamic entries
+    \\  --symbol-versions                  Display GNU symbol version tables
+    \\  --version-definitions              Display GNU symbol version definitions and requirements
+    \\
+    \\COFF-specific options:
+    \\  --imports                          Display imported symbols
+    \\  --exports[=sort]                   Display exported symbols.
+    \\                                     For import libraries, displays the symbol list and import headers.
+    \\                                     Specify =sort to sort the import headers by symbol name.
     \\  --strings                          Display string tables
-    \\  --symbols                          Display symbol tables
     \\  --tls                              Display TLS information
     \\
 ;

@@ -175,7 +175,7 @@ pub fn dump(d: *Objdump) Objdump.Error!void {
             ),
         };
 
-        const object_name: []const u8 = switch (kind) {
+        const full_object_name: []const u8 = switch (kind) {
             .bsd_symbols => {
                 seen_bsd_symbols = true;
                 if (d.opts.archive_symbols) {
@@ -215,14 +215,13 @@ pub fn dump(d: *Objdump) Objdump.Error!void {
                         },
                         else => |e| return e,
                     };
-                    try w.writeByte('\n');
                 }
                 try d.seekTo(std.mem.alignForward(u64, member_off + size, 2));
                 continue;
             },
             .windows_second_symbols => {
                 seen_windows_second_symbols = true;
-                if (d.opts.archive_symbols) {
+                if (d.opts.archive_symbols or d.opts.exports) {
                     assert(d.limited_reader == null);
                     assert(d.seek_base == 0);
                     defer {
@@ -247,7 +246,6 @@ pub fn dump(d: *Objdump) Objdump.Error!void {
                         },
                         else => |e| return e,
                     };
-                    try w.writeByte('\n');
                 }
                 try d.seekTo(std.mem.alignForward(u64, member_off + size, 2));
                 continue;
@@ -260,12 +258,21 @@ pub fn dump(d: *Objdump) Objdump.Error!void {
                 try d.seekTo(std.mem.alignForward(u64, member_off + size, 2));
                 continue;
             },
-            .object => |name| switch (d.element(.@"member-path")) {
-                true => name,
-                false => std.fs.path.basename(name),
-            },
+            .object => |name| name,
         };
         seen_object = true;
+
+        for (d.opts.archive_member_filters) |filter| {
+            if (std.mem.find(u8, full_object_name, filter) != null) break;
+        } else if (d.opts.archive_member_filters.len > 0) {
+            try d.seekTo(std.mem.alignForward(u64, member_off + size, 2));
+            continue; // archive member name does not match filter
+        }
+
+        const object_name: []const u8 = switch (d.opts.basenames) {
+            false => full_object_name,
+            true => std.fs.path.basename(full_object_name),
+        };
 
         const date_raw = std.mem.trimEnd(u8, &hdr.ar_date, " ");
         const uid_raw = std.mem.trimEnd(u8, &hdr.ar_uid, " ");
@@ -274,17 +281,20 @@ pub fn dump(d: *Objdump) Objdump.Error!void {
 
         if (d.opts.archive_member_headers) {
             try w.print(
-                \\archive member header:
-                \\  off  {f}
-                \\ name  {q}
+                \\archive member header
+                \\        off: {x}
+                \\       name: {q}
                 \\
-            , .{ d.fmtAddress(header_off, .no_pad), object_name });
+            , .{
+                d.fmtIntField(header_off, .offset),
+                object_name,
+            });
 
             if (parseUnsignedAllowEmpty(u32, date_raw, 8)) |timestamp| {
                 const epoch_secs: std.time.epoch.EpochSeconds = .{ .secs = timestamp };
                 const date = epoch_secs.getEpochDay().calculateYearDay();
                 const time = epoch_secs.getDaySeconds();
-                try w.print(" date  {d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}\n", .{
+                try w.print("       date: {d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}\n", .{
                     date.year,
                     date.calculateMonthDay().month.numeric(),
                     date.calculateMonthDay().day_index,
@@ -300,7 +310,7 @@ pub fn dump(d: *Objdump) Objdump.Error!void {
             }
 
             if (parseUnsignedAllowEmpty(u32, uid_raw, 8)) |uid| {
-                try w.print("  uid  {d}\n", .{uid});
+                try w.print("        uid: {d}\n", .{uid});
             } else |err| switch (err) {
                 error.Overflow, error.InvalidCharacter => |e| try d.warn(
                     "invalid uid {q} in ar header: {t}",
@@ -309,7 +319,7 @@ pub fn dump(d: *Objdump) Objdump.Error!void {
             }
 
             if (parseUnsignedAllowEmpty(u32, gid_raw, 8)) |gid| {
-                try w.print("  gid  {d}\n", .{gid});
+                try w.print("        gid: {d}\n", .{gid});
             } else |err| switch (err) {
                 error.Overflow, error.InvalidCharacter => |e| try d.warn(
                     "invalid gid {q} in ar header: {t}",
@@ -318,13 +328,15 @@ pub fn dump(d: *Objdump) Objdump.Error!void {
             }
 
             if (parseUnsignedAllowEmpty(u24, mode_raw, 8)) |mode| {
-                try w.print(" mode  {o:0>3}\n", .{mode});
+                try w.print("       mode: {o:0>3}\n", .{mode});
             } else |err| switch (err) {
                 error.Overflow, error.InvalidCharacter => |e| try d.warn(
                     "invalid mode {q} in ar header: {t}",
                     .{ mode_raw, e },
                 ),
             }
+
+            try w.writeByte('\n');
         }
 
         {
@@ -371,27 +383,39 @@ fn parseSysVSymbolTable(d: *Objdump, comptime Int: type) (Objdump.Error || error
     const r = d.reader();
     const w = d.w;
 
-    try w.writeAll("archive symbol table:\n");
-
     const num_symbols = std.math.cast(
         usize,
         try r.takeInt(Int, .big),
     ) orelse return error.OutOfMemory;
 
-    try w.print("  {d} archive symbols\n", .{num_symbols});
+    try w.print("{d} symbols in archive symbol table\n", .{
+        d.fmtIntField(num_symbols, .size),
+    });
 
     const offsets = try r.readSliceEndianAlloc(gpa, Int, num_symbols, .big);
     defer gpa.free(offsets);
 
+    try w.print("  {s: ^18}  {s}\n", .{ "member offset", "symbol name" });
     for (offsets) |member_offset| {
         const name = r.takeSentinel(0) catch |err| switch (err) {
-            error.StreamTooLong => {
-                return d.fail("symbol name in archive symbol table exceeds maximum supported length", .{});
-            },
+            error.StreamTooLong => return d.fail(
+                "symbol name in archive symbol table exceeds maximum supported length",
+                .{},
+            ),
             else => |e| return e,
         };
-        try w.print("    {f}  {q}\n", .{ d.fmtAddress(member_offset, .pad_8), name });
+        for (d.opts.symbol_filters) |filter| {
+            if (std.mem.find(u8, name, filter) != null) break;
+        } else if (d.opts.symbol_filters.len > 0) {
+            continue;
+        }
+        try w.print("  {x:0>16}  {s}\n", .{
+            d.fmtIntField(member_offset, .offset),
+            name,
+        });
     }
+
+    try w.writeByte('\n');
 }
 
 fn parseWindowsSecondSymbolTable(d: *Objdump) (Objdump.Error || error{EndOfStream})!void {
@@ -399,40 +423,45 @@ fn parseWindowsSecondSymbolTable(d: *Objdump) (Objdump.Error || error{EndOfStrea
     const r = d.reader();
     const w = d.w;
 
-    try w.writeAll("second archive symbol table:\n");
-
     const num_members = try r.takeInt(u32, .little);
-    try w.print("  {d} archive members\n", .{num_members});
 
     const member_offsets = try r.readSliceEndianAlloc(gpa, u32, num_members, .little);
     defer gpa.free(member_offsets);
 
-    for (member_offsets, 1..) |member_offset, member_index| {
-        try w.print("    {d: >3}[{f}]\n", .{ member_index, d.fmtAddress(member_offset, .pad_8) });
-    }
-
     const num_symbols = try r.takeInt(u32, .little);
-    try w.print("  {d} archive symbols\n", .{num_symbols});
+    try w.print("{d} archive symbols, {d} archive members in second archive symbol table\n", .{
+        d.fmtIntField(num_symbols, .size),
+        d.fmtIntField(num_members, .size),
+    });
 
     const symbol_member_indices = try r.readSliceEndianAlloc(gpa, u16, num_symbols, .little);
     defer gpa.free(symbol_member_indices);
 
+    try w.print("  {s: >6}  {s: ^18}  {s}\n", .{ "member", "member offset", "symbol name" });
     for (symbol_member_indices) |member_index| {
         const name = r.takeSentinel(0) catch |err| switch (err) {
-            error.StreamTooLong => {
-                return d.fail("symbol name in archive symbol table exceeded maximum supported length", .{});
-            },
+            error.StreamTooLong => return d.fail(
+                "symbol name in archive symbol table exceeded maximum supported length",
+                .{},
+            ),
             else => |e| return e,
         };
         if (member_index == 0 or member_index > num_members) {
             return d.fail("symbol {q} has out-of-range member index '{d}'", .{ name, member_index });
         }
-        try w.print("    {d: >3}[{f}]  {q}\n", .{
-            member_index,
-            d.fmtAddress(member_offsets[member_index - 1], .pad_8),
+        for (d.opts.symbol_filters) |filter| {
+            if (std.mem.find(u8, name, filter) != null) break;
+        } else if (d.opts.symbol_filters.len > 0) {
+            continue;
+        }
+        try w.print("  {d: >6}  {x:0>16}  {s}\n", .{
+            d.fmtIntField(member_index, .index),
+            d.fmtIntField(member_offsets[member_index - 1], .offset),
             name,
         });
     }
+
+    try w.writeByte('\n');
 }
 
 const std = @import("std");
