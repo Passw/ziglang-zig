@@ -993,6 +993,8 @@ pub const PT = enum(Word) {
     pub const GNU_STACK: PT = @fromBackingInt(@intCast(0x6474e551));
     /// Read-only after relocation
     pub const GNU_RELRO: PT = @fromBackingInt(@intCast(0x6474e552));
+    /// Contains the `.note.gnu.property` section
+    pub const GNU_PROPERTY: PT = @fromBackingInt(@intCast(0x6474e553));
 
     pub const LOSUNW: PT = @fromBackingInt(@intCast(0x6ffffffa));
     pub const HISUNW: PT = @fromBackingInt(@intCast(0x6fffffff));
@@ -1619,6 +1621,15 @@ pub const Elf32 = struct {
 
         pub const Info = Elf32.Rel.Info;
     };
+    pub const Relr = packed union(Word) {
+        info: packed struct {
+            tag: enum(u1) { address = 0, chain = 1 },
+            /// Only valid if `info.tag == .chain`.
+            chain: u31,
+        },
+        /// Only valid if `info.tag == .address`.
+        address: u32,
+    };
     pub const Dyn = extern struct {
         tag: packed struct(Sword) { dt: DT },
         val: u32,
@@ -1707,6 +1718,15 @@ pub const Elf64 = struct {
         addend: i64,
 
         pub const Info = Elf64.Rel.Info;
+    };
+    pub const Relr = packed union(Xword) {
+        info: packed struct {
+            tag: enum(u1) { address = 0, chain = 1 },
+            /// Only valid if `info.tag == .chain`.
+            chain: u63,
+        },
+        /// Only valid if `info.tag == .address`.
+        address: u64,
     };
     pub const Dyn = extern struct {
         tag: packed struct(Sxword) { dt: DT, unused: u32 = 0 },
