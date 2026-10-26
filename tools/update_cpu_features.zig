@@ -5194,6 +5194,10 @@ const targets = [_]ArchTarget{
             },
 
             .{
+                .llvm_name = "64bit",
+                .extra_deps = &.{"32bit"},
+            },
+            .{
                 .llvm_name = "sse4.2",
                 .extra_deps = &.{"crc32"},
             },
@@ -5231,6 +5235,11 @@ const targets = [_]ArchTarget{
             },
 
             // Custom Zig features
+            .{
+                .zig_name = "32bit",
+                .desc = "Support 32-bit instructions",
+                .deps = &.{},
+            },
             .{
                 .zig_name = "bsf_bsr_0_clobbers_result",
                 .desc = "BSF/BSR may clobber the lower 32-bits of the result register when the source is zero",
@@ -5379,8 +5388,20 @@ const targets = [_]ArchTarget{
             },
 
             .{
+                .llvm_name = "alderlake",
+                .extra_deps = &.{ "smap", "smep" },
+            },
+            .{
                 .llvm_name = "amdfam10",
                 .extra_deps = &.{"3dnowa"},
+            },
+            .{
+                .llvm_name = "arrowlake",
+                .extra_deps = &.{ "smap", "smep" },
+            },
+            .{
+                .llvm_name = "arrowlake-s",
+                .extra_deps = &.{ "smap", "smep" },
             },
             .{
                 .llvm_name = "athlon",
@@ -5395,8 +5416,12 @@ const targets = [_]ArchTarget{
                 .extra_deps = &.{"3dnowa"},
             },
             .{
+                .llvm_name = "athlon",
+                .extra_deps = &.{ "32bit", "3dnowa" },
+            },
+            .{
                 .llvm_name = "athlon-4",
-                .extra_deps = &.{"3dnowa"},
+                .extra_deps = &.{ "32bit", "3dnowa" },
             },
             .{
                 .llvm_name = "athlon-fx",
@@ -5404,15 +5429,15 @@ const targets = [_]ArchTarget{
             },
             .{
                 .llvm_name = "athlon-mp",
-                .extra_deps = &.{"3dnowa"},
+                .extra_deps = &.{ "32bit", "3dnowa" },
             },
             .{
                 .llvm_name = "athlon-tbird",
-                .extra_deps = &.{"3dnowa"},
+                .extra_deps = &.{ "32bit", "3dnowa" },
             },
             .{
                 .llvm_name = "athlon-xp",
-                .extra_deps = &.{"3dnowa"},
+                .extra_deps = &.{ "32bit", "3dnowa" },
             },
             .{
                 .llvm_name = "barcelona",
@@ -5424,7 +5449,11 @@ const targets = [_]ArchTarget{
             },
             .{
                 .llvm_name = "c3",
-                .extra_deps = &.{"3dnow"},
+                .extra_deps = &.{ "32bit", "3dnow" },
+            },
+            .{
+                .llvm_name = "c3-2",
+                .extra_deps = &.{"32bit"},
             },
             .{
                 .llvm_name = "cannonlake",
@@ -5440,7 +5469,7 @@ const targets = [_]ArchTarget{
             },
             .{
                 .llvm_name = "geode",
-                .extra_deps = &.{"3dnowa"},
+                .extra_deps = &.{ "32bit", "3dnowa" },
             },
             .{
                 .llvm_name = "goldmont",
@@ -5456,11 +5485,19 @@ const targets = [_]ArchTarget{
             },
             .{
                 .llvm_name = "i386",
-                .extra_deps = &.{"bsf_bsr_0_clobbers_result"},
+                .extra_deps = &.{ "32bit", "bsf_bsr_0_clobbers_result" },
             },
             .{
                 .llvm_name = "i486",
-                .extra_deps = &.{"bsf_bsr_0_clobbers_result"},
+                .extra_deps = &.{ "32bit", "bsf_bsr_0_clobbers_result" },
+            },
+            .{
+                .llvm_name = "i586",
+                .extra_deps = &.{"32bit"},
+            },
+            .{
+                .llvm_name = "i686",
+                .extra_deps = &.{"32bit"},
             },
             .{
                 .llvm_name = "icelake_client",
@@ -5475,12 +5512,16 @@ const targets = [_]ArchTarget{
                 .extra_deps = &.{"smep"},
             },
             .{
+                .llvm_name = "k6",
+                .extra_deps = &.{"32bit"},
+            },
+            .{
                 .llvm_name = "k6-2",
-                .extra_deps = &.{"3dnow"},
+                .extra_deps = &.{ "32bit", "3dnow" },
             },
             .{
                 .llvm_name = "k6-3",
-                .extra_deps = &.{"3dnow"},
+                .extra_deps = &.{ "32bit", "3dnow" },
             },
             .{
                 .llvm_name = "k8",
@@ -5507,6 +5548,10 @@ const targets = [_]ArchTarget{
                 },
             },
             .{
+                .llvm_name = "lakemont",
+                .extra_deps = &.{"32bit"},
+            },
+            .{
                 .llvm_name = "meteorlake",
                 .extra_deps = &.{ "smap", "smep" },
             },
@@ -5517,6 +5562,42 @@ const targets = [_]ArchTarget{
             .{
                 .llvm_name = "opteron-sse3",
                 .extra_deps = &.{"3dnowa"},
+            },
+            .{
+                .llvm_name = "pentium",
+                .extra_deps = &.{"32bit"},
+            },
+            .{
+                .llvm_name = "pentium-m",
+                .extra_deps = &.{"32bit"},
+            },
+            .{
+                .llvm_name = "pentium-mmx",
+                .extra_deps = &.{"32bit"},
+            },
+            .{
+                .llvm_name = "pentium2",
+                .extra_deps = &.{"32bit"},
+            },
+            .{
+                .llvm_name = "pentium3",
+                .extra_deps = &.{"32bit"},
+            },
+            .{
+                .llvm_name = "pentium3m",
+                .extra_deps = &.{"32bit"},
+            },
+            .{
+                .llvm_name = "pentium4",
+                .extra_deps = &.{"32bit"},
+            },
+            .{
+                .llvm_name = "pentiumpro",
+                .extra_deps = &.{"32bit"},
+            },
+            .{
+                .llvm_name = "prescott",
+                .extra_deps = &.{"32bit"},
             },
             .{
                 .llvm_name = "raptorlake",
@@ -5552,19 +5633,15 @@ const targets = [_]ArchTarget{
             },
             .{
                 .llvm_name = "winchip2",
-                .extra_deps = &.{"3dnow"},
+                .extra_deps = &.{ "32bit", "3dnow" },
             },
             .{
-                .llvm_name = "alderlake",
-                .extra_deps = &.{ "smap", "smep" },
+                .llvm_name = "winchip-c6",
+                .extra_deps = &.{"32bit"},
             },
             .{
-                .llvm_name = "arrowlake",
-                .extra_deps = &.{ "smap", "smep" },
-            },
-            .{
-                .llvm_name = "arrowlake-s",
-                .extra_deps = &.{ "smap", "smep" },
+                .llvm_name = "yonah",
+                .extra_deps = &.{"32bit"},
             },
             .{
                 .llvm_name = "znver1",
@@ -5591,7 +5668,7 @@ const targets = [_]ArchTarget{
             .{
                 .llvm_name = null,
                 .zig_name = "i86",
-                .features = &.{"16bit_mode"},
+                .features = &.{},
             },
         },
     },

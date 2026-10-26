@@ -6,6 +6,7 @@ const CpuModel = std.Target.Cpu.Model;
 
 pub const Feature = enum {
     @"16bit_mode",
+    @"32bit",
     @"32bit_mode",
     @"3dnow",
     @"3dnowa",
@@ -217,6 +218,11 @@ pub const all_features = blk: {
         .description = "16-bit mode (i8086)",
         .dependencies = featureSet(&[_]Feature{}),
     };
+    result[@backingInt(Feature.@"32bit")] = .{
+        .llvm_name = null,
+        .description = "Support 32-bit instructions",
+        .dependencies = featureSet(&[_]Feature{}),
+    };
     result[@backingInt(Feature.@"32bit_mode")] = .{
         .llvm_name = "32bit-mode",
         .description = "32-bit mode (80386)",
@@ -239,7 +245,9 @@ pub const all_features = blk: {
     result[@backingInt(Feature.@"64bit")] = .{
         .llvm_name = "64bit",
         .description = "Support 64-bit instructions",
-        .dependencies = featureSet(&[_]Feature{}),
+        .dependencies = featureSet(&[_]Feature{
+            .@"32bit",
+        }),
     };
     result[@backingInt(Feature.adx)] = .{
         .llvm_name = "adx",
@@ -1642,6 +1650,7 @@ pub const cpu = struct {
         .name = "athlon_4",
         .llvm_name = "athlon-4",
         .features = featureSet(&[_]Feature{
+            .@"32bit",
             .@"3dnowa",
             .cmov,
             .cx8,
@@ -1679,6 +1688,7 @@ pub const cpu = struct {
         .name = "athlon_mp",
         .llvm_name = "athlon-mp",
         .features = featureSet(&[_]Feature{
+            .@"32bit",
             .@"3dnowa",
             .cmov,
             .cx8,
@@ -1696,6 +1706,7 @@ pub const cpu = struct {
         .name = "athlon_tbird",
         .llvm_name = "athlon-tbird",
         .features = featureSet(&[_]Feature{
+            .@"32bit",
             .@"3dnowa",
             .cmov,
             .cx8,
@@ -1711,6 +1722,7 @@ pub const cpu = struct {
         .name = "athlon_xp",
         .llvm_name = "athlon-xp",
         .features = featureSet(&[_]Feature{
+            .@"32bit",
             .@"3dnowa",
             .cmov,
             .cx8,
@@ -2096,6 +2108,7 @@ pub const cpu = struct {
         .name = "c3",
         .llvm_name = "c3",
         .features = featureSet(&[_]Feature{
+            .@"32bit",
             .@"3dnow",
             .prfchw,
             .slow_unaligned_mem_16,
@@ -2107,6 +2120,7 @@ pub const cpu = struct {
         .name = "c3_2",
         .llvm_name = "c3-2",
         .features = featureSet(&[_]Feature{
+            .@"32bit",
             .cmov,
             .cx8,
             .fxsr,
@@ -2837,6 +2851,7 @@ pub const cpu = struct {
         .name = "geode",
         .llvm_name = "geode",
         .features = featureSet(&[_]Feature{
+            .@"32bit",
             .@"3dnowa",
             .cx8,
             .prfchw,
@@ -3270,6 +3285,7 @@ pub const cpu = struct {
         .name = "i386",
         .llvm_name = "i386",
         .features = featureSet(&[_]Feature{
+            .@"32bit",
             .bsf_bsr_0_clobbers_result,
             .slow_unaligned_mem_16,
             .vzeroupper,
@@ -3280,6 +3296,7 @@ pub const cpu = struct {
         .name = "i486",
         .llvm_name = "i486",
         .features = featureSet(&[_]Feature{
+            .@"32bit",
             .bsf_bsr_0_clobbers_result,
             .slow_unaligned_mem_16,
             .vzeroupper,
@@ -3290,6 +3307,7 @@ pub const cpu = struct {
         .name = "i586",
         .llvm_name = "i586",
         .features = featureSet(&[_]Feature{
+            .@"32bit",
             .cx8,
             .slow_unaligned_mem_16,
             .vzeroupper,
@@ -3300,6 +3318,7 @@ pub const cpu = struct {
         .name = "i686",
         .llvm_name = "i686",
         .features = featureSet(&[_]Feature{
+            .@"32bit",
             .cmov,
             .cx8,
             .slow_unaligned_mem_16,
@@ -3310,9 +3329,7 @@ pub const cpu = struct {
     pub const @"i86": CpuModel = .{
         .name = "i86",
         .llvm_name = null,
-        .features = featureSet(&[_]Feature{
-            .@"16bit_mode",
-        }),
+        .features = featureSet(&[_]Feature{}),
     };
     pub const icelake_client: CpuModel = .{
         .name = "icelake_client",
@@ -3482,6 +3499,7 @@ pub const cpu = struct {
         .name = "k6",
         .llvm_name = "k6",
         .features = featureSet(&[_]Feature{
+            .@"32bit",
             .cx8,
             .mmx,
             .slow_unaligned_mem_16,
@@ -3493,6 +3511,7 @@ pub const cpu = struct {
         .name = "k6_2",
         .llvm_name = "k6-2",
         .features = featureSet(&[_]Feature{
+            .@"32bit",
             .@"3dnow",
             .cx8,
             .prfchw,
@@ -3505,6 +3524,7 @@ pub const cpu = struct {
         .name = "k6_3",
         .llvm_name = "k6-3",
         .features = featureSet(&[_]Feature{
+            .@"32bit",
             .@"3dnow",
             .cx8,
             .prfchw,
@@ -3638,6 +3658,7 @@ pub const cpu = struct {
         .name = "lakemont",
         .llvm_name = "lakemont",
         .features = featureSet(&[_]Feature{
+            .@"32bit",
             .cx8,
             .slow_unaligned_mem_16,
             .vzeroupper,
@@ -4049,6 +4070,7 @@ pub const cpu = struct {
         .name = "pentium",
         .llvm_name = "pentium",
         .features = featureSet(&[_]Feature{
+            .@"32bit",
             .cx8,
             .slow_unaligned_mem_16,
             .vzeroupper,
@@ -4059,6 +4081,7 @@ pub const cpu = struct {
         .name = "pentium2",
         .llvm_name = "pentium2",
         .features = featureSet(&[_]Feature{
+            .@"32bit",
             .cmov,
             .cx8,
             .fxsr,
@@ -4073,6 +4096,7 @@ pub const cpu = struct {
         .name = "pentium3",
         .llvm_name = "pentium3",
         .features = featureSet(&[_]Feature{
+            .@"32bit",
             .cmov,
             .cx8,
             .fxsr,
@@ -4088,6 +4112,7 @@ pub const cpu = struct {
         .name = "pentium3m",
         .llvm_name = "pentium3m",
         .features = featureSet(&[_]Feature{
+            .@"32bit",
             .cmov,
             .cx8,
             .fxsr,
@@ -4103,6 +4128,7 @@ pub const cpu = struct {
         .name = "pentium4",
         .llvm_name = "pentium4",
         .features = featureSet(&[_]Feature{
+            .@"32bit",
             .cmov,
             .cx8,
             .fxsr,
@@ -4118,6 +4144,7 @@ pub const cpu = struct {
         .name = "pentium_m",
         .llvm_name = "pentium-m",
         .features = featureSet(&[_]Feature{
+            .@"32bit",
             .cmov,
             .cx8,
             .fxsr,
@@ -4133,6 +4160,7 @@ pub const cpu = struct {
         .name = "pentium_mmx",
         .llvm_name = "pentium-mmx",
         .features = featureSet(&[_]Feature{
+            .@"32bit",
             .cx8,
             .mmx,
             .slow_unaligned_mem_16,
@@ -4144,6 +4172,7 @@ pub const cpu = struct {
         .name = "pentiumpro",
         .llvm_name = "pentiumpro",
         .features = featureSet(&[_]Feature{
+            .@"32bit",
             .cmov,
             .cx8,
             .nopl,
@@ -4156,6 +4185,7 @@ pub const cpu = struct {
         .name = "prescott",
         .llvm_name = "prescott",
         .features = featureSet(&[_]Feature{
+            .@"32bit",
             .cmov,
             .cx8,
             .fxsr,
@@ -4927,6 +4957,7 @@ pub const cpu = struct {
         .name = "winchip2",
         .llvm_name = "winchip2",
         .features = featureSet(&[_]Feature{
+            .@"32bit",
             .@"3dnow",
             .prfchw,
             .slow_unaligned_mem_16,
@@ -4938,6 +4969,7 @@ pub const cpu = struct {
         .name = "winchip_c6",
         .llvm_name = "winchip-c6",
         .features = featureSet(&[_]Feature{
+            .@"32bit",
             .mmx,
             .slow_unaligned_mem_16,
             .vzeroupper,
@@ -5066,6 +5098,7 @@ pub const cpu = struct {
         .name = "yonah",
         .llvm_name = "yonah",
         .features = featureSet(&[_]Feature{
+            .@"32bit",
             .cmov,
             .cx8,
             .fxsr,
