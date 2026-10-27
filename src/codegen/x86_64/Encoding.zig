@@ -994,7 +994,7 @@ pub const Feature = enum {
     vpclmulqdq,
     waitpkg,
     widekl,
-    x87,
+    @"387",
 };
 
 fn estimateInstructionLength(prefix: Prefix, encoding: Encoding, ops: []const Operand) usize {

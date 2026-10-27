@@ -5196,7 +5196,7 @@ const targets = [_]ArchTarget{
 
             .{
                 .llvm_name = "64bit",
-                .extra_deps = &.{"32bit"},
+                .extra_deps = &.{"486"},
             },
             .{
                 .llvm_name = "sse4.2",
@@ -5205,6 +5205,11 @@ const targets = [_]ArchTarget{
             .{
                 .llvm_name = "sse-unaligned-mem",
                 .zig_name = "unaligned_sse_access",
+            },
+            .{
+                .llvm_name = "x87",
+                .zig_name = "387",
+                .extra_deps = &.{"287"},
             },
         },
         .extra_features = &.{
@@ -5237,14 +5242,84 @@ const targets = [_]ArchTarget{
 
             // Custom Zig features
             .{
-                .zig_name = "32bit",
-                .desc = "Support 32-bit instructions",
+                .zig_name = "186",
+                .desc = "Enable 80186 instructions",
+                .deps = &.{},
+            },
+            .{
+                .zig_name = "286",
+                .desc = "Enable 80286 instructions",
+                .deps = &.{ "186", "aam_aad_imm", "masked_shift_count" },
+            },
+            .{
+                .zig_name = "287",
+                .desc = "Enable 80287 floating point instructions",
+                .deps = &.{"8087"},
+            },
+            .{
+                .zig_name = "386",
+                .desc = "Support 80386 instructions",
+                .deps = &.{"286"},
+            },
+            .{
+                .zig_name = "486",
+                .desc = "Enable 80486 instructions",
+                .deps = &.{"386"},
+            },
+            .{
+                .zig_name = "8087",
+                .desc = "Enable 8087 floating point instructions",
+                .deps = &.{},
+            },
+            .{
+                .zig_name = "8bit_bus",
+                .desc = "Has an 8-bit external data bus",
                 .deps = &.{},
             },
             .{
                 .zig_name = "bsf_bsr_0_clobbers_result",
                 .desc = "BSF/BSR may clobber the lower 32-bits of the result register when the source is zero",
                 .deps = &.{},
+            },
+            .{
+                .zig_name = "aam_aad_imm",
+                .desc = "AAM and AAD honor their immediate number base",
+                .deps = &.{},
+            },
+            .{
+                .zig_name = "masked_shift_count",
+                .desc = "Shift and rotate counts are masked to 5 bits",
+                .deps = &.{},
+            },
+            .{
+                .zig_name = "nec",
+                .desc = "Enable NEC V-series instructions",
+                .deps = &.{"186"},
+            },
+            .{
+                .zig_name = "nec_8080",
+                .desc = "Enable NEC V-series 8080 emulation mode entry (BRKEM)",
+                .deps = &.{"nec"},
+            },
+            .{
+                .zig_name = "nec_codec",
+                .desc = "Enable NEC V55PI MH/MR codec instructions",
+                .deps = &.{"nec_v55"},
+            },
+            .{
+                .zig_name = "nec_v25",
+                .desc = "Enable NEC V25/V35 instructions",
+                .deps = &.{"nec"},
+            },
+            .{
+                .zig_name = "nec_v55",
+                .desc = "Enable NEC V55 instructions",
+                .deps = &.{"nec_v25"},
+            },
+            .{
+                .zig_name = "nec_xa",
+                .desc = "Enable NEC V-series extended address mode",
+                .deps = &.{"nec"},
             },
             .{
                 .zig_name = "smap",
@@ -5406,7 +5481,7 @@ const targets = [_]ArchTarget{
             },
             .{
                 .llvm_name = "athlon",
-                .extra_deps = &.{"3dnowa"},
+                .extra_deps = &.{ "3dnowa", "486" },
             },
             .{
                 .llvm_name = "athlon64",
@@ -5417,12 +5492,8 @@ const targets = [_]ArchTarget{
                 .extra_deps = &.{"3dnowa"},
             },
             .{
-                .llvm_name = "athlon",
-                .extra_deps = &.{ "32bit", "3dnowa" },
-            },
-            .{
                 .llvm_name = "athlon-4",
-                .extra_deps = &.{ "32bit", "3dnowa" },
+                .extra_deps = &.{ "3dnowa", "486" },
             },
             .{
                 .llvm_name = "athlon-fx",
@@ -5430,15 +5501,15 @@ const targets = [_]ArchTarget{
             },
             .{
                 .llvm_name = "athlon-mp",
-                .extra_deps = &.{ "32bit", "3dnowa" },
+                .extra_deps = &.{ "3dnowa", "486" },
             },
             .{
                 .llvm_name = "athlon-tbird",
-                .extra_deps = &.{ "32bit", "3dnowa" },
+                .extra_deps = &.{ "3dnowa", "486" },
             },
             .{
                 .llvm_name = "athlon-xp",
-                .extra_deps = &.{ "32bit", "3dnowa" },
+                .extra_deps = &.{ "486", "3dnowa" },
             },
             .{
                 .llvm_name = "barcelona",
@@ -5450,11 +5521,11 @@ const targets = [_]ArchTarget{
             },
             .{
                 .llvm_name = "c3",
-                .extra_deps = &.{ "32bit", "3dnow" },
+                .extra_deps = &.{ "3dnow", "486" },
             },
             .{
                 .llvm_name = "c3-2",
-                .extra_deps = &.{"32bit"},
+                .extra_deps = &.{"486"},
             },
             .{
                 .llvm_name = "cannonlake",
@@ -5470,7 +5541,7 @@ const targets = [_]ArchTarget{
             },
             .{
                 .llvm_name = "geode",
-                .extra_deps = &.{ "32bit", "3dnowa" },
+                .extra_deps = &.{ "3dnowa", "486" },
             },
             .{
                 .llvm_name = "goldmont",
@@ -5486,19 +5557,19 @@ const targets = [_]ArchTarget{
             },
             .{
                 .llvm_name = "i386",
-                .extra_deps = &.{ "32bit", "bsf_bsr_0_clobbers_result" },
+                .extra_deps = &.{ "386", "bsf_bsr_0_clobbers_result" },
             },
             .{
                 .llvm_name = "i486",
-                .extra_deps = &.{ "32bit", "bsf_bsr_0_clobbers_result" },
+                .extra_deps = &.{ "486", "bsf_bsr_0_clobbers_result" },
             },
             .{
                 .llvm_name = "i586",
-                .extra_deps = &.{"32bit"},
+                .extra_deps = &.{"486"},
             },
             .{
                 .llvm_name = "i686",
-                .extra_deps = &.{"32bit"},
+                .extra_deps = &.{"486"},
             },
             .{
                 .llvm_name = "icelake_client",
@@ -5514,15 +5585,15 @@ const targets = [_]ArchTarget{
             },
             .{
                 .llvm_name = "k6",
-                .extra_deps = &.{"32bit"},
+                .extra_deps = &.{"486"},
             },
             .{
                 .llvm_name = "k6-2",
-                .extra_deps = &.{ "32bit", "3dnow" },
+                .extra_deps = &.{ "3dnow", "486" },
             },
             .{
                 .llvm_name = "k6-3",
-                .extra_deps = &.{ "32bit", "3dnow" },
+                .extra_deps = &.{ "3dnow", "486" },
             },
             .{
                 .llvm_name = "k8",
@@ -5534,23 +5605,15 @@ const targets = [_]ArchTarget{
             },
             .{
                 .llvm_name = "knl",
-                .extra_deps = &.{
-                    "avx512er",
-                    "avx512pf",
-                    "prefetchwt1",
-                },
+                .extra_deps = &.{ "avx512er", "avx512pf", "prefetchwt1" },
             },
             .{
                 .llvm_name = "knm",
-                .extra_deps = &.{
-                    "avx512er",
-                    "avx512pf",
-                    "prefetchwt1",
-                },
+                .extra_deps = &.{ "avx512er", "avx512pf", "prefetchwt1" },
             },
             .{
                 .llvm_name = "lakemont",
-                .extra_deps = &.{"32bit"},
+                .extra_deps = &.{"486"},
             },
             .{
                 .llvm_name = "meteorlake",
@@ -5566,39 +5629,39 @@ const targets = [_]ArchTarget{
             },
             .{
                 .llvm_name = "pentium",
-                .extra_deps = &.{"32bit"},
+                .extra_deps = &.{"486"},
             },
             .{
                 .llvm_name = "pentium-m",
-                .extra_deps = &.{"32bit"},
+                .extra_deps = &.{"486"},
             },
             .{
                 .llvm_name = "pentium-mmx",
-                .extra_deps = &.{"32bit"},
+                .extra_deps = &.{"486"},
             },
             .{
                 .llvm_name = "pentium2",
-                .extra_deps = &.{"32bit"},
+                .extra_deps = &.{"486"},
             },
             .{
                 .llvm_name = "pentium3",
-                .extra_deps = &.{"32bit"},
+                .extra_deps = &.{"486"},
             },
             .{
                 .llvm_name = "pentium3m",
-                .extra_deps = &.{"32bit"},
+                .extra_deps = &.{"486"},
             },
             .{
                 .llvm_name = "pentium4",
-                .extra_deps = &.{"32bit"},
+                .extra_deps = &.{"486"},
             },
             .{
                 .llvm_name = "pentiumpro",
-                .extra_deps = &.{"32bit"},
+                .extra_deps = &.{"486"},
             },
             .{
                 .llvm_name = "prescott",
-                .extra_deps = &.{"32bit"},
+                .extra_deps = &.{"486"},
             },
             .{
                 .llvm_name = "raptorlake",
@@ -5634,15 +5697,15 @@ const targets = [_]ArchTarget{
             },
             .{
                 .llvm_name = "winchip2",
-                .extra_deps = &.{ "32bit", "3dnow" },
+                .extra_deps = &.{ "3dnow", "486" },
             },
             .{
                 .llvm_name = "winchip-c6",
-                .extra_deps = &.{"32bit"},
+                .extra_deps = &.{"486"},
             },
             .{
                 .llvm_name = "yonah",
-                .extra_deps = &.{"32bit"},
+                .extra_deps = &.{"486"},
             },
             .{
                 .llvm_name = "znver1",
@@ -5668,8 +5731,78 @@ const targets = [_]ArchTarget{
         .extra_models = &.{
             .{
                 .llvm_name = null,
-                .zig_name = "i86",
-                .features = &.{},
+                .zig_name = "i186",
+                .features = &.{ "186", "aam_aad_imm", "masked_shift_count" },
+            },
+            .{
+                .llvm_name = null,
+                .zig_name = "i188",
+                .features = &.{ "186", "8bit_bus", "aam_aad_imm", "masked_shift_count" },
+            },
+            .{
+                .llvm_name = null,
+                .zig_name = "i286",
+                .features = &.{"286"},
+            },
+            .{
+                .llvm_name = null,
+                .zig_name = "i8086",
+                .features = &.{"aam_aad_imm"},
+            },
+            .{
+                .llvm_name = null,
+                .zig_name = "i8088",
+                .features = &.{ "8bit_bus", "aam_aad_imm" },
+            },
+            .{
+                .llvm_name = null,
+                .zig_name = "v20",
+                .features = &.{ "8bit_bus", "nec_8080" },
+            },
+            .{
+                .llvm_name = null,
+                .zig_name = "v25",
+                .features = &.{ "8bit_bus", "nec_v25" },
+            },
+            .{
+                .llvm_name = null,
+                .zig_name = "v30",
+                .features = &.{"nec_8080"},
+            },
+            .{
+                .llvm_name = null,
+                .zig_name = "v30mz",
+                .features = &.{ "186", "aam_aad_imm", "masked_shift_count" },
+            },
+            .{
+                .llvm_name = null,
+                .zig_name = "v33a",
+                .features = &.{"nec_xa"},
+            },
+            .{
+                .llvm_name = null,
+                .zig_name = "v35",
+                .features = &.{"nec_v25"},
+            },
+            .{
+                .llvm_name = null,
+                .zig_name = "v40",
+                .features = &.{ "8bit_bus", "nec_8080" },
+            },
+            .{
+                .llvm_name = null,
+                .zig_name = "v50",
+                .features = &.{"nec_8080"},
+            },
+            .{
+                .llvm_name = null,
+                .zig_name = "v53a",
+                .features = &.{"nec_xa"},
+            },
+            .{
+                .llvm_name = null,
+                .zig_name = "v55pi",
+                .features = &.{"nec_codec"},
             },
         },
     },

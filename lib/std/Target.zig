@@ -2104,7 +2104,7 @@ pub const Cpu = struct {
                 .spirv32, .spirv64 => &spirv.cpu.v1_0,
                 .ve => &ve.cpu.ve10,
                 .wasm32, .wasm64 => &wasm.cpu.mvp,
-                .x86_16 => &x86.cpu.i86,
+                .x86_16 => &x86.cpu.i186,
                 .x86, .x86c16 => &x86.cpu.i386,
                 .x86_64 => &x86.cpu.x86_64,
                 .xcore => &xcore.cpu.xs1b,
@@ -3338,7 +3338,7 @@ pub fn cTypeBitSize(target: *const Target, c_type: CType) ?u16 {
                     .x86,
                     .x86c16,
                     .x86_64,
-                    => if (target.cpu.has(.x86, .x87)) 80 else null,
+                    => if (target.cpu.has(.x86, .@"387")) 80 else null,
 
                     .alpha,
                     .riscv32,
@@ -3399,7 +3399,7 @@ pub fn cTypeBitSize(target: *const Target, c_type: CType) ?u16 {
                 .x86_64,
                 => switch (target.abi) {
                     .android, .ohos => 64,
-                    else => if (target.cpu.has(.x86, .x87)) 80 else null,
+                    else => if (target.cpu.has(.x86, .@"387")) 80 else null,
                 },
 
                 .powerpc,
@@ -3463,7 +3463,7 @@ pub fn cTypeBitSize(target: *const Target, c_type: CType) ?u16 {
                 .long, .ulong => 32,
                 .longlong, .ulonglong, .double => 64,
                 .longdouble => switch (target.abi) {
-                    .gnu => if (target.cpu.has(.x86, .x87)) 80 else null,
+                    .gnu => if (target.cpu.has(.x86, .@"387")) 80 else null,
                     else => 64,
                 },
             },
@@ -3474,7 +3474,7 @@ pub fn cTypeBitSize(target: *const Target, c_type: CType) ?u16 {
                 .long, .ulong => 32,
                 .longlong, .ulonglong, .double => 64,
                 .longdouble => switch (target.abi) {
-                    .gnu => if (target.cpu.has(.x86, .x87)) 80 else null,
+                    .gnu => if (target.cpu.has(.x86, .@"387")) 80 else null,
                     else => 64,
                 },
             },
@@ -3508,7 +3508,7 @@ pub fn cTypeBitSize(target: *const Target, c_type: CType) ?u16 {
             },
             .longlong, .ulonglong, .double => 64,
             .longdouble => switch (target.cpu.arch) {
-                .x86_64 => if (target.cpu.has(.x86, .x87)) 80 else null,
+                .x86_64 => if (target.cpu.has(.x86, .@"387")) 80 else null,
                 else => 64,
             },
         },
@@ -3550,7 +3550,7 @@ pub fn cTypeBitSize(target: *const Target, c_type: CType) ?u16 {
             .short, .ushort => 16,
             .int, .uint, .float => 32,
             .long, .ulong, .longlong, .ulonglong, .double => 64,
-            .longdouble => if (target.cpu.has(.x86, .x87)) 80 else null,
+            .longdouble => if (target.cpu.has(.x86, .@"387")) 80 else null,
         },
 
         .opengl => null,
