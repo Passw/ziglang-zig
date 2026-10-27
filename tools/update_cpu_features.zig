@@ -1059,10 +1059,6 @@ const targets = [_]ArchTarget{
                 .omit = true,
             },
             .{
-                .llvm_name = "DumpCode",
-                .omit = true,
-            },
-            .{
                 .llvm_name = "dumpcode",
                 .omit = true,
             },
