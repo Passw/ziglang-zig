@@ -4654,6 +4654,11 @@ const targets = [_]ArchTarget{
                 .llvm_name = "v8plus",
                 .omit = true,
             },
+
+            .{
+                .llvm_name = "popc",
+                .extra_deps = &.{"v9"},
+            },
         },
         .model_overrides = &.{
             .{

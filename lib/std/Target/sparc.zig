@@ -142,7 +142,9 @@ pub const all_features = blk: {
     result[@backingInt(Feature.popc)] = .{
         .llvm_name = "popc",
         .description = "Use the popc (population count) instruction",
-        .dependencies = featureSet(&[_]Feature{}),
+        .dependencies = featureSet(&[_]Feature{
+            .v9,
+        }),
     };
     result[@backingInt(Feature.slow_rdpc)] = .{
         .llvm_name = "slow-rdpc",
