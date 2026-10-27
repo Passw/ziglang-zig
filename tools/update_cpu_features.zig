@@ -445,58 +445,6 @@ const targets = [_]ArchTarget{
             },
 
             .{
-                .llvm_name = "hip12",
-                .flatten = true,
-            },
-            .{
-                .llvm_name = "neoversee1",
-                .flatten = true,
-            },
-            .{
-                .llvm_name = "neoversen1",
-                .flatten = true,
-            },
-            .{
-                .llvm_name = "neoversen2",
-                .flatten = true,
-            },
-            .{
-                .llvm_name = "neoversen3",
-                .flatten = true,
-            },
-            .{
-                .llvm_name = "neoversev1",
-                .flatten = true,
-            },
-            .{
-                .llvm_name = "neoversev2",
-                .flatten = true,
-            },
-            .{
-                .llvm_name = "neoversev3",
-                .flatten = true,
-            },
-            .{
-                .llvm_name = "neoversev3AE",
-                .flatten = true,
-            },
-            .{
-                .llvm_name = "neoverse512tvb",
-                .flatten = true,
-            },
-            .{
-                .llvm_name = "oryon-1",
-                .flatten = true,
-            },
-            .{
-                .llvm_name = "exynosm3",
-                .flatten = true,
-            },
-            .{
-                .llvm_name = "exynosm4",
-                .flatten = true,
-            },
-            .{
                 .llvm_name = "a320",
                 .flatten = true,
             },
@@ -585,15 +533,19 @@ const targets = [_]ArchTarget{
                 .flatten = true,
             },
             .{
+                .llvm_name = "ampere1",
+                .flatten = true,
+            },
+            .{
                 .llvm_name = "ampere1a",
                 .flatten = true,
             },
             .{
-                .llvm_name = "ampere1c",
+                .llvm_name = "ampere1b",
                 .flatten = true,
             },
             .{
-                .llvm_name = "apple-a7",
+                .llvm_name = "ampere1c",
                 .flatten = true,
             },
             .{
@@ -626,6 +578,10 @@ const targets = [_]ArchTarget{
             },
             .{
                 .llvm_name = "apple-a17",
+                .flatten = true,
+            },
+            .{
+                .llvm_name = "apple-a7",
                 .flatten = true,
             },
             .{
@@ -693,6 +649,14 @@ const targets = [_]ArchTarget{
                 .flatten = true,
             },
             .{
+                .llvm_name = "exynosm3",
+                .flatten = true,
+            },
+            .{
+                .llvm_name = "exynosm4",
+                .flatten = true,
+            },
+            .{
                 .llvm_name = "falkor",
                 .flatten = true,
             },
@@ -701,11 +665,55 @@ const targets = [_]ArchTarget{
                 .flatten = true,
             },
             .{
+                .llvm_name = "hip12",
+                .flatten = true,
+            },
+            .{
                 .llvm_name = "kryo",
                 .flatten = true,
             },
             .{
+                .llvm_name = "neoverse512tvb",
+                .flatten = true,
+            },
+            .{
+                .llvm_name = "neoversee1",
+                .flatten = true,
+            },
+            .{
+                .llvm_name = "neoversen1",
+                .flatten = true,
+            },
+            .{
+                .llvm_name = "neoversen2",
+                .flatten = true,
+            },
+            .{
+                .llvm_name = "neoversen3",
+                .flatten = true,
+            },
+            .{
+                .llvm_name = "neoversev1",
+                .flatten = true,
+            },
+            .{
+                .llvm_name = "neoversev2",
+                .flatten = true,
+            },
+            .{
+                .llvm_name = "neoversev3",
+                .flatten = true,
+            },
+            .{
+                .llvm_name = "neoversev3AE",
+                .flatten = true,
+            },
+            .{
                 .llvm_name = "olympus",
+                .flatten = true,
+            },
+            .{
+                .llvm_name = "oryon-1",
                 .flatten = true,
             },
             .{
@@ -741,14 +749,6 @@ const targets = [_]ArchTarget{
                 .llvm_name = "tsv110",
                 .flatten = true,
             },
-            .{
-                .llvm_name = "ampere1",
-                .flatten = true,
-            },
-            .{
-                .llvm_name = "ampere1b",
-                .flatten = true,
-            },
 
             .{
                 .llvm_name = "CONTEXTIDREL2",
@@ -767,9 +767,9 @@ const targets = [_]ArchTarget{
             },
         },
         .model_overrides = &.{
+            // Who thought this alias was a good idea? Upgrade your compiler and suddenly your
+            // programs SIGILL because this changed meaning. Brilliant.
             .{
-                // Who thought this alias was a good idea? Upgrade your compiler and suddenly your
-                // programs SIGILL because this changed meaning. Brilliant.
                 .llvm_name = "apple-latest",
                 .omit = true,
             },
@@ -877,6 +877,16 @@ const targets = [_]ArchTarget{
 
             .{
                 .llvm_name = "generic",
+                .zig_name = "emag",
+                .features = &.{
+                    "crc",
+                    "crypto",
+                    "perfmon",
+                    "v8a",
+                },
+            },
+            .{
+                .llvm_name = "generic",
                 .zig_name = "exynos_m1",
                 .features = &.{
                     "crc",
@@ -905,16 +915,6 @@ const targets = [_]ArchTarget{
                 .llvm_name = "generic",
                 .zig_name = "xgene1",
                 .features = &.{
-                    "perfmon",
-                    "v8a",
-                },
-            },
-            .{
-                .llvm_name = "generic",
-                .zig_name = "emag",
-                .features = &.{
-                    "crc",
-                    "crypto",
                     "perfmon",
                     "v8a",
                 },
