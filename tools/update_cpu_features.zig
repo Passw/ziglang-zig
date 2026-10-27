@@ -629,10 +629,6 @@ const targets = [_]ArchTarget{
                 .flatten = true,
             },
             .{
-                .llvm_name = "apple-a7-sysreg",
-                .flatten = true,
-            },
-            .{
                 .llvm_name = "apple-m4",
                 .flatten = true,
             },
