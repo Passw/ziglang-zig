@@ -4979,14 +4979,14 @@ const targets = [_]ArchTarget{
         .extra_models = &.{
             .{
                 .llvm_name = null,
-                .zig_name = "wasm_v1_0",
+                .zig_name = "v1_0",
                 .features = &.{
                     "mutable_globals",
                 },
             },
             .{
                 .llvm_name = null,
-                .zig_name = "wasm_v2_0",
+                .zig_name = "v2_0",
                 .features = &.{
                     "multivalue",
                     "mutable_globals",
@@ -4998,7 +4998,7 @@ const targets = [_]ArchTarget{
             },
             .{
                 .llvm_name = null,
-                .zig_name = "wasm_v3_0",
+                .zig_name = "v3_0",
                 .features = &.{
                     "exception_handling",
                     "extended_const",
