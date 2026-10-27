@@ -5437,7 +5437,7 @@ const targets = [_]ArchTarget{
             },
             .{
                 .llvm_name = "barcelona",
-                .extra_deps = &.{ "3dnowa", "smap", "smep" },
+                .extra_deps = &.{"3dnowa"},
             },
             .{
                 .llvm_name = "broadwell",

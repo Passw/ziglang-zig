@@ -1808,8 +1808,6 @@ pub const cpu = struct {
             .sahf,
             .sbb_dep_breaking,
             .slow_shld,
-            .smap,
-            .smep,
             .sse4a,
             .vzeroupper,
             .x87,
