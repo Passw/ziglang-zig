@@ -4935,16 +4935,12 @@ const targets = [_]ArchTarget{
         // rather than making them proper dependencies, so fix that here...
         .feature_overrides = &.{
             .{
-                .llvm_name = "bulk-memory",
-                .extra_deps = &.{"bulk_memory_opt"},
-            },
-            .{
                 .llvm_name = "fp16",
                 .extra_deps = &.{"simd128"},
             },
             .{
                 .llvm_name = "reference-types",
-                .extra_deps = &.{ "bulk_memory", "call_indirect_overlong" },
+                .extra_deps = &.{"bulk_memory"},
             },
             .{
                 .llvm_name = "relaxed-atomics",
