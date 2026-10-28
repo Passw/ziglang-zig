@@ -938,11 +938,41 @@ const targets = [_]ArchTarget{
             .{
                 .zig_name = "fix",
                 .desc = "Enable FPR-to-GPR move and square root extensions",
+                .deps = &.{"fpu"},
+            },
+            .{
+                .zig_name = "fpu",
+                .desc = "Enable floating point registers and common floating point instructions",
                 .deps = &.{},
             },
             .{
-                .zig_name = "max",
+                .zig_name = "fpu_ieee",
+                .desc = "Enable IEEE floating point instructions",
+                .deps = &.{"fpu"},
+            },
+            .{
+                .zig_name = "fpu_ieee_infr",
+                .desc = "Enable IEEE rounding towards plus and minus infinity",
+                .deps = &.{"fpu_ieee"},
+            },
+            .{
+                .zig_name = "fpu_vax",
+                .desc = "Enable VAX floating point instructions",
+                .deps = &.{"fpu"},
+            },
+            .{
+                .zig_name = "lock_prefetch",
+                .desc = "Prefetch with modify intent speeds up lock acquisition",
+                .deps = &.{},
+            },
+            .{
+                .zig_name = "mvi",
                 .desc = "Enable motion video extensions",
+                .deps = &.{},
+            },
+            .{
+                .zig_name = "precise_traps",
+                .desc = "Enable precise arithmetic trap reporting",
                 .deps = &.{},
             },
         },
@@ -950,31 +980,34 @@ const targets = [_]ArchTarget{
             .{
                 .llvm_name = null,
                 .zig_name = "ev4",
-                .features = &.{},
+                .features = &.{
+                    "fpu_ieee_infr",
+                    "fpu_vax",
+                },
             },
             .{
                 .llvm_name = null,
                 .zig_name = "ev45",
-                .features = &.{},
+                .features = &.{
+                    "fpu_ieee_infr",
+                    "fpu_vax",
+                },
             },
             .{
                 .llvm_name = null,
                 .zig_name = "ev5",
-                .features = &.{},
+                .features = &.{
+                    "fpu_ieee_infr",
+                    "fpu_vax",
+                },
             },
             .{
                 .llvm_name = null,
                 .zig_name = "ev56",
                 .features = &.{
                     "bwx",
-                },
-            },
-            .{
-                .llvm_name = null,
-                .zig_name = "pca56",
-                .features = &.{
-                    "bwx",
-                    "max",
+                    "fpu_ieee_infr",
+                    "fpu_vax",
                 },
             },
             .{
@@ -983,7 +1016,10 @@ const targets = [_]ArchTarget{
                 .features = &.{
                     "bwx",
                     "fix",
-                    "max",
+                    "fpu_ieee_infr",
+                    "fpu_vax",
+                    "mvi",
+                    "precise_traps",
                 },
             },
             .{
@@ -993,7 +1029,103 @@ const targets = [_]ArchTarget{
                     "bwx",
                     "cix",
                     "fix",
-                    "max",
+                    "fpu_ieee_infr",
+                    "fpu_vax",
+                    "lock_prefetch",
+                    "mvi",
+                    "precise_traps",
+                },
+            },
+            .{
+                .llvm_name = null,
+                .zig_name = "ev68",
+                .features = &.{
+                    "bwx",
+                    "cix",
+                    "fix",
+                    "fpu_ieee_infr",
+                    "fpu_vax",
+                    "lock_prefetch",
+                    "mvi",
+                    "precise_traps",
+                },
+            },
+            .{
+                .llvm_name = null,
+                .zig_name = "ev69",
+                .features = &.{
+                    "bwx",
+                    "cix",
+                    "fix",
+                    "fpu_ieee_infr",
+                    "fpu_vax",
+                    "lock_prefetch",
+                    "mvi",
+                    "precise_traps",
+                },
+            },
+            .{
+                .llvm_name = null,
+                .zig_name = "ev7",
+                .features = &.{
+                    "bwx",
+                    "cix",
+                    "fix",
+                    "fpu_ieee_infr",
+                    "fpu_vax",
+                    "lock_prefetch",
+                    "mvi",
+                    "precise_traps",
+                },
+            },
+            .{
+                .llvm_name = null,
+                .zig_name = "ev79",
+                .features = &.{
+                    "bwx",
+                    "cix",
+                    "fix",
+                    "fpu_ieee_infr",
+                    "fpu_vax",
+                    "lock_prefetch",
+                    "mvi",
+                    "precise_traps",
+                },
+            },
+            .{
+                .llvm_name = null,
+                .zig_name = "lca4",
+                .features = &.{
+                    "fpu_ieee_infr",
+                    "fpu_vax",
+                },
+            },
+            .{
+                .llvm_name = null,
+                .zig_name = "lca45",
+                .features = &.{
+                    "fpu_ieee_infr",
+                    "fpu_vax",
+                },
+            },
+            .{
+                .llvm_name = null,
+                .zig_name = "pca56",
+                .features = &.{
+                    "bwx",
+                    "fpu_ieee_infr",
+                    "fpu_vax",
+                    "mvi",
+                },
+            },
+            .{
+                .llvm_name = null,
+                .zig_name = "pca57",
+                .features = &.{
+                    "bwx",
+                    "fpu_ieee_infr",
+                    "fpu_vax",
+                    "mvi",
                 },
             },
         },
