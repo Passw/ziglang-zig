@@ -4646,6 +4646,11 @@ const targets = [_]ArchTarget{
                 .omit = true,
             },
 
+            .{
+                .llvm_name = "ppc32",
+                .extra_deps = &.{"fpu"},
+            },
+
             // Future ISA extensions; omit until they are stabilized.
             .{
                 .llvm_name = "future",

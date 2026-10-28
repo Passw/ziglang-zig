@@ -752,7 +752,9 @@ pub const cpu = struct {
     pub const ppc32: CpuModel = .{
         .name = "ppc32",
         .llvm_name = "ppc32",
-        .features = featureSet(&[_]Feature{}),
+        .features = featureSet(&[_]Feature{
+            .fpu,
+        }),
     };
     pub const ppc64: CpuModel = .{
         .name = "ppc64",
