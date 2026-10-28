@@ -1367,7 +1367,6 @@ pub fn toLLVMTriple(target: *const Target, buf: []u8) []const u8 {
         .gnuf32 => "gnuf32",
         .gnusf => "gnusf",
         .gnux32 => "gnux32",
-        .itanium => "itanium",
         .msvc => "msvc",
         .musl => "musl",
         .muslabi64 => "muslabi64",
@@ -1430,9 +1429,6 @@ pub fn isPIEDefault(target: *const Target) DefaultPIStatus {
         .windows => {
             if (target.isMinGW())
                 return .no;
-
-            if (target.abi == .itanium)
-                return if (target.cpu.arch == .x86_64) .yes else .no;
 
             if (target.abi == .msvc or target.abi == .none)
                 return .depends_on_linker;
@@ -1514,9 +1510,6 @@ pub fn isPICdefault(target: *const Target) DefaultPIStatus {
             if (target.isMinGW())
                 return if (target.cpu.arch == .x86_64 or target.cpu.arch == .aarch64) .yes else .no;
 
-            if (target.abi == .itanium)
-                return if (target.cpu.arch == .x86_64) .yes else .no;
-
             if (target.abi == .msvc or target.abi == .none)
                 return .depends_on_linker;
 
@@ -1562,9 +1555,6 @@ pub fn isPICDefaultForced(target: *const Target) DefaultPIStatus {
         .windows => {
             if (target.isMinGW())
                 return .yes;
-
-            if (target.abi == .itanium)
-                return if (target.cpu.arch == .x86_64) .yes else .no;
 
             // if (bfd) return target.cpu.arch == .x86_64 else target.cpu.arch == .x86_64 or target.cpu.arch == .aarch64;
             if (target.abi == .msvc or target.abi == .none)

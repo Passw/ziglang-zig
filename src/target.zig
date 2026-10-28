@@ -139,7 +139,7 @@ pub fn useEmulatedTls(target: *const std.Target) bool {
 pub fn hasValgrindSupport(target: *const std.Target, backend: std.lang.CompilerBackend) bool {
     // We can't currently output the necessary Valgrind client request assembly when using the C
     // backend and compiling with an MSVC-like compiler.
-    const ofmt_c_msvc = (target.abi == .msvc or target.abi == .itanium) and target.ofmt == .c;
+    const ofmt_c_msvc = target.abi == .msvc and target.ofmt == .c;
 
     return switch (target.cpu.arch) {
         .arm, .armeb, .thumb, .thumbeb => switch (target.os.tag) {

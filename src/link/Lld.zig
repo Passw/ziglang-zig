@@ -538,7 +538,7 @@ fn coffLink(lld: *Lld, arena: Allocator) !void {
             if (comp.libc_installation) |libc_installation| {
                 try argv.append(try arena.print("-LIBPATH:{s}", .{libc_installation.crt_dir.?}));
 
-                if (target.abi == .msvc or target.abi == .itanium) {
+                if (target.abi == .msvc) {
                     try argv.append(try arena.print("-LIBPATH:{s}", .{libc_installation.msvc_lib_dir.?}));
                     try argv.append(try arena.print("-LIBPATH:{s}", .{libc_installation.kernel32_lib_dir.?}));
                 }
@@ -744,7 +744,7 @@ fn coffLink(lld: *Lld, arena: Allocator) !void {
                     continue;
                 }
             }
-            if (target.abi == .msvc or target.abi == .itanium) {
+            if (target.abi == .msvc) {
                 argv.appendAssumeCapacity(lib_basename);
                 continue;
             }

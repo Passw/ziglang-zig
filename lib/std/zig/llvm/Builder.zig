@@ -358,7 +358,6 @@ pub fn tripleForTarget(allocator: Allocator, target: *const std.Target) ![]const
         .muslsf => "muslsf",
         .muslx32 => "muslx32",
         .msvc => "msvc",
-        .itanium => "itanium",
         .simulator => "simulator",
         .ohos, .ohoseabi => "ohos",
         .call0 => "unknown",

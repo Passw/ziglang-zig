@@ -2351,7 +2351,6 @@ pub const TargetQuery = struct {
         muslsf,
         muslx32,
         msvc,
-        itanium,
         simulator,
         ohos,
         ohoseabi,

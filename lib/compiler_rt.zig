@@ -251,7 +251,7 @@ pub const want_windows_x86_msvc_abi = e: {
     if (builtin.cpu.arch != .x86) break :e false;
     if (builtin.os.tag != .windows) break :e false;
     switch (builtin.abi) {
-        .none, .msvc, .itanium => {},
+        .none, .msvc => {},
         else => break :e false,
     }
     // The ABI is needed, but it's only our responsibility if libc won't provide it.

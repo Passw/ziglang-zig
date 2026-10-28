@@ -191755,11 +191755,11 @@ fn select(
         switch (case.required_abi) {
             .any => {},
             .gnu => if (switch (cg.target.abi) {
-                .none, .msvc, .itanium => cg.target.os.tag == .windows,
+                .none, .msvc => cg.target.os.tag == .windows,
                 else => false,
             }) continue :cases,
             .msvc => if (switch (cg.target.abi) {
-                .none, .msvc, .itanium => cg.target.os.tag != .windows,
+                .none, .msvc => cg.target.os.tag != .windows,
                 else => true,
             }) continue :cases,
         }
