@@ -4698,6 +4698,10 @@ const targets = [_]ArchTarget{
             },
 
             .{
+                .llvm_name = "602",
+                .omit_deps = &.{"fpu"},
+            },
+            .{
                 .llvm_name = "ppc32",
                 .extra_deps = &.{"fpu"},
             },

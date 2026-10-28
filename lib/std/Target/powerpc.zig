@@ -520,9 +520,7 @@ pub const cpu = struct {
     pub const @"602": CpuModel = .{
         .name = "602",
         .llvm_name = "602",
-        .features = featureSet(&[_]Feature{
-            .fpu,
-        }),
+        .features = featureSet(&[_]Feature{}),
     };
     pub const @"603": CpuModel = .{
         .name = "603",
