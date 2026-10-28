@@ -2998,10 +2998,42 @@ const targets = [_]ArchTarget{
             .{
                 .llvm_name = "M68040",
                 .zig_name = "m68040",
+                .extra_deps = &.{"isa_68881"},
             },
             .{
                 .llvm_name = "M68060",
                 .zig_name = "m68060",
+                .extra_deps = &.{"isa_68881"},
+            },
+        },
+        .extra_models = &.{
+            .{
+                .llvm_name = "M68040",
+                .zig_name = "m68ec040",
+                .features = &.{
+                    "isa_68040",
+                },
+            },
+            .{
+                .llvm_name = "M68060",
+                .zig_name = "m68ec060",
+                .features = &.{
+                    "isa_68060",
+                },
+            },
+            .{
+                .llvm_name = "M68040",
+                .zig_name = "m68lc040",
+                .features = &.{
+                    "isa_68040",
+                },
+            },
+            .{
+                .llvm_name = "M68060",
+                .zig_name = "m68lc060",
+                .features = &.{
+                    "isa_68060",
+                },
             },
         },
     },
