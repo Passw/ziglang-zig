@@ -4616,6 +4616,10 @@ const targets = [_]ArchTarget{
                 .omit = true,
             },
             .{
+                .llvm_name = "float128",
+                .omit = true,
+            },
+            .{
                 .llvm_name = "hard-float",
                 .omit = true,
             },

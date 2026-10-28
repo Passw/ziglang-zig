@@ -15,7 +15,6 @@ pub const Feature = enum {
     extdiv,
     fast_mflr,
     fcpsgn,
-    float128,
     fpcvt,
     fprnd,
     fpu,
@@ -137,13 +136,6 @@ pub const all_features = blk: {
         .description = "Enable the fcpsgn instruction",
         .dependencies = featureSet(&[_]Feature{
             .fpu,
-        }),
-    };
-    result[@backingInt(Feature.float128)] = .{
-        .llvm_name = "float128",
-        .description = "Enable the __float128 data type for IEEE-754R Binary128.",
-        .dependencies = featureSet(&[_]Feature{
-            .vsx,
         }),
     };
     result[@backingInt(Feature.fpcvt)] = .{
