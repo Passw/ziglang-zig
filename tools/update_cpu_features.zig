@@ -5763,14 +5763,215 @@ const targets = [_]ArchTarget{
             },
 
             .{
+                .llvm_name = "hard-quad-float",
+                .zig_name = "fpu_q",
+                .extra_deps = &.{ "fpu", "v8" },
+            },
+            .{
+                .llvm_name = "hasleoncasa",
+                .extra_deps = &.{"v8"},
+            },
+            .{
+                .llvm_name = "leoncyclecounter",
+                .extra_deps = &.{"v8"},
+            },
+            .{
+                .llvm_name = "leonpwrpsr",
+                .extra_deps = &.{"v8"},
+            },
+            .{
+                .llvm_name = "osa2011",
+                .extra_deps = &.{"ua2007"},
+            },
+            .{
                 .llvm_name = "popc",
                 .extra_deps = &.{"v9"},
+            },
+            .{
+                .llvm_name = "ua2007",
+                .extra_deps = &.{"ua2005"},
+            },
+            .{
+                .llvm_name = "deprecated-v8",
+                .zig_name = "v8_deprecated",
+                .extra_deps = &.{"v9"},
+            },
+            .{
+                .llvm_name = "v9",
+                .extra_deps = &.{"v8"},
+            },
+            .{
+                .llvm_name = "vis",
+                .extra_deps = &.{"fpu"},
+            },
+            .{
+                .llvm_name = "vis2",
+                .extra_deps = &.{"vis"},
+            },
+            .{
+                .llvm_name = "vis3",
+                .extra_deps = &.{"vis2"},
+            },
+        },
+        .extra_features = &.{
+            .{
+                .zig_name = "divscc",
+                .desc = "Enable divide step instruction",
+                .deps = &.{},
+            },
+            .{
+                .zig_name = "fpu",
+                .desc = "Enable floating-point unit",
+                .deps = &.{},
+            },
+            .{
+                .zig_name = "scan",
+                .desc = "Enable scan for first differing bit instruction",
+                .deps = &.{},
+            },
+            .{
+                .zig_name = "v8",
+                .desc = "Enable SPARC-V8 instructions",
+                .deps = &.{},
             },
         },
         .model_overrides = &.{
             .{
                 .llvm_name = "generic",
                 .omit = true,
+            },
+
+            .{
+                .llvm_name = "at697e",
+                .extra_deps = &.{ "fpu", "v8" },
+            },
+            .{
+                .llvm_name = "at697f",
+                .extra_deps = &.{ "fpu", "v8" },
+            },
+            .{
+                .llvm_name = "f934",
+                .extra_deps = &.{ "divscc", "fpu", "scan" },
+            },
+            .{
+                .llvm_name = "gr712rc",
+                .extra_deps = &.{ "fpu", "v8" },
+            },
+            .{
+                .llvm_name = "gr740",
+                .extra_deps = &.{ "fpu", "v8" },
+            },
+            .{
+                .llvm_name = "hypersparc",
+                .extra_deps = &.{ "fpu", "v8" },
+            },
+            .{
+                .llvm_name = "leon2",
+                .extra_deps = &.{ "fpu", "v8" },
+            },
+            .{
+                .llvm_name = "leon3",
+                .extra_deps = &.{ "fpu", "v8" },
+            },
+            .{
+                .llvm_name = "leon4",
+                .extra_deps = &.{ "fpu", "v8" },
+            },
+            .{
+                .llvm_name = "ma2080",
+                .extra_deps = &.{ "fpu", "v8" },
+            },
+            .{
+                .llvm_name = "ma2085",
+                .extra_deps = &.{ "fpu", "v8" },
+            },
+            .{
+                .llvm_name = "ma2100",
+                .extra_deps = &.{ "fpu", "v8" },
+            },
+            .{
+                .llvm_name = "ma2150",
+                .extra_deps = &.{ "fpu", "v8" },
+            },
+            .{
+                .llvm_name = "ma2155",
+                .extra_deps = &.{ "fpu", "v8" },
+            },
+            .{
+                .llvm_name = "ma2450",
+                .extra_deps = &.{ "fpu", "v8" },
+            },
+            .{
+                .llvm_name = "ma2455",
+                .extra_deps = &.{ "fpu", "v8" },
+            },
+            .{
+                .llvm_name = "ma2480",
+                .extra_deps = &.{ "fpu", "v8" },
+            },
+            .{
+                .llvm_name = "ma2485",
+                .extra_deps = &.{ "fpu", "v8" },
+            },
+            .{
+                .llvm_name = "ma2x5x",
+                .extra_deps = &.{ "fpu", "v8" },
+            },
+            .{
+                .llvm_name = "ma2x8x",
+                .extra_deps = &.{ "fpu", "v8" },
+            },
+            .{
+                .llvm_name = "myriad2",
+                .extra_deps = &.{ "fpu", "v8" },
+            },
+            .{
+                .llvm_name = "myriad2.1",
+                .extra_deps = &.{ "fpu", "v8" },
+            },
+            .{
+                .llvm_name = "myriad2.2",
+                .extra_deps = &.{ "fpu", "v8" },
+            },
+            .{
+                .llvm_name = "myriad2.3",
+                .extra_deps = &.{ "fpu", "v8" },
+            },
+            .{
+                .llvm_name = "sparclet",
+                .extra_deps = &.{ "fpu", "scan" },
+            },
+            .{
+                .llvm_name = "sparclite",
+                .extra_deps = &.{ "divscc", "fpu", "scan" },
+            },
+            .{
+                .llvm_name = "sparclite86x",
+                .extra_deps = &.{ "divscc", "scan" },
+            },
+            .{
+                .llvm_name = "supersparc",
+                .extra_deps = &.{ "fpu", "v8" },
+            },
+            .{
+                .llvm_name = "tsc701",
+                .extra_deps = &.{"scan"},
+            },
+            .{
+                .llvm_name = "ut699",
+                .extra_deps = &.{ "fpu", "v8" },
+            },
+            .{
+                .llvm_name = "v7",
+                .extra_deps = &.{"fpu"},
+            },
+            .{
+                .llvm_name = "v8",
+                .extra_deps = &.{ "fpu", "v8" },
+            },
+            .{
+                .llvm_name = "v9",
+                .extra_deps = &.{"fpu"},
             },
         },
     },
