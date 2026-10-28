@@ -3055,6 +3055,7 @@ const targets = [_]ArchTarget{
                 .llvm_name = null,
                 .zig_name = "m88110",
                 .features = &.{
+                    "isa_88110",
                     "sfu1",
                     "sfu2",
                     "xrf",
