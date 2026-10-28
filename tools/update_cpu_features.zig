@@ -2557,6 +2557,11 @@ const targets = [_]ArchTarget{
         .llvm = null,
         .extra_features = &.{
             .{
+                .zig_name = "fpu",
+                .desc = "Enable floating-point coprocessor",
+                .deps = &.{},
+            },
+            .{
                 .zig_name = "max_1",
                 .desc = "Enable MAX-1 multimedia acceleration extensions",
                 .deps = &.{},
@@ -2565,6 +2570,11 @@ const targets = [_]ArchTarget{
                 .zig_name = "max_2",
                 .desc = "Enable MAX-2 multimedia acceleration extensions",
                 .deps = &.{"max_1"},
+            },
+            .{
+                .zig_name = "perfmon",
+                .desc = "Enable performance monitor coprocessor",
+                .deps = &.{},
             },
             .{
                 .zig_name = "v1_1",
@@ -2581,27 +2591,36 @@ const targets = [_]ArchTarget{
             .{
                 .llvm_name = null,
                 .zig_name = "ts_1",
-                .features = &.{},
+                .features = &.{
+                    "fpu",
+                },
             },
             .{
                 .llvm_name = null,
                 .zig_name = "ns_1",
-                .features = &.{},
+                .features = &.{
+                    "fpu",
+                },
             },
             .{
                 .llvm_name = null,
                 .zig_name = "ns_2",
-                .features = &.{},
+                .features = &.{
+                    "fpu",
+                },
             },
             .{
                 .llvm_name = null,
                 .zig_name = "pcx",
-                .features = &.{},
+                .features = &.{
+                    "fpu",
+                },
             },
             .{
                 .llvm_name = null,
                 .zig_name = "pa_7000",
                 .features = &.{
+                    "fpu",
                     "v1_1",
                 },
             },
@@ -2609,6 +2628,7 @@ const targets = [_]ArchTarget{
                 .llvm_name = null,
                 .zig_name = "pa_7100",
                 .features = &.{
+                    "fpu",
                     "v1_1",
                 },
             },
@@ -2616,6 +2636,7 @@ const targets = [_]ArchTarget{
                 .llvm_name = null,
                 .zig_name = "pa_7150",
                 .features = &.{
+                    "fpu",
                     "v1_1",
                 },
             },
@@ -2623,6 +2644,7 @@ const targets = [_]ArchTarget{
                 .llvm_name = null,
                 .zig_name = "pa_7100lc",
                 .features = &.{
+                    "fpu",
                     "max_1",
                     "v1_1",
                 },
@@ -2631,6 +2653,7 @@ const targets = [_]ArchTarget{
                 .llvm_name = null,
                 .zig_name = "pa_7200",
                 .features = &.{
+                    "fpu",
                     "v1_1",
                 },
             },
@@ -2638,6 +2661,7 @@ const targets = [_]ArchTarget{
                 .llvm_name = null,
                 .zig_name = "pa_7300lc",
                 .features = &.{
+                    "fpu",
                     "max_1",
                     "v1_1",
                 },
@@ -2646,6 +2670,8 @@ const targets = [_]ArchTarget{
                 .llvm_name = null,
                 .zig_name = "pa_8000",
                 .features = &.{
+                    "fpu",
+                    "perfmon",
                     "v2_0",
                 },
             },
@@ -2653,6 +2679,8 @@ const targets = [_]ArchTarget{
                 .llvm_name = null,
                 .zig_name = "pa_8200",
                 .features = &.{
+                    "fpu",
+                    "perfmon",
                     "v2_0",
                 },
             },
@@ -2660,6 +2688,8 @@ const targets = [_]ArchTarget{
                 .llvm_name = null,
                 .zig_name = "pa_8500",
                 .features = &.{
+                    "fpu",
+                    "perfmon",
                     "v2_0",
                 },
             },
@@ -2667,6 +2697,8 @@ const targets = [_]ArchTarget{
                 .llvm_name = null,
                 .zig_name = "pa_8600",
                 .features = &.{
+                    "fpu",
+                    "perfmon",
                     "v2_0",
                 },
             },
@@ -2674,6 +2706,8 @@ const targets = [_]ArchTarget{
                 .llvm_name = null,
                 .zig_name = "pa_8700",
                 .features = &.{
+                    "fpu",
+                    "perfmon",
                     "v2_0",
                 },
             },
@@ -2681,6 +2715,8 @@ const targets = [_]ArchTarget{
                 .llvm_name = null,
                 .zig_name = "pa_8800",
                 .features = &.{
+                    "fpu",
+                    "perfmon",
                     "v2_0",
                 },
             },
@@ -2688,6 +2724,8 @@ const targets = [_]ArchTarget{
                 .llvm_name = null,
                 .zig_name = "pa_8900",
                 .features = &.{
+                    "fpu",
+                    "perfmon",
                     "v2_0",
                 },
             },
