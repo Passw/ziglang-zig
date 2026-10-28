@@ -4612,6 +4612,10 @@ const targets = [_]ArchTarget{
                 .omit = true,
             },
             .{
+                .llvm_name = "efpu2",
+                .omit = true,
+            },
+            .{
                 .llvm_name = "hard-float",
                 .omit = true,
             },
@@ -4648,6 +4652,10 @@ const targets = [_]ArchTarget{
                 .omit = true,
             },
             .{
+                .llvm_name = "spe",
+                .omit = true,
+            },
+            .{
                 .llvm_name = "use-ptrgl-helper",
                 .omit = true,
             },
@@ -4676,6 +4684,10 @@ const targets = [_]ArchTarget{
             },
         },
         .model_overrides = &.{
+            .{
+                .llvm_name = "e500",
+                .omit = true,
+            },
             .{
                 .llvm_name = "generic",
                 .omit = true,
@@ -4708,6 +4720,14 @@ const targets = [_]ArchTarget{
                     "fsqrt",
                     "mfocrf",
                     "stfiwx",
+                },
+            },
+            .{
+                .llvm_name = null,
+                .zig_name = "e500",
+                .features = &.{
+                    "isel",
+                    "msync",
                 },
             },
             .{

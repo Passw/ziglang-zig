@@ -12,7 +12,6 @@ pub const Feature = enum {
     cmpb,
     crypto,
     direct_move,
-    efpu2,
     extdiv,
     fast_mflr,
     fcpsgn,
@@ -64,7 +63,6 @@ pub const Feature = enum {
     quadword_atomics,
     recipprec,
     slow_popcntd,
-    spe,
     stfiwx,
     two_const_nr,
     unaligned_fp_access,
@@ -122,13 +120,6 @@ pub const all_features = blk: {
         .description = "Enable Power8 direct move instructions",
         .dependencies = featureSet(&[_]Feature{
             .vsx,
-        }),
-    };
-    result[@backingInt(Feature.efpu2)] = .{
-        .llvm_name = "efpu2",
-        .description = "Enable Embedded Floating-Point APU 2 instructions",
-        .dependencies = featureSet(&[_]Feature{
-            .spe,
         }),
     };
     result[@backingInt(Feature.extdiv)] = .{
@@ -461,11 +452,6 @@ pub const all_features = blk: {
         .description = "Has slow popcnt[dw] instructions",
         .dependencies = featureSet(&[_]Feature{}),
     };
-    result[@backingInt(Feature.spe)] = .{
-        .llvm_name = "spe",
-        .description = "Enable SPE instructions",
-        .dependencies = featureSet(&[_]Feature{}),
-    };
     result[@backingInt(Feature.stfiwx)] = .{
         .llvm_name = "stfiwx",
         .description = "Enable the stfiwx instruction",
@@ -665,11 +651,10 @@ pub const cpu = struct {
     };
     pub const e500: CpuModel = .{
         .name = "e500",
-        .llvm_name = "e500",
+        .llvm_name = null,
         .features = featureSet(&[_]Feature{
             .isel,
             .msync,
-            .spe,
         }),
     };
     pub const e500mc: CpuModel = .{

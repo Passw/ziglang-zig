@@ -448,6 +448,7 @@ const powerpc = struct {
                 .{ "e300c4", &Target.powerpc.cpu.@"603e" },
                 .{ "e500mc", &Target.powerpc.cpu.e500mc },
                 .{ "e500v2", &Target.powerpc.cpu.e500 },
+                .{ "e500", &Target.powerpc.cpu.e500 },
                 .{ "e5500", &Target.powerpc.cpu.e5500 },
                 .{ "e6500", &Target.powerpc.cpu.e6500 },
                 .{ "G2_LE", &Target.powerpc.cpu.@"603e" },

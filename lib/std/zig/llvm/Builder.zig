@@ -209,9 +209,6 @@ pub fn tripleForTarget(allocator: Allocator, target: *const std.Target) ![]const
             .{ .v9_6a, "v9.6a" },
             .{ .v9_7a, "v9.7a" },
         }),
-        .powerpc => subArchName(target, .powerpc, .{
-            .{ .spe, "spe" },
-        }),
         .spirv32 => switch (target.os.tag) {
             .vulkan, .opengl => subArchName(target, .spirv, .{
                 .{ .v1_6, "1.6" },

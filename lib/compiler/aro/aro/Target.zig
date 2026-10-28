@@ -107,9 +107,7 @@ pub const SubArch = enum {
     spirv_v16,
 
     pub fn toFeature(sub: SubArch, arch: Cpu.Arch) ?std.Target.Cpu.Feature.Set.Index {
-        if (arch.isPowerPC()) {
-            if (sub == .powerpc_spe) return @backingInt(std.Target.powerpc.Feature.spe);
-        } else if (arch.isMIPS32()) {
+        if (arch.isMIPS32()) {
             return @backingInt(std.Target.mips.Feature.mips32r6);
         } else if (arch.isMIPS64()) {
             return @backingInt(std.Target.mips.Feature.mips64r6);
