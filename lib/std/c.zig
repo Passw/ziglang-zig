@@ -11436,6 +11436,7 @@ pub const clock_nanosleep = switch (native_os) {
 pub const ioctl = switch (native_os) {
     .dragonfly => dragonfly.ioctl,
     .freebsd => freebsd.ioctl,
+    .netbsd => netbsd.ioctl,
     .openbsd => openbsd.ioctl,
     .windows => {},
     else => private.ioctl,

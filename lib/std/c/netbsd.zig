@@ -6,6 +6,9 @@ const pthread_t = std.c.pthread_t;
 const sigval_t = std.c.sigval_t;
 const uid_t = std.c.uid_t;
 const timespec = std.c.timespec;
+const fd_t = std.c.fd_t;
+
+pub extern "c" fn ioctl(fd: fd_t, request: c_ulong, ...) c_int;
 
 pub extern "c" fn ptrace(request: c_int, pid: pid_t, addr: ?*anyopaque, data: c_int) c_int;
 
