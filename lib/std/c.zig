@@ -10410,7 +10410,10 @@ pub extern "c" fn closedir(dp: *DIR) c_int;
 pub extern "c" fn telldir(dp: *DIR) c_long;
 pub extern "c" fn seekdir(dp: *DIR, loc: c_long) void;
 
-pub extern "c" fn sigwait(set: ?*sigset_t, sig: ?*c_int) c_int;
+pub const sigwait = switch (native_os) {
+    .illumos => private.__posix_sigwait,
+    else => private.sigwait,
+};
 
 pub extern "c" fn alarm(seconds: c_uint) c_uint;
 
@@ -10462,6 +10465,7 @@ pub const getpwnam = switch (native_os) {
     else => private.getpwnam,
 };
 pub const getpwnam_r = switch (native_os) {
+    .illumos => private.__posix_getpwnam_r,
     .netbsd => private.__getpwnam_r50,
     else => private.getpwnam_r,
 };
@@ -10470,6 +10474,7 @@ pub const getpwuid = switch (native_os) {
     else => private.getpwuid,
 };
 pub const getpwuid_r = switch (native_os) {
+    .illumos => private.__posix_getpwuid_r,
     .netbsd => private.__getpwuid_r50,
     else => private.getpwuid_r,
 };
@@ -10477,9 +10482,15 @@ pub extern "c" fn getgrent() ?*group;
 pub extern "c" fn setgrent() void;
 pub extern "c" fn endgrent() void;
 pub extern "c" fn getgrnam(name: [*:0]const u8) ?*group;
-pub extern "c" fn getgrnam_r(name: [*:0]const u8, grp: *group, buf: [*]u8, buflen: usize, result: *?*group) c_int;
+pub const getgrnam_r = switch (native_os) {
+    .illumos => private.__posix_getgrnam_r,
+    else => private.getgrnam_r,
+};
 pub extern "c" fn getgrgid(gid: gid_t) ?*group;
-pub extern "c" fn getgrgid_r(gid: gid_t, grp: *group, buf: [*]u8, buflen: usize, result: *?*group) c_int;
+pub const getgrgid_r = switch (native_os) {
+    .illumos => private.__posix_getgrgid_r,
+    else => private.getgrgid_r,
+};
 pub extern "c" fn getrlimit64(resource: rlimit_resource, rlim: *rlimit) c_int;
 pub extern "c" fn lseek64(fd: fd_t, offset: i64, whence: c_int) i64;
 pub extern "c" fn mmap64(addr: ?*align(page_size) anyopaque, len: usize, prot: PROT, flags: MAP, fd: fd_t, offset: i64) *anyopaque;
@@ -11067,7 +11078,10 @@ pub extern "c" fn sendto(
     dest_addr: ?*const sockaddr,
     addrlen: socklen_t,
 ) isize;
-pub extern "c" fn sendmsg(sockfd: fd_t, msg: *const msghdr_const, flags: u32) isize;
+pub const sendmsg = switch (native_os) {
+    .illumos => private.__xnet_sendmsg,
+    else => private.sendmsg,
+};
 pub const sendmmsg = switch (native_os) {
     .freebsd => freebsd.sendmmsg,
     else => private.sendmmsg,
@@ -11089,6 +11103,7 @@ pub extern "c" fn recvfrom(
 ) isize;
 
 pub const recvmsg = switch (native_os) {
+    .illumos => private.__xnet_recvmsg,
     .windows => {},
     else => private.recvmsg,
 };
@@ -11959,6 +11974,8 @@ const private = struct {
         else => c_int,
         .freebsd => isize,
     };
+    extern "c" fn getgrgid_r(gid: gid_t, grp: *group, buf: [*]u8, buflen: usize, result: *?*group) c_int;
+    extern "c" fn getgrnam_r(name: [*:0]const u8, grp: *group, buf: [*]u8, buflen: usize, result: *?*group) c_int;
     extern "c" fn getpwent() ?*passwd;
     extern "c" fn getpwnam(name: [*:0]const u8) ?*passwd;
     extern "c" fn getpwnam_r(name: [*:0]const u8, pwd: *passwd, buf: [*]u8, buflen: usize, result: *?*passwd) c_int;
@@ -11992,6 +12009,7 @@ const private = struct {
     ) EAI;
     extern "c" fn sendfile(out_fd: fd_t, in_fd: fd_t, offset: ?*off_t, count: usize) isize;
     extern "c" fn sendmmsg(sockfd: fd_t, msgvec: [*]mmsghdr, n: c_uint, flags: u32) c_int;
+    extern "c" fn sendmsg(sockfd: fd_t, msg: *const msghdr_const, flags: u32) isize;
     extern "c" fn setlocale(category: LC, locale: ?[*:0]const u8) ?[*:0]const u8;
     extern "c" fn sigaction(sig: SIG, noalias act: ?*const Sigaction, noalias oact: ?*Sigaction) c_int;
     extern "c" fn sigdelset(set: ?*sigset_t, signo: SIG) c_int;
@@ -12000,6 +12018,7 @@ const private = struct {
     extern "c" fn sigemptyset(set: ?*sigset_t) c_int;
     extern "c" fn sigismember(set: ?*const sigset_t, signo: SIG) c_int;
     extern "c" fn sigprocmask(how: c_int, noalias set: ?*const sigset_t, noalias oset: ?*sigset_t) c_int;
+    extern "c" fn sigwait(set: ?*sigset_t, sig: ?*c_int) c_int;
     extern "c" fn socket(domain: c_uint, sock_type: c_uint, protocol: c_uint) c_int;
     extern "c" fn socketpair(domain: c_uint, sock_type: c_uint, protocol: c_uint, sv: *[2]fd_t) c_int;
     extern "c" fn sigaltstack(ss: ?*const stack_t, old_ss: ?*stack_t) c_int;
@@ -12088,6 +12107,15 @@ const private = struct {
     extern "c" fn __sigaltstack14(ss: ?*const stack_t, old_ss: ?*stack_t) c_int;
     extern "c" fn __utimes50(path: [*:0]const u8, times: ?*[2]timeval) c_int;
     extern "c" fn __wait450(pid: pid_t, status: ?*c_int, options: c_int, ru: ?*rusage) pid_t;
+
+    /// illumos symbols remapped via `#pragma redefine_extname` in the system headers.
+    extern "c" fn __posix_getgrgid_r(gid: gid_t, grp: *group, buf: [*]u8, buflen: usize, result: *?*group) c_int;
+    extern "c" fn __posix_getgrnam_r(name: [*:0]const u8, grp: *group, buf: [*]u8, buflen: usize, result: *?*group) c_int;
+    extern "c" fn __posix_getpwnam_r(name: [*:0]const u8, pwd: *passwd, buf: [*]u8, buflen: usize, result: *?*passwd) c_int;
+    extern "c" fn __posix_getpwuid_r(uid: uid_t, pwd: *passwd, buf: [*]u8, buflen: usize, result: *?*passwd) c_int;
+    extern "c" fn __posix_sigwait(set: ?*sigset_t, sig: ?*c_int) c_int;
+    extern "c" fn __xnet_recvmsg(sockfd: fd_t, msg: *msghdr, flags: u32) isize;
+    extern "c" fn __xnet_sendmsg(sockfd: fd_t, msg: *const msghdr_const, flags: u32) isize;
 
     extern "c" fn __libc_current_sigrtmin() c_int;
     extern "c" fn __libc_current_sigrtmax() c_int;
