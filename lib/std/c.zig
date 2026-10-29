@@ -9770,7 +9770,7 @@ pub const NSIG = switch (native_os) {
     .haiku => 65,
     .netbsd, .freebsd => 32,
     .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos => darwin.NSIG,
-    .illumos => 75,
+    .illumos => 74,
     // https://github.com/SerenityOS/serenity/blob/046c23f567a17758d762a33bdf04bacbfd088f9f/Kernel/API/POSIX/signal_numbers.h#L42
     .openbsd, .serenity => 33,
     .dragonfly => 64,
