@@ -10158,7 +10158,7 @@ pub const NOTE = switch (native_os) {
         pub const EXIT_DETAIL = 0x02000000;
         /// mask for signal & exit status
         pub const PDATAMASK = 0x000fffff;
-        pub const PCTRLMASK = 0xf0000000;
+        pub const PCTRLMASK = 0xfff00000;
         pub const EXIT_DETAIL_MASK = 0x00070000;
         pub const EXIT_DECRYPTFAIL = 0x00010000;
         pub const EXIT_MEMORY = 0x00020000;
