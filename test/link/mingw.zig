@@ -23,7 +23,6 @@ pub fn addCases(ctx: *LinkContext) void {
         const lib = case.addLibrary(.static, .{
             .name = "lib",
             .name_prefix = false,
-            .name_target = false,
         });
         lib.root_module.addObject(obj);
 

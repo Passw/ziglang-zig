@@ -6,7 +6,6 @@ pub fn addCases(ctx: *LinkContext) void {
         const obj1 = case.addObject(.{
             .name = "obj1",
             .name_prefix = false,
-            .name_target = false,
             .use_llvm = true,
             .use_lld = true,
             .c_source_bytes =
@@ -20,7 +19,6 @@ pub fn addCases(ctx: *LinkContext) void {
         const obj2 = case.addObject(.{
             .name = "this_is_a_long_name",
             .name_prefix = false,
-            .name_target = false,
             .zig_source_bytes =
             \\fn fooWeak() callconv(.c) usize {
             \\    return 0xaabbccddaabbccdd;
@@ -37,14 +35,12 @@ pub fn addCases(ctx: *LinkContext) void {
         const lib = case.addLibrary(.static, .{
             .name = "lib",
             .name_prefix = false,
-            .name_target = false,
         });
         lib.root_module.addObject(obj1);
         lib.root_module.addObject(obj2);
 
         case.verifyObjdump(lib.getEmittedBin(), &.{
             "-s",
-            "--elements=file-type",
             "--symbols",
             "--only-symbol=foo",
         }, .{ .use_llvm = true });
@@ -126,7 +122,6 @@ pub fn addCases(ctx: *LinkContext) void {
     if (ctx.includeTest("dynamic-lib-code")) |case| {
         const lib = case.addLibrary(.dynamic, .{
             .name = "lib",
-            .name_target = false,
             .zig_source_bytes =
             \\export fn foo1() callconv(.c) u64 {
             \\    return 0x1122334411223344;
@@ -173,7 +168,6 @@ pub fn addCases(ctx: *LinkContext) void {
     if (ctx.includeTest("dynamic-lib-data")) |case| {
         const lib = case.addLibrary(.dynamic, .{
             .name = "lib",
-            .name_target = false,
             .zig_source_bytes =
             \\export var foo_array: [2]u16 = .{ 0xffff, 0xabcd };
             \\export var foo_strong: usize = 0x1122334411223344;
@@ -284,7 +278,6 @@ pub fn addCases(ctx: *LinkContext) void {
 
         const lib1 = case.addLibrary(.dynamic, .{
             .name = "lib1",
-            .name_target = false,
             .zig_source_bytes =
             \\export fn foo() u8 {
             \\    return 43;
@@ -294,7 +287,6 @@ pub fn addCases(ctx: *LinkContext) void {
 
         const lib2 = case.addLibrary(.dynamic, .{
             .name = "lib2",
-            .name_target = false,
             .zig_source_bytes =
             \\export fn foo() u8 {
             \\    return 42;

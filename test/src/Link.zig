@@ -31,15 +31,8 @@ pub const Case = struct {
     prefix: []const u8,
 
     fn resolveName(self: *const Case, overlay: *const OverlayOptions) []const u8 {
-        if (!overlay.name_prefix and !overlay.name_target)
-            return overlay.name;
-
-        if (overlay.name_prefix == overlay.name_target)
-            return self.ctx.b.fmt("{s}-{s}-{s}", .{ self.prefix, overlay.name, self.ctx.target_desc })
-        else if (overlay.name_prefix)
-            return self.ctx.b.fmt("{s}-{s}", .{ self.prefix, overlay.name })
-        else
-            return self.ctx.b.fmt("{s}-{s}", .{ overlay.name, self.ctx.target_desc });
+        if (!overlay.name_prefix) return overlay.name;
+        return self.ctx.b.fmt("{s}-{s}", .{ self.prefix, overlay.name });
     }
 
     pub fn addLibrary(
@@ -253,10 +246,6 @@ const OverlayOptions = struct {
     /// Prefix the name with the test case prefix.
     /// Unset if names with specific lengths are needed.
     name_prefix: bool = true,
-    /// Prefix the name with `target_desc`.
-    /// Can be unset when the snapshot needs to contain the name,
-    /// so that snapshots can alias between targets.
-    name_target: bool = true,
     asm_source_bytes: ?[]const u8 = null,
     c_source_bytes: ?[]const u8 = null,
     c_source_flags: []const []const u8 = &.{},
