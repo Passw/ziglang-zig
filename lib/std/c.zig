@@ -11246,7 +11246,7 @@ pub extern "c" fn port_dissociate(port: port_t, source: u32, object: usize) c_in
 pub extern "c" fn port_send(port: port_t, events: u32, user_var: ?*anyopaque) c_int;
 pub extern "c" fn port_sendn(
     ports: [*]port_t,
-    errors: []u32,
+    errors: [*]u32,
     num_ports: u32,
     events: u32,
     user_var: ?*anyopaque,
@@ -11254,7 +11254,7 @@ pub extern "c" fn port_sendn(
 pub extern "c" fn port_get(port: port_t, event: *port_event, timeout: ?*timespec) c_int;
 pub extern "c" fn port_getn(
     port: port_t,
-    event_list: []port_event,
+    event_list: [*]port_event,
     max_events: u32,
     events_retrieved: *u32,
     timeout: ?*timespec,
