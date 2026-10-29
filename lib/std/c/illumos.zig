@@ -19,7 +19,6 @@ comptime {
     assert(builtin.os.tag == .illumos); // Prevent access of std.c symbols on wrong OS.
 }
 
-pub extern "c" fn pthread_setname_np(thread: pthread_t, name: [*:0]const u8, arg: ?*anyopaque) c_int;
 pub extern "c" fn sysconf(sc: c_int) i64;
 
 pub const major_t = u32;
