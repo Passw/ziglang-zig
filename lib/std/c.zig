@@ -1992,9 +1992,9 @@ pub const RLIM = switch (native_os) {
     },
     .illumos => struct {
         /// No limit
-        pub const INFINITY: rlim_t = (1 << 63) - 3;
-        pub const SAVED_MAX: rlim_t = (1 << 63) - 2;
-        pub const SAVED_CUR: rlim_t = (1 << 63) - 1;
+        pub const INFINITY: rlim_t = maxInt(rlim_t) - 2;
+        pub const SAVED_MAX: rlim_t = maxInt(rlim_t) - 1;
+        pub const SAVED_CUR: rlim_t = maxInt(rlim_t);
     },
     else => void,
 };
