@@ -2872,14 +2872,14 @@ pub const SIG = switch (native_os) {
         pub const HOLD: ?Sigaction.handler_fn = @ptrFromInt(2);
 
         pub const WORDS = 4;
-        pub const MAXSIG = 75;
+        pub const MAXSIG = 73;
 
         pub const BLOCK = 1;
         pub const UNBLOCK = 2;
         pub const SETMASK = 3;
 
         pub const RTMIN = 42;
-        pub const RTMAX = 74;
+        pub const RTMAX = 73;
 
         pub inline fn IDX(sig: usize) usize {
             return sig - 1;
