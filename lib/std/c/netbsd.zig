@@ -31,7 +31,7 @@ pub extern "c" fn ___lwp_park60(
 ) c_int;
 
 pub extern "c" fn _lwp_unpark(lwp: lwpid_t, hint: ?*const anyopaque) c_int;
-pub extern "c" fn _lwp_unpark_all(targets: [*]const lwpid_t, ntargets: usize, hint: ?*const anyopaque) c_int;
+pub extern "c" fn _lwp_unpark_all(targets: [*]const lwpid_t, ntargets: usize, hint: ?*const anyopaque) isize;
 
 pub const TCIFLUSH = 1;
 pub const TCOFLUSH = 2;
