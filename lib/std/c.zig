@@ -11328,6 +11328,7 @@ pub extern "c" fn pthread_rwlock_unlock(rwl: *pthread_rwlock_t) callconv(.c) E;
 pub const pthread_t = switch (native_os) {
     // https://github.com/SerenityOS/serenity/blob/b98f537f117b341788023ab82e0c11ca9ae29a57/Kernel/API/POSIX/sys/types.h#L64
     .serenity => c_int,
+    .illumos => c_uint,
     else => *opaque {},
 };
 pub const FILE = opaque {};
