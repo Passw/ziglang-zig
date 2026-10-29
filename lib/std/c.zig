@@ -7433,7 +7433,8 @@ pub const dirent = switch (native_os) {
     else => void,
 };
 pub const MAXNAMLEN = switch (native_os) {
-    .netbsd, .illumos => 511,
+    .netbsd => 511,
+    .illumos => 512,
     // https://github.com/SerenityOS/serenity/blob/1262a7d1424d0d2e89d80644409721cbf056ab17/Kernel/API/POSIX/dirent.h#L37
     .haiku, .serenity => NAME_MAX,
     .openbsd => 255,
