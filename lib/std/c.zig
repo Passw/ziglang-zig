@@ -10571,7 +10571,7 @@ pub const HWCAP = switch (native_os) {
         },
     },
     .illumos => switch (native_arch) {
-        .x86, .x86_64 => struct {
+        .x86_64 => struct {
             pub const FPU = 1 << 0;
             pub const TSC = 1 << 1;
             pub const CX8 = 1 << 2;
