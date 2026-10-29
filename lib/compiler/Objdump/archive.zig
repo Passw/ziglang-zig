@@ -47,12 +47,16 @@ pub fn dump(d: *Objdump) Objdump.Error!void {
 
     var sysv_long_names: ?[]u8 = null;
 
+    // Key is file offset of header. Allocated into `d.gpa`.
+    var coff_sorted_members: std.array_hash_map.Auto(u64, CoffSortedMember) = .empty;
+    defer coff_sorted_members.deinit(d.gpa);
+
     while (true) {
         const header_off = d.logicalPos();
         // Endianness is irrelevant here because this is a text format (so no multi-byte integers).
         const hdr = r.takeStruct(std.elf.ar_hdr, .native) catch |err| switch (err) {
             error.EndOfStream => {
-                if (d.atEnd()) return;
+                if (d.atEnd()) break;
                 return d.fail("unexpected eof in archive header", .{});
             },
             else => |e| return e,
@@ -238,7 +242,7 @@ pub fn dump(d: *Objdump) Objdump.Error!void {
                     d.limited_reader = &limited_reader;
                     d.seek_base = member_off;
                     d.input_name = "second archive symbol table";
-                    parseWindowsSecondSymbolTable(d) catch |err| switch (err) {
+                    parseWindowsSecondSymbolTable(d, &coff_sorted_members) catch |err| switch (err) {
                         error.AlreadyReported => {},
                         error.EndOfStream => switch (d.fail("contents truncated", .{})) {
                             error.AlreadyReported => {},
@@ -339,7 +343,7 @@ pub fn dump(d: *Objdump) Objdump.Error!void {
             try w.writeByte('\n');
         }
 
-        {
+        if (coff_sorted_members.count() == 0) {
             assert(d.limited_reader == null);
             assert(d.seek_base == 0);
             defer {
@@ -364,8 +368,48 @@ pub fn dump(d: *Objdump) Objdump.Error!void {
                 // If parsing this archive member failed, that's fine; we can still do the next one.
                 error.AlreadyReported => {},
             };
+        } else {
+            const ptr = coff_sorted_members.getPtr(header_off) orelse {
+                return d.fail(
+                    "member offset '{d}' does not exist in second archive symbol table",
+                    .{header_off},
+                );
+            };
+            ptr.* = .{
+                .size = size,
+                .name = try std.fmt.allocPrint(arena, "{s}({s})", .{
+                    archive_input_name,
+                    object_name,
+                }),
+            };
         }
         try d.seekTo(std.mem.alignForward(u64, member_off + size, 2));
+    }
+
+    for (coff_sorted_members.keys(), coff_sorted_members.values()) |header_offset, member| {
+        const member_offset = header_offset + @sizeOf(std.elf.ar_hdr);
+        try d.seekTo(member_offset);
+        assert(d.limited_reader == null);
+        assert(d.seek_base == 0);
+        defer {
+            d.limited_reader = null;
+            d.seek_base = 0;
+            d.input_name = archive_input_name;
+        }
+        var buf: [4096]u8 = undefined;
+        var limited_reader: Io.Reader.Limited = .init(
+            &d.raw_file_reader.interface,
+            .limited64(member.size),
+            &buf,
+        );
+        d.limited_reader = &limited_reader;
+        d.seek_base = member_offset;
+        d.input_name = member.name;
+        d.dumpNonArchive() catch |err| switch (err) {
+            else => |e| return e,
+            // If parsing this archive member failed, that's fine; we can still do the next one.
+            error.AlreadyReported => {},
+        };
     }
 }
 
@@ -418,7 +462,10 @@ fn parseSysVSymbolTable(d: *Objdump, comptime Int: type) (Objdump.Error || error
     try w.writeByte('\n');
 }
 
-fn parseWindowsSecondSymbolTable(d: *Objdump) (Objdump.Error || error{EndOfStream})!void {
+fn parseWindowsSecondSymbolTable(
+    d: *Objdump,
+    sorted_members: *std.array_hash_map.Auto(u64, CoffSortedMember),
+) (Objdump.Error || error{EndOfStream})!void {
     const gpa = d.gpa;
     const r = d.reader();
     const w = d.w;
@@ -437,6 +484,10 @@ fn parseWindowsSecondSymbolTable(d: *Objdump) (Objdump.Error || error{EndOfStrea
     const symbol_member_indices = try r.readSliceEndianAlloc(gpa, u16, num_symbols, .little);
     defer gpa.free(symbol_member_indices);
 
+    if (d.opts.exports_sort) {
+        try sorted_members.ensureUnusedCapacity(gpa, member_offsets.len);
+    }
+
     try w.print("  {s: >6}  {s: ^18}  {s}\n", .{ "member", "member offset", "symbol name" });
     for (symbol_member_indices) |member_index| {
         const name = r.takeSentinel(0) catch |err| switch (err) {
@@ -448,6 +499,9 @@ fn parseWindowsSecondSymbolTable(d: *Objdump) (Objdump.Error || error{EndOfStrea
         };
         if (member_index == 0 or member_index > num_members) {
             return d.fail("symbol {q} has out-of-range member index '{d}'", .{ name, member_index });
+        }
+        if (d.opts.exports_sort) {
+            sorted_members.putAssumeCapacity(member_offsets[member_index - 1], .init);
         }
         for (d.opts.symbol_filters) |filter| {
             if (std.mem.find(u8, name, filter) != null) break;
@@ -462,7 +516,20 @@ fn parseWindowsSecondSymbolTable(d: *Objdump) (Objdump.Error || error{EndOfStrea
     }
 
     try w.writeByte('\n');
+
+    if (d.opts.exports_sort) {
+        // If any members were empty, they were never added to `sorted_members`; do that now.
+        for (member_offsets) |member_offset| {
+            sorted_members.putAssumeCapacity(member_offset, .init);
+        }
+    }
 }
+
+const CoffSortedMember = struct {
+    size: u64,
+    name: []const u8,
+    const init: CoffSortedMember = .{ .size = 0, .name = "" };
+};
 
 const std = @import("std");
 const assert = std.debug.assert;
