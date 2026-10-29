@@ -7226,7 +7226,6 @@ pub const utsname = switch (native_os) {
         release: [256:0]u8,
         version: [256:0]u8,
         machine: [256:0]u8,
-        domainname: [256:0]u8,
     },
     .openbsd, .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos => extern struct {
         sysname: [255:0]u8,
