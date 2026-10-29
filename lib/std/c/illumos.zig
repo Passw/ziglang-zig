@@ -36,6 +36,13 @@ pub const SETCONTEXT = 1;
 pub const GETUSTACK = 2;
 pub const SETUSTACK = 3;
 
+pub const TCSA = enum(c_uint) {
+    NOW = 0x540e,
+    DRAIN = 0x540f,
+    FLUSH = 0x5410,
+    _,
+};
+
 pub const POSIX_FADV = struct {
     pub const NORMAL = 0;
     pub const RANDOM = 1;

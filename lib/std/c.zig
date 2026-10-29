@@ -3796,7 +3796,10 @@ pub const IOCPARM_MASK = switch (native_os) {
     .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos => 0x1fff,
     else => void,
 };
-pub const TCSA = std.posix.TCSA;
+pub const TCSA = switch (native_os) {
+    .illumos => illumos.TCSA,
+    else => std.posix.TCSA,
+};
 pub const TFD = switch (native_os) {
     .linux => linux.TFD,
     else => void,
