@@ -115,6 +115,7 @@ pub const Reader = struct {
         .wasi => @sizeOf(std.os.wasi.dirent_t) +
             std.mem.alignForward(usize, max_name_bytes, @alignOf(std.os.wasi.dirent_t)),
         .openbsd => std.c.S.BLKSIZE,
+        .haiku => @offsetOf(std.c.DirEnt, "name") + max_name_bytes + 1,
         else => if (builtin.link_libc) @sizeOf(std.c.dirent) else std.mem.alignForward(usize, max_name_bytes, @alignOf(usize)),
     };
 
