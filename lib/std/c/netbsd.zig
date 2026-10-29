@@ -80,7 +80,7 @@ pub const _ksiginfo = extern struct {
                 pe_lwp: lwpid_t,
             },
         },
-    } align(@sizeOf(usize)),
+    },
 };
 
 pub const E = enum(u16) {
