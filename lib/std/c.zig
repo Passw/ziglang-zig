@@ -11958,7 +11958,6 @@ const private = struct {
     extern "c" fn getdents(fd: c_int, buf_ptr: [*]u8, nbytes: usize) switch (native_os) {
         else => c_int,
         .freebsd => isize,
-        .illumos => usize,
     };
     extern "c" fn getpwent() ?*passwd;
     extern "c" fn getpwnam(name: [*:0]const u8) ?*passwd;
