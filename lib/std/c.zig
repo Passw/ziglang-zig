@@ -8144,12 +8144,7 @@ pub const pthread_rwlock_t = switch (native_os) {
     },
     .netbsd => extern struct {
         magic: c_uint = 0x99990009,
-        interlock: switch (builtin.cpu.arch) {
-            .aarch64, .aarch64_be, .m68k, .sparc, .sparc64, .x86, .x86_64 => u8,
-            .arm, .armeb, .powerpc => c_int,
-            .mips, .mipsel, .mips64, .mips64el => c_uint,
-            else => unreachable,
-        } = 0,
+        interlock: pthread_spin_t = 0,
         rblocked_first: ?*u8 = null,
         rblocked_last: ?*u8 = null,
         wblocked_first: ?*u8 = null,
