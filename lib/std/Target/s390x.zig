@@ -197,7 +197,9 @@ pub const all_features = blk: {
     result[@backingInt(Feature.msa4)] = .{
         .llvm_name = "message-security-assist-extension4",
         .description = "Assume that the message-security-assist extension facility 4 is installed",
-        .dependencies = featureSet(&[_]Feature{}),
+        .dependencies = featureSet(&[_]Feature{
+            .msa3,
+        }),
     };
     result[@backingInt(Feature.msa5)] = .{
         .llvm_name = "message-security-assist-extension5",
@@ -222,7 +224,6 @@ pub const all_features = blk: {
         .llvm_name = "message-security-assist-extension9",
         .description = "Assume that the message-security-assist extension facility 9 is installed",
         .dependencies = featureSet(&[_]Feature{
-            .msa3,
             .msa4,
         }),
     };
@@ -348,7 +349,6 @@ pub const cpu = struct {
             .hiword,
             .iacc,
             .loc,
-            .msa3,
             .msa4,
             .popcnt,
             .rrbm,
@@ -370,7 +370,6 @@ pub const cpu = struct {
             .loc,
             .loc2,
             .lzr,
-            .msa3,
             .msa4,
             .msa5,
             .popcnt,
@@ -512,7 +511,6 @@ pub const cpu = struct {
             .hiword,
             .iacc,
             .loc,
-            .msa3,
             .msa4,
             .popcnt,
             .rrbm,
@@ -538,7 +536,6 @@ pub const cpu = struct {
             .loc,
             .loc2,
             .lzr,
-            .msa3,
             .msa4,
             .msa5,
             .popcnt,
@@ -675,7 +672,6 @@ pub const cpu = struct {
             .hiword,
             .iacc,
             .loc,
-            .msa3,
             .msa4,
             .popcnt,
             .rrbm,
@@ -693,7 +689,6 @@ pub const cpu = struct {
             .hiword,
             .iacc,
             .loc,
-            .msa3,
             .msa4,
             .popcnt,
             .rrbm,

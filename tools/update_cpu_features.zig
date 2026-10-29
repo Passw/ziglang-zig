@@ -6115,6 +6115,7 @@ const targets = [_]ArchTarget{
             .{
                 .llvm_name = "message-security-assist-extension4",
                 .zig_name = "msa4",
+                .extra_deps = &.{"msa3"},
             },
             .{
                 .llvm_name = "message-security-assist-extension5",
