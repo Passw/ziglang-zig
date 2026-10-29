@@ -8281,12 +8281,12 @@ pub const Kevent = switch (native_os) {
         udata: usize,
     },
     .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos => extern struct {
-        ident: usize,
+        ident: usize align(4),
         filter: i16,
         flags: u16,
         fflags: u32,
-        data: isize,
-        udata: usize,
+        data: isize align(4),
+        udata: usize align(4),
 
         // sys/types.h on macos uses #pragma pack(4) so these checks are
         // to make sure the struct is laid out the same. These values were
@@ -8298,6 +8298,8 @@ pub const Kevent = switch (native_os) {
             assert(@offsetOf(@This(), "fflags") == 12);
             assert(@offsetOf(@This(), "data") == 16);
             assert(@offsetOf(@This(), "udata") == 24);
+            assert(@sizeOf(@This()) == 32);
+            assert(@alignOf(@This()) == 4);
         }
     },
     .freebsd => extern struct {
