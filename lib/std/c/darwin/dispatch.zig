@@ -71,7 +71,7 @@ pub inline fn get_main_queue() queue_main_t {
 pub const queue_priority_t = enum(c_long) {
     HIGH = 2,
     DEFAULT = 0,
-    LOW = -1,
+    LOW = -2,
     BACKGROUND = std.math.minInt(i16),
     _,
 };
