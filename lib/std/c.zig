@@ -8010,6 +8010,7 @@ pub const pthread_spinlock_t = switch (native_os) {
         spin: pthread_spin_t,
         pts_flags: c_int,
     },
+    .illumos => pthread_mutex_t,
     .windows => isize,
     else => c_int,
 };
