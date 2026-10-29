@@ -8207,7 +8207,7 @@ pub const pthread_key_t = switch (native_os) {
     .linux, .emscripten => c_uint,
     .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos => c_ulong,
     // https://github.com/SerenityOS/serenity/blob/b98f537f117b341788023ab82e0c11ca9ae29a57/Kernel/API/POSIX/sys/types.h#L65
-    .dragonfly, .freebsd, .openbsd, .haiku, .illumos, .serenity => c_int,
+    .dragonfly, .freebsd, .netbsd, .openbsd, .haiku, .illumos, .serenity => c_int,
     else => void,
 };
 
