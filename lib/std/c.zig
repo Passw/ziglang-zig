@@ -10396,7 +10396,10 @@ pub const MFD = switch (native_os) {
 
 // Unix-like systems
 pub const DIR = opaque {};
-pub extern "c" fn opendir(pathname: [*:0]const u8) ?*DIR;
+pub const opendir = switch (native_os) {
+    .netbsd => private.__opendir30,
+    else => private.opendir,
+};
 pub extern "c" fn fdopendir(fd: c_int) ?*DIR;
 pub extern "c" fn rewinddir(dp: *DIR) void;
 pub extern "c" fn closedir(dp: *DIR) c_int;
@@ -10444,13 +10447,28 @@ pub const fstatat = switch (native_os) {
 
 pub extern "c" fn statx(dirfd: fd_t, path: [*:0]const u8, flags: u32, mask: linux.STATX, buf: *linux.Statx) c_int;
 
-pub extern "c" fn getpwent() ?*passwd;
+pub const getpwent = switch (native_os) {
+    .netbsd => private.__getpwent50,
+    else => private.getpwent,
+};
 pub extern "c" fn endpwent() void;
 pub extern "c" fn setpwent() void;
-pub extern "c" fn getpwnam(name: [*:0]const u8) ?*passwd;
-pub extern "c" fn getpwnam_r(name: [*:0]const u8, pwd: *passwd, buf: [*]u8, buflen: usize, result: *?*passwd) c_int;
-pub extern "c" fn getpwuid(uid: uid_t) ?*passwd;
-pub extern "c" fn getpwuid_r(uid: uid_t, pwd: *passwd, buf: [*]u8, buflen: usize, result: *?*passwd) c_int;
+pub const getpwnam = switch (native_os) {
+    .netbsd => private.__getpwnam50,
+    else => private.getpwnam,
+};
+pub const getpwnam_r = switch (native_os) {
+    .netbsd => private.__getpwnam_r50,
+    else => private.getpwnam_r,
+};
+pub const getpwuid = switch (native_os) {
+    .netbsd => private.__getpwuid50,
+    else => private.getpwuid,
+};
+pub const getpwuid_r = switch (native_os) {
+    .netbsd => private.__getpwuid_r50,
+    else => private.getpwuid_r,
+};
 pub extern "c" fn getgrent() ?*group;
 pub extern "c" fn setgrent() void;
 pub extern "c" fn endgrent() void;
@@ -10752,6 +10770,7 @@ pub const readdir = switch (native_os) {
         .x86_64 => private.@"readdir$INODE64",
         else => private.readdir,
     },
+    .netbsd => private.__readdir30,
     .windows => {},
     else => private.readdir,
 };
@@ -10767,7 +10786,7 @@ pub const sched_yield = switch (native_os) {
 };
 
 pub const sigaction = switch (native_os) {
-    .netbsd => private.__sigaction14,
+    .netbsd => private.__sigaction_siginfo,
     else => private.sigaction,
 };
 
@@ -10810,13 +10829,22 @@ pub const sigfillset = switch (native_os) {
     else => private.sigfillset,
 };
 
-pub const sigaddset = private.sigaddset;
+pub const sigaddset = switch (native_os) {
+    .netbsd => private.__sigaddset14,
+    else => private.sigaddset,
+};
 pub const sigemptyset = switch (native_os) {
     .netbsd => private.__sigemptyset14,
     else => private.sigemptyset,
 };
-pub const sigdelset = private.sigdelset;
-pub const sigismember = private.sigismember;
+pub const sigdelset = switch (native_os) {
+    .netbsd => private.__sigdelset14,
+    else => private.sigdelset,
+};
+pub const sigismember = switch (native_os) {
+    .netbsd => private.__sigismember14,
+    else => private.sigismember,
+};
 
 pub const sigprocmask = switch (native_os) {
     .netbsd => private.__sigprocmask14,
@@ -10839,6 +10867,7 @@ pub const stat = switch (native_os) {
         .x86_64 => private.@"stat$INODE64",
         else => private.stat,
     },
+    .netbsd => private.__stat50,
     else => private.stat,
 };
 
@@ -11083,8 +11112,14 @@ pub extern "c" fn calloc(usize, usize) ?*anyopaque;
 pub extern "c" fn realloc(?*anyopaque, usize) ?*anyopaque;
 pub extern "c" fn free(?*anyopaque) void;
 
-pub extern "c" fn futimes(fd: fd_t, times: ?*[2]timeval) c_int;
-pub extern "c" fn utimes(path: [*:0]const u8, times: ?*[2]timeval) c_int;
+pub const futimes = switch (native_os) {
+    .netbsd => private.__futimes50,
+    else => private.futimes,
+};
+pub const utimes = switch (native_os) {
+    .netbsd => private.__utimes50,
+    else => private.utimes,
+};
 
 pub extern "c" fn utimensat(dirfd: fd_t, pathname: [*:0]const u8, times: ?*const [2]timespec, flags: u32) c_int;
 pub extern "c" fn futimens(fd: fd_t, times: ?*const [2]timespec) c_int;
@@ -11370,7 +11405,10 @@ pub const LC = switch (native_os) {
     },
 };
 
-pub extern "c" fn setlocale(category: LC, locale: ?[*:0]const u8) ?[*:0]const u8;
+pub const setlocale = switch (native_os) {
+    .netbsd => private.__setlocale50,
+    else => private.setlocale,
+};
 
 pub const max_align_t = if (native_abi == .msvc or native_abi == .itanium)
     f64
@@ -11900,12 +11938,18 @@ const private = struct {
     extern "c" fn fork() c_int;
     extern "c" fn fstat(fd: fd_t, buf: *Stat) c_int;
     extern "c" fn fstatat(dirfd: fd_t, path: [*:0]const u8, buf: *Stat, flag: u32) c_int;
+    extern "c" fn futimes(fd: fd_t, times: ?*[2]timeval) c_int;
     extern "c" fn getdirentries(fd: fd_t, buf_ptr: [*]u8, nbytes: usize, basep: *i64) if (native_os == .dragonfly) c_int else isize;
     extern "c" fn getdents(fd: c_int, buf_ptr: [*]u8, nbytes: usize) switch (native_os) {
         else => c_int,
         .freebsd => isize,
         .illumos => usize,
     };
+    extern "c" fn getpwent() ?*passwd;
+    extern "c" fn getpwnam(name: [*:0]const u8) ?*passwd;
+    extern "c" fn getpwnam_r(name: [*:0]const u8, pwd: *passwd, buf: [*]u8, buflen: usize, result: *?*passwd) c_int;
+    extern "c" fn getpwuid(uid: uid_t) ?*passwd;
+    extern "c" fn getpwuid_r(uid: uid_t, pwd: *passwd, buf: [*]u8, buflen: usize, result: *?*passwd) c_int;
     extern "c" fn getpid() pid_t;
     extern "c" fn getrusage(who: c_int, usage: *rusage) c_int;
     extern "c" fn gettimeofday(noalias tv: ?*timeval, noalias tz: ?*timezone) c_int;
@@ -11916,6 +11960,7 @@ const private = struct {
     extern "c" fn msync(addr: *align(page_size) const anyopaque, len: usize, flags: c_int) c_int;
     extern "c" fn mremap(addr: ?*align(page_size) const anyopaque, old_len: usize, new_len: usize, flags: MREMAP, ...) *anyopaque;
     extern "c" fn nanosleep(rqtp: *const timespec, rmtp: ?*timespec) c_int;
+    extern "c" fn opendir(pathname: [*:0]const u8) ?*DIR;
     extern "c" fn pipe2(fds: *[2]fd_t, flags: O) c_int;
     extern "c" fn read(fd: fd_t, buf: [*]u8, nbyte: usize) isize;
     extern "c" fn readdir(dir: *DIR) ?*dirent;
@@ -11933,6 +11978,7 @@ const private = struct {
     ) EAI;
     extern "c" fn sendfile(out_fd: fd_t, in_fd: fd_t, offset: ?*off_t, count: usize) isize;
     extern "c" fn sendmmsg(sockfd: fd_t, msgvec: [*]mmsghdr, n: c_uint, flags: u32) c_int;
+    extern "c" fn setlocale(category: LC, locale: ?[*:0]const u8) ?[*:0]const u8;
     extern "c" fn sigaction(sig: SIG, noalias act: ?*const Sigaction, noalias oact: ?*Sigaction) c_int;
     extern "c" fn sigdelset(set: ?*sigset_t, signo: SIG) c_int;
     extern "c" fn sigaddset(set: ?*sigset_t, signo: SIG) c_int;
@@ -11946,6 +11992,7 @@ const private = struct {
     extern "c" fn sysconf(sc: c_int) c_long;
     extern "c" fn shm_open(name: [*:0]const u8, flag: c_int, mode: mode_t) c_int;
     extern "c" fn umask(mode: mode_t) mode_t;
+    extern "c" fn utimes(path: [*:0]const u8, times: ?*[2]timeval) c_int;
     extern "c" fn wait4(pid: pid_t, status: ?*c_int, options: c_int, ru: ?*rusage) pid_t;
     extern "c" fn write(fd: fd_t, buf: [*]const u8, nbyte: usize) isize;
 
@@ -12000,19 +12047,32 @@ const private = struct {
     extern "c" fn __clock_getres50(clk_id: clockid_t, tp: *timespec) c_int;
     extern "c" fn __clock_gettime50(clk_id: clockid_t, tp: *timespec) c_int;
     extern "c" fn __fstat50(fd: fd_t, buf: *Stat) c_int;
+    extern "c" fn __futimes50(fd: fd_t, times: ?*[2]timeval) c_int;
+    extern "c" fn __getpwent50() ?*passwd;
+    extern "c" fn __getpwnam50(name: [*:0]const u8) ?*passwd;
+    extern "c" fn __getpwnam_r50(name: [*:0]const u8, pwd: *passwd, buf: [*]u8, buflen: usize, result: *?*passwd) c_int;
+    extern "c" fn __getpwuid50(uid: uid_t) ?*passwd;
+    extern "c" fn __getpwuid_r50(uid: uid_t, pwd: *passwd, buf: [*]u8, buflen: usize, result: *?*passwd) c_int;
     extern "c" fn __getrusage50(who: c_int, usage: *rusage) c_int;
     extern "c" fn __gettimeofday50(noalias tv: ?*timeval, noalias tz: ?*timezone) c_int;
     extern "c" fn __libc_thr_yield() c_int;
     extern "c" fn __msync13(addr: *align(page_size) const anyopaque, len: usize, flags: c_int) c_int;
     extern "c" fn __nanosleep50(rqtp: *const timespec, rmtp: ?*timespec) c_int;
-    extern "c" fn __sigaction14(sig: SIG, noalias act: ?*const Sigaction, noalias oact: ?*Sigaction) c_int;
+    extern "c" fn __opendir30(pathname: [*:0]const u8) ?*DIR;
+    extern "c" fn __readdir30(dir: *DIR) ?*dirent;
+    extern "c" fn __setlocale50(category: LC, locale: ?[*:0]const u8) ?[*:0]const u8;
+    extern "c" fn __sigaction_siginfo(sig: SIG, noalias act: ?*const Sigaction, noalias oact: ?*Sigaction) c_int;
+    extern "c" fn __sigaddset14(set: ?*sigset_t, signo: SIG) c_int;
+    extern "c" fn __sigdelset14(set: ?*sigset_t, signo: SIG) c_int;
     extern "c" fn __sigemptyset14(set: ?*sigset_t) c_int;
     extern "c" fn __sigfillset14(set: ?*sigset_t) c_int;
+    extern "c" fn __sigismember14(set: ?*const sigset_t, signo: SIG) c_int;
     extern "c" fn __sigprocmask14(how: c_int, noalias set: ?*const sigset_t, noalias oset: ?*sigset_t) c_int;
     extern "c" fn __socket30(domain: c_uint, sock_type: c_uint, protocol: c_uint) c_int;
-    extern "c" fn __stat50(path: [*:0]const u8, buf: *Stat) c_int;
+    extern "c" fn __stat50(noalias path: [*:0]const u8, noalias buf: *Stat) c_int;
     extern "c" fn __getdents30(fd: c_int, buf_ptr: [*]u8, nbytes: usize) c_int;
     extern "c" fn __sigaltstack14(ss: ?*const stack_t, old_ss: ?*stack_t) c_int;
+    extern "c" fn __utimes50(path: [*:0]const u8, times: ?*[2]timeval) c_int;
     extern "c" fn __wait450(pid: pid_t, status: ?*c_int, options: c_int, ru: ?*rusage) pid_t;
 
     extern "c" fn __libc_current_sigrtmin() c_int;
