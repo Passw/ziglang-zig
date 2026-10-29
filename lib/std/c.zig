@@ -11366,6 +11366,16 @@ pub extern "c" fn setsid() pid_t;
 /// - https://git.musl-libc.org/cgit/musl/tree/include/locale.h?id=ab31e9d6a0fa7c5c408856c89df2dfb12c344039#n18
 /// - https://sourceware.org/git/?p=glibc.git;a=blob;f=locale/bits/locale.h;h=0fcbb66114be5fef0577dc9047256eb508c45919;hb=c90cfce849d010474e8cccf3e5bff49a2c8b141f#l26
 pub const LC = switch (native_os) {
+    .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos => enum(c_int) {
+        ALL = 0,
+        COLLATE = 1,
+        CTYPE = 2,
+        MONETARY = 3,
+        NUMERIC = 4,
+        TIME = 5,
+        MESSAGES = 6,
+        _,
+    },
     // https://github.com/SerenityOS/serenity/blob/fe4f3879551f2fdd8a24de06b88f4450e2f3b93d/Userland/Libraries/LibC/locale.h#L14-L29
     .serenity => enum(c_int) {
         ALL = 0,
