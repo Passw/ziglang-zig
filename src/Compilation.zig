@@ -6681,7 +6681,7 @@ pub fn addCCArgs(
         });
 
         if (target.cpu.arch.isMips() and fabi == .hard) {
-            try argv.appendSlice(if (target.cpu.has(.mips, .single_float))
+            try argv.appendSlice(if (target.cpu.has(.mips, .fpu_s) and !target.cpu.has(.mips, .fpu_d))
                 &.{ "-msingle-float", "-mno-odd-spreg" }
             else if (target.cpu.arch.isMips64() or target.cpu.hasAny(.mips, &.{ .mips32r6, .msa }))
                 &.{ "-mfp64", "-modd-spreg" }
@@ -6821,6 +6821,15 @@ pub fn addCCArgs(
                     "-target-feature",
                     xclang,
                     "-crbits",
+                });
+            }
+
+            if (target.cpu.arch == .x86c16) {
+                for (xclang_flags) |xclang| for ([_][]const u8{ "+16bit-mode", "-32bit-mode" }) |feature| try argv.appendSlice(&.{
+                    xclang,
+                    "-target-feature",
+                    xclang,
+                    feature,
                 });
             }
 
