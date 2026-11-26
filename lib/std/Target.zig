@@ -2770,15 +2770,17 @@ pub const DynamicLinker = struct {
     /// Contains the memory used to store the dynamic linker path. This field
     /// should not be used directly. See `get` and `set`. This field exists so
     /// that this API requires no allocator.
-    buffer: [255]u8,
+    buffer: [max_len]u8,
 
     /// Used to construct the dynamic linker path. This field should not be used
     /// directly. See `get` and `set`.
     len: u8,
 
+    pub const max_len = 255;
+
     pub const none: DynamicLinker = .{ .buffer = undefined, .len = 0 };
 
-    /// Asserts that the length is less than or equal to 255 bytes.
+    /// Asserts that the length is less than or equal to `max_len`.
     pub fn init(maybe_path: ?[]const u8) DynamicLinker {
         var dl: DynamicLinker = undefined;
         dl.set(maybe_path);
@@ -2796,14 +2798,14 @@ pub const DynamicLinker = struct {
         return if (dl.len > 0) dl.buffer[0..dl.len] else null;
     }
 
-    /// Asserts that the length is less than or equal to 255 bytes.
+    /// Asserts that the length is less than or equal to `max_len`.
     pub fn set(dl: *DynamicLinker, maybe_path: ?[]const u8) void {
         const path = maybe_path orelse "";
         @memcpy(dl.buffer[0..path.len], path);
         dl.len = @intCast(path.len);
     }
 
-    /// Asserts that the length is less than or equal to 255 bytes.
+    /// Asserts that the length is less than or equal to `max_len`.
     pub fn setFmt(dl: *DynamicLinker, comptime fmt_str: []const u8, args: anytype) !void {
         dl.len = @intCast((try std.mem.print(&dl.buffer, fmt_str, args)).len);
     }
