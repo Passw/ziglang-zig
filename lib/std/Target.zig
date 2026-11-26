@@ -331,6 +331,8 @@ pub const Os = struct {
     pub const LinuxVersionRange = struct {
         range: std.SemanticVersion.Range,
         glibc: std.SemanticVersion,
+        // TODO: Remove this default field value on the next `zig1.wasm` update.
+        musl: std.SemanticVersion = .{ .major = 1, .minor = 2, .patch = 3 },
         /// Android API level.
         android: u32,
 
@@ -480,7 +482,20 @@ pub const Os = struct {
                             for (std.zig.target.available_libcs) |libc| {
                                 if (libc.os != tag or libc.arch != arch or libc.abi != abi) continue;
 
-                                if (libc.glibc_min) |min| {
+                                if (libc.libc_min) |min| {
+                                    if (min.order(default_min) == .gt) break :blk min;
+                                }
+                            }
+
+                            break :blk default_min;
+                        },
+                        .musl = blk: {
+                            const default_min: std.SemanticVersion = .{ .major = 1, .minor = 2, .patch = 3 };
+
+                            for (std.zig.target.available_libcs) |libc| {
+                                if (libc.os != tag or libc.arch != arch or libc.abi != abi) continue;
+
+                                if (libc.libc_min) |min| {
                                     if (min.order(default_min) == .gt) break :blk min;
                                 }
                             }
@@ -721,6 +736,13 @@ pub const Os = struct {
                 .none, .semver, .windows => null,
                 .hurd => |h| h.glibc,
                 .linux => |l| l.glibc,
+            };
+        }
+
+        pub fn muslLibCVersion(range: TaggedVersionRange) ?std.SemanticVersion {
+            return switch (range) {
+                .none, .semver, .hurd, .windows => null,
+                .linux => |l| l.musl,
             };
         }
     };
@@ -2580,6 +2602,8 @@ pub fn printZigTriple(target: *const Target, w: *std.Io.Writer) std.Io.Writer.Er
     }
     if (target.isGnuLibC())
         try w.print("-{t}.{f}", .{ target.abi, Query.PrintVersion{ .version = version_range.gnuLibCVersion().? } })
+    else if (target.isMuslLibC())
+        try w.print("-{t}.{f}", .{ target.abi, Query.PrintVersion{ .version = version_range.muslLibCVersion().? } })
     else if (target.isBionicLibC())
         try w.print("-{t}.{d}", .{ target.abi, target.os.version_range.linux.android })
     else

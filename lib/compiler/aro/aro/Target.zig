@@ -1696,7 +1696,7 @@ pub fn standardDynamicLinkerPath(target: *const Target) std.Target.DynamicLinker
 
 /// Parse ABI string in `<abi>(.?<version>)?` format.
 ///
-/// Poplates `abi`, `glibc_version` and `android_api_level` fields of `result`.
+/// Poplates `abi`, `glibc_version`, `musl_version` and `android_api_level` fields of `result`.
 ///
 /// If given `version_string` will be populated when `InvalidAbiVersion` or `InvalidApiVerson` is returned.
 pub fn parseAbi(result: *std.Target.Query, text: []const u8, version_string: ?*[]const u8) !void {
@@ -1725,6 +1725,10 @@ pub fn parseAbi(result: *std.Target.Query, text: []const u8, version_string: ?*[
     if (version_text.len != 0) {
         if (abi.isGnu()) {
             result.glibc_version = std.Target.Query.parseVersion(version_text) catch |er| switch (er) {
+                error.Overflow, error.InvalidVersion => return error.InvalidAbiVersion,
+            };
+        } else if (abi.isMusl()) {
+            result.musl_version = std.Target.Query.parseVersion(version_text) catch |er| switch (er) {
                 error.Overflow, error.InvalidVersion => return error.InvalidAbiVersion,
             };
         } else if (abi.isAndroid()) {

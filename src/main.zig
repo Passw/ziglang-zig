@@ -3775,10 +3775,10 @@ fn buildOutputType(
 
                 for (std.zig.target.available_libcs) |t| {
                     if (t.arch == target.cpu.arch and t.os == target.os.tag) {
-                        // If there's a `glibc_min`, there's also an `os_ver`.
-                        if (t.glibc_min) |glibc_min| {
+                        // If there's a `libc_min`, there's also an `os_ver`.
+                        if (t.libc_min) |libc_min| {
                             std.log.info("zig can provide libc for related target {t}-{t}.{f}-{t}.{d}.{d}", .{
-                                t.arch, t.os, t.os_ver.?, t.abi, glibc_min.major, glibc_min.minor,
+                                t.arch, t.os, t.os_ver.?, t.abi, libc_min.major, libc_min.minor,
                             });
                         } else if (t.os_ver) |os_ver| {
                             std.log.info("zig can provide libc for related target {t}-{t}.{f}-{t}", .{

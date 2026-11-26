@@ -580,6 +580,13 @@ pub fn resolveTargetQuery(
         }
     }
 
+    if (query.musl_version) |musl| {
+        switch (os.tag.versionRangeTag()) {
+            inline .linux => |t| @field(os.version_range, @tagName(t)).musl = musl,
+            else => {},
+        }
+    }
+
     if (query.android_api_level) |lvl| {
         os.version_range.linux.android = lvl;
     }
@@ -626,6 +633,13 @@ pub fn resolveTargetQuery(
                     query.glibc_version == null)
                 {
                     @field(result_ver_range, @tagName(t)).glibc = @field(abi_ver_range, @tagName(t)).glibc;
+                }
+
+                if (t == .linux and
+                    @field(result_ver_range, @tagName(t)).musl.order(@field(abi_ver_range, @tagName(t)).musl) == .lt and
+                    query.musl_version == null)
+                {
+                    @field(result_ver_range, @tagName(t)).musl = @field(abi_ver_range, @tagName(t)).musl;
                 }
             },
             .windows => if (!result_ver_range.windows.min.isAtLeast(abi_ver_range.windows.min)) {

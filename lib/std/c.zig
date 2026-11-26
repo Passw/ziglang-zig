@@ -77,6 +77,7 @@ comptime {
 ///   equal to `version.major`, ignoring other components.
 /// * If linking a libc other than these, returns `false`.
 pub inline fn versionCheck(comptime version: std.SemanticVersion) bool {
+    // TODO: This function needs to be redesigned to allow testing OS version, musl version, etc.
     return comptime blk: {
         if (!builtin.link_libc) break :blk false;
         if (native_abi.isMusl()) break :blk true;
