@@ -123,7 +123,7 @@ pub fn detectApiLevel(
         error.Overflow,
         error.InvalidCharacter,
         => {
-            diags.android_api_level = .{ .invalid_output = .{ .output = try arena.dupe(u8, output) } };
+            diags.android_api_level = .{ .invalid_output = try arena.dupe(u8, output) };
             return null;
         },
     };
