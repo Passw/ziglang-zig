@@ -640,7 +640,7 @@ pub fn isLibCLibName(target: *const std.Target, name: []const u8) bool {
         return false;
     }
 
-    if (target.abi.isGnu() or target.abi.isMusl()) {
+    if (target.abi.isGnu() or target.abi.isMusl() or target.abi.isOpenHarmony()) {
         if (eqlIgnoreCase(ignore_case, name, "m"))
             return true;
         if (eqlIgnoreCase(ignore_case, name, "rt"))
@@ -655,7 +655,7 @@ pub fn isLibCLibName(target: *const std.Target, name: []const u8) bool {
             return true;
     }
 
-    if (target.abi.isMusl()) {
+    if (target.abi.isMusl() or target.abi.isOpenHarmony()) {
         if (eqlIgnoreCase(ignore_case, name, "crypt"))
             return true;
         if (eqlIgnoreCase(ignore_case, name, "xnet"))

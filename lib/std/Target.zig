@@ -1029,7 +1029,7 @@ pub const Abi = enum {
             .muslsf,
             .muslx32,
             => true,
-            else => abi.isOpenHarmony(),
+            else => false,
         };
     }
 
