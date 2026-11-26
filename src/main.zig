@@ -4111,6 +4111,7 @@ fn createModule(
             .result = target,
             .is_native_os = target_query.isNativeOs(),
             .is_native_abi = target_query.isNativeAbi(),
+            .is_explicit_musl_version = target_query.musl_version != null,
             .is_explicit_dynamic_linker = target_query.dynamic_linker != null,
         };
     };
@@ -5057,6 +5058,7 @@ fn jitCmdInner(
         .result = std.zig.resolveTargetQueryOrFatal(io, arena, target_query),
         .is_native_os = true,
         .is_native_abi = true,
+        .is_explicit_musl_version = false,
         .is_explicit_dynamic_linker = false,
     };
 

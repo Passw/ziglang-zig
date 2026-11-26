@@ -290,6 +290,12 @@ pub fn resolve(options: Options) ResolveError!Config {
                 break :b .dynamic;
             }
 
+            // We only bundle a single version of static musl, so if the user specified an explicit
+            // musl version, they almost certainly want dynamic linking.
+            if (target.isMuslLibC() and options.resolved_target.is_explicit_musl_version) {
+                break :b .dynamic;
+            }
+
             // When targeting systems where the kernel and libc are developed alongside each other,
             // dynamic linking is the better default; static libc may contain code that requires
             // the very latest kernel version.
