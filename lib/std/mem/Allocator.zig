@@ -583,7 +583,7 @@ inline fn isInstantiable(Type: type) bool {
                 } else false;
             },
             .spirv => |spirv| switch (spirv) {
-                .sampler, .image, .sampled_image => false,
+                .sampler, .image, .sampled_image, .acceleration_structure, .ray_query => false,
                 .runtime_array => true,
             },
         };

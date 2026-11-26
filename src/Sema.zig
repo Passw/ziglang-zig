@@ -17233,7 +17233,7 @@ fn zirTypeInfo(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Ai
             const spirv_tag_ty = spirv_union_ty.unionTagType(zcu).?;
             const spirv_tag_val = try pt.enumValueFieldIndex(spirv_tag_ty, @backingInt(spirv_info.flags.tag));
             const spirv_payload_val: Value = switch (spirv_info.flags.tag) {
-                .sampler => .void,
+                .sampler, .acceleration_structure, .ray_query => .void,
                 .sampled_image, .runtime_array => .fromInterned(spirv_info.ty),
                 .image => image: {
                     const image_ty = try sema.getStdLangType(src, .@"Type.Spirv.Image");
@@ -20963,10 +20963,10 @@ fn zirReifySpirvType(
 
     const tag = try sema.interpretStdLangType(block, src, .fromInterned(union_val.tag), @typeInfo(std.lang.Type.Spirv).@"union".tag_type.?);
     const ip_data: InternPool.Key.SpirvType = switch (tag) {
-        .sampler => .{
+        .sampler, .acceleration_structure, .ray_query => .{
             .ty = .none,
             .flags = .{
-                .tag = .sampler,
+                .tag = tag,
                 .usage = .unknown,
                 .format = .unknown,
                 .dim = .@"1d",

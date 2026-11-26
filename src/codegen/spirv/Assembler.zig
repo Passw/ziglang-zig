@@ -295,6 +295,16 @@ fn processTypeInstruction(ass: *Assembler) !AsmValue {
             try section.emit(gpa, .OpTypeSampledImage, .{ .id_result = result_id, .image_type = image_type });
             break :blk result_id;
         },
+        .OpTypeAccelerationStructureKHR => blk: {
+            const result_id = cg.allocId();
+            try section.emit(gpa, .OpTypeAccelerationStructureKHR, .{ .id_result = result_id });
+            break :blk result_id;
+        },
+        .OpTypeRayQueryKHR => blk: {
+            const result_id = cg.allocId();
+            try section.emit(gpa, .OpTypeRayQueryKHR, .{ .id_result = result_id });
+            break :blk result_id;
+        },
         .OpTypeFunction => blk: {
             const param_operands = operands[2..];
             const return_type = try ass.resolveRefId(operands[1].ref_id);

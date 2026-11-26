@@ -2365,6 +2365,8 @@ fn resolveType(cg: *CodeGen, ty: Type, repr: Repr) Error!Id {
                         } });
                     }
                 },
+                .acceleration_structure => try cg.module.emit(gpa, .OpTypeAccelerationStructureKHR, .{ .id_result = result_id }),
+                .ray_query => try cg.module.emit(gpa, .OpTypeRayQueryKHR, .{ .id_result = result_id }),
             }
             return result_id;
         },
@@ -5511,7 +5513,7 @@ fn airCall(cg: *CodeGen, inst: Air.Inst.Index, modifier: std.lang.CallModifier) 
         if (!arg_ty.hasRuntimeBits(zcu)) continue;
 
         if (arg_ty.zigTypeTag(zcu) == .pointer and !arg_ty.isSlice(zcu) and
-            !arg_ty.childType(zcu).hasRuntimeBits(zcu) and
+            arg_ty.childType(zcu).classify(zcu) == .one_possible_value and
             cg.storageClass(arg_ty.ptrAddressSpace(zcu)) == .function)
         {
             // in logical addressing, pointer arguments to function calls

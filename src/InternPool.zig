@@ -2166,7 +2166,7 @@ pub const Key = union(enum) {
             is_arrayed: bool,
             is_multisampled: bool,
 
-            _: u16 = 0,
+            _: u15 = 0,
         };
     };
 

@@ -643,6 +643,8 @@ pub fn print(ty: Type, writer: *std.Io.Writer, zcu: *Zcu, ctx: ?*Comparison) std
                     try print(Type.fromInterned(info.ty), writer, zcu, ctx);
                     try writer.writeAll(")");
                 },
+                .acceleration_structure => try writer.writeAll("@SpirvType(.acceleration_structure)"),
+                .ray_query => try writer.writeAll("@SpirvType(.ray_query)"),
             }
         },
         .func_type => |fn_info| {

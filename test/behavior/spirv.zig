@@ -23,6 +23,8 @@ const StorageImage = @SpirvType(.{ .image = .{
     .access = .unknown,
 } });
 const RuntimeArray = @SpirvType(.{ .runtime_array = u32 });
+const AccelerationStructure = @SpirvType(.acceleration_structure);
+const RayQuery = @SpirvType(.ray_query);
 
 const RuntimeArrayBuf = extern struct { e: RuntimeArray };
 
@@ -88,4 +90,9 @@ test "@SpirvType equality" {
     } }) != Image);
     try expect(@SpirvType(.{ .runtime_array = u32 }) != @SpirvType(.{ .runtime_array = u8 }));
     try expect(@SpirvType(.sampler) != @SpirvType(.{ .runtime_array = u32 }));
+    try expect(@SpirvType(.acceleration_structure) == AccelerationStructure);
+    try expect(@SpirvType(.ray_query) == RayQuery);
+    try expect(@SpirvType(.acceleration_structure) != @SpirvType(.ray_query));
+    try expect(@SpirvType(.acceleration_structure) != Sampler);
+    try expect(@SpirvType(.ray_query) != Sampler);
 }

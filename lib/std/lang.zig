@@ -876,11 +876,13 @@ pub const Type = union(enum) {
 
     /// This data structure is used by the Zig language code generation and
     /// therefore must be kept in sync with the compiler implementation.
-    pub const Spirv = union(enum(u2)) {
+    pub const Spirv = union(enum(u3)) {
         sampler,
         image: Image,
         sampled_image: type,
         runtime_array: type,
+        acceleration_structure,
+        ray_query,
 
         pub const Image = struct {
             usage: Usage,

@@ -2959,6 +2959,9 @@ pub const Object = struct {
                 const elem_ty = try o.lowerType(.fromInterned(spirv_ty.ty), .in_memory);
                 return o.builder.arrayType(0, elem_ty);
             },
+            // these don't have first-class LLVM support but can be constructed directly from their opcodes
+            .acceleration_structure => return o.builder.targetType(try o.builder.string("spirv.Type"), &.{}, &.{ 5341, 0, 0 }),
+            .ray_query => return o.builder.targetType(try o.builder.string("spirv.Type"), &.{}, &.{ 4472, 0, 0 }),
         }
     }
 

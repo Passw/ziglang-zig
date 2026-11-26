@@ -660,6 +660,12 @@ fn testSpirv() !void {
 
     const runtime_array_info = @typeInfo(RuntimeArray);
     try expect(runtime_array_info.spirv.runtime_array == f32);
+
+    const acceleration_structure_info = @typeInfo(AccelerationStructure);
+    try expect(acceleration_structure_info.spirv.acceleration_structure == {});
+
+    const ray_query_info = @typeInfo(RayQuery);
+    try expect(ray_query_info.spirv.ray_query == {});
 }
 
 pub const Image = @SpirvType(.{ .image = .{
@@ -674,3 +680,5 @@ pub const Image = @SpirvType(.{ .image = .{
 pub const SampledImage = @SpirvType(.{ .sampled_image = Image });
 pub const Sampler = @SpirvType(.sampler);
 pub const RuntimeArray = @SpirvType(.{ .runtime_array = f32 });
+pub const AccelerationStructure = @SpirvType(.acceleration_structure);
+pub const RayQuery = @SpirvType(.ray_query);

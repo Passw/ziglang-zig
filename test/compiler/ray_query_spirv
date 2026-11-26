@@ -1,0 +1,75 @@
+#require no-matrix
+#zig build-obj {
+--name test
+-target spirv64-vulkan -mcpu vulkan_v1_2+ray_query_khr -fno-llvm
+-Mroot=test.zig
+#}
+
+#write test.zig {
+const AccelerationStructure = @SpirvType(.acceleration_structure);
+const RayQuery = @SpirvType(.ray_query);
+
+const tlas = @extern(*addrspace(.constant) const AccelerationStructure, .{
+    .name = "tlas",
+    .decoration = .{ .descriptor = .{ .set = 0, .binding = 0 } },
+});
+const hit_out = @extern(*addrspace(.output) u32, .{ .name = "hit", .decoration = .{ .location = 0 } });
+
+export fn main() callconv(.{ .spirv_fragment = .{} }) void {
+    const query = asm volatile (
+        \\%query = OpVariable %RayQueryPtr Function
+        : [query] "" (-> *RayQuery),
+        : [RayQueryPtr] "t" (*RayQuery),
+    );
+    rayQueryInitialize(query, tlas, 0, 0xff, .{ 0, 0, 0 }, 0.001, .{ 0, 0, 1 }, 1000.0);
+    while (rayQueryProceed(query)) {}
+    hit_out.* = rayQueryCommittedIntersectionType(query);
+}
+
+fn rayQueryInitialize(
+    query: *RayQuery,
+    accel: *addrspace(.constant) const AccelerationStructure,
+    flags: u32,
+    cull_mask: u32,
+    origin: @Vector(3, f32),
+    t_min: f32,
+    direction: @Vector(3, f32),
+    t_max: f32,
+) void {
+    asm volatile (
+        \\%as = OpLoad %AccelerationStructure %accel
+        \\OpRayQueryInitializeKHR %query %as %flags %cull_mask %origin %t_min %direction %t_max
+        :
+        : [AccelerationStructure] "t" (AccelerationStructure),
+          [accel] "" (accel),
+          [query] "" (query),
+          [flags] "" (flags),
+          [cull_mask] "" (cull_mask),
+          [origin] "" (origin),
+          [t_min] "" (t_min),
+          [direction] "" (direction),
+          [t_max] "" (t_max),
+    );
+}
+
+fn rayQueryProceed(query: *RayQuery) bool {
+    return asm volatile (
+        \\%ret = OpRayQueryProceedKHR %bool %query
+        : [ret] "" (-> bool),
+        : [bool] "t" (bool),
+          [query] "" (query),
+    );
+}
+
+fn rayQueryCommittedIntersectionType(query: *RayQuery) u32 {
+    return asm volatile (
+        \\%committed = OpConstant %u32 1
+        \\%ret = OpRayQueryGetIntersectionTypeKHR %u32 %query %committed
+        : [ret] "" (-> u32),
+        : [u32] "t" (u32),
+          [query] "" (query),
+    );
+}
+#}
+#update
+#check errors

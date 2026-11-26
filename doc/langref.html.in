@@ -6015,6 +6015,16 @@ fn cmpxchgWeakButNotAtomic(comptime T: type, ptr: *T, expected_value: T, new_val
                 It may only appear as the last field of an {#link|extern struct#}.
             </td>
           </tr>
+          <tr>
+            <th scope="row"><code>.acceleration_structure</code></th>
+            <td><code>OpTypeAccelerationStructureKHR</code></td>
+            <td>An opaque ray tracing acceleration structure</td>
+          </tr>
+          <tr>
+            <th scope="row"><code>.ray_query</code></th>
+            <td><code>OpTypeRayQueryKHR</code></td>
+            <td>An opaque ray query object</td>
+          </tr>
         </tbody>
       </table>
       </div>
