@@ -706,6 +706,7 @@ const AbiAndDynamicLinkerFromFileError = error{
     Unexpected,
     StaticElfFile,
     InvalidElfFile,
+    UnknownDynamicLinker,
 } || Io.Cancelable;
 
 /// In the past, this function attempted to use the executable's own binary if it was dynamically
@@ -889,6 +890,11 @@ fn detectAbiAndDynamicLinker(
             => break :failure .invalid_executable,
 
             error.StaticElfFile => break :failure .no_executable,
+
+            // We found a dynamic linker, but its name is not one that we recognize for this `arch`
+            // and `os`. That means we can't draw any useful conclusions about ABI from it, so just
+            // give up on detecting ABI and libc version.
+            error.UnknownDynamicLinker => return defaultAbiAndDynamicLinker(arch, os, query),
         };
 
         if (builtin.target.os.tag == .linux and result.abi.isAndroid() and query.android_api_level == null) {
@@ -972,6 +978,7 @@ fn abiAndDynamicLinkerFromFile(
     const look_for_ld = query.dynamic_linker == null;
 
     var got_dyn_section: bool = false;
+    var got_abi: bool = false;
     {
         var it = header.iterateProgramHeaders(file_reader);
         while (try it.next()) |phdr| switch (phdr.type) {
@@ -996,6 +1003,7 @@ fn abiAndDynamicLinkerFromFile(
                     if (std.mem.endsWith(u8, interp.get().?, fs.path.basename(ld_info.ld.get().?))) {
                         result.abi = ld_info.abi;
                         if (look_for_ld) result.dynamic_linker = interp;
+                        got_abi = true;
                         break;
                     }
                 }
@@ -1010,13 +1018,8 @@ fn abiAndDynamicLinkerFromFile(
         };
     }
 
-    if (look_for_ld and result.dynamic_linker.get() == null) {
-        result.dynamic_linker = .standard(arch, os.tag, result.abi);
-    }
-
-    if (!got_dyn_section) {
-        return error.StaticElfFile;
-    }
+    if (!got_dyn_section) return error.StaticElfFile;
+    if (!got_abi) return error.UnknownDynamicLinker;
 
     if (builtin.target.os.tag == .linux and result.abi.isGnu() and query.glibc_version == null) {
         // Since glibc 2.33, the dynamic linker contains the banner string just like libc.so.6.
